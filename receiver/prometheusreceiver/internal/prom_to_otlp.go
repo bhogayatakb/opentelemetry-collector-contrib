@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package internal // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver/internal"
 
@@ -19,8 +8,20 @@ import (
 
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
+	"go.opentelemetry.io/collector/featuregate"
 	"go.opentelemetry.io/collector/pdata/pcommon"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.25.0"
+	oldconventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+)
+
+const removeOldSemconvFeatureGateID = "receiver.prometheusreceiver.RemoveLegacyResourceAttributes"
+
+var removeOldSemconvFeatureGate = featuregate.GlobalRegistry().MustRegister(
+	removeOldSemconvFeatureGateID,
+	featuregate.StageAlpha,
+	featuregate.WithRegisterFromVersion("v0.101.0"),
+	featuregate.WithRegisterDescription("When enabled, the net.host.name, net.host.port, and http.scheme resource attributes are no longer added to metrics. Use server.address, server.port, and url.scheme instead."),
+	featuregate.WithRegisterReferenceURL("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/32814"),
 )
 
 // isDiscernibleHost checks if a host can be used as a value for the 'host.name' key.
@@ -50,13 +51,20 @@ func CreateResource(job, instance string, serviceDiscoveryLabels labels.Labels) 
 	}
 	resource := pcommon.NewResource()
 	attrs := resource.Attributes()
-	attrs.UpsertString(conventions.AttributeServiceName, job)
+	attrs.PutStr(conventions.AttributeServiceName, job)
 	if isDiscernibleHost(host) {
-		attrs.UpsertString(conventions.AttributeNetHostName, host)
+		if !removeOldSemconvFeatureGate.IsEnabled() {
+			attrs.PutStr(oldconventions.AttributeNetHostName, host)
+		}
+		attrs.PutStr(conventions.AttributeServerAddress, host)
 	}
-	attrs.UpsertString(conventions.AttributeServiceInstanceID, instance)
-	attrs.UpsertString(conventions.AttributeNetHostPort, port)
-	attrs.UpsertString(conventions.AttributeHTTPScheme, serviceDiscoveryLabels.Get(model.SchemeLabel))
+	attrs.PutStr(conventions.AttributeServiceInstanceID, instance)
+	if !removeOldSemconvFeatureGate.IsEnabled() {
+		attrs.PutStr(conventions.AttributeNetHostPort, port)
+		attrs.PutStr(conventions.AttributeHTTPScheme, serviceDiscoveryLabels.Get(model.SchemeLabel))
+	}
+	attrs.PutStr(conventions.AttributeServerPort, port)
+	attrs.PutStr(conventions.AttributeURLScheme, serviceDiscoveryLabels.Get(model.SchemeLabel))
 
 	addKubernetesResource(attrs, serviceDiscoveryLabels)
 
@@ -82,7 +90,7 @@ var kubernetesDiscoveryToResourceAttributes = map[string]string{
 func addKubernetesResource(attrs pcommon.Map, serviceDiscoveryLabels labels.Labels) {
 	for sdKey, attributeKey := range kubernetesDiscoveryToResourceAttributes {
 		if attr := serviceDiscoveryLabels.Get(sdKey); attr != "" {
-			attrs.UpsertString(attributeKey, attr)
+			attrs.PutStr(attributeKey, attr)
 		}
 	}
 	controllerName := serviceDiscoveryLabels.Get("__meta_kubernetes_pod_controller_name")
@@ -90,15 +98,15 @@ func addKubernetesResource(attrs pcommon.Map, serviceDiscoveryLabels labels.Labe
 	if controllerKind != "" && controllerName != "" {
 		switch controllerKind {
 		case "ReplicaSet":
-			attrs.UpsertString(conventions.AttributeK8SReplicaSetName, controllerName)
+			attrs.PutStr(conventions.AttributeK8SReplicaSetName, controllerName)
 		case "DaemonSet":
-			attrs.UpsertString(conventions.AttributeK8SDaemonSetName, controllerName)
+			attrs.PutStr(conventions.AttributeK8SDaemonSetName, controllerName)
 		case "StatefulSet":
-			attrs.UpsertString(conventions.AttributeK8SStatefulSetName, controllerName)
+			attrs.PutStr(conventions.AttributeK8SStatefulSetName, controllerName)
 		case "Job":
-			attrs.UpsertString(conventions.AttributeK8SJobName, controllerName)
+			attrs.PutStr(conventions.AttributeK8SJobName, controllerName)
 		case "CronJob":
-			attrs.UpsertString(conventions.AttributeK8SCronJobName, controllerName)
+			attrs.PutStr(conventions.AttributeK8SCronJobName, controllerName)
 		}
 	}
 }

@@ -1,6 +1,5 @@
 // Go API over pdh syscalls
 //go:build windows
-// +build windows
 
 package win_perf_counters // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/winperfcounters/internal/third_party/telegraf/win_perf_counters"
 
@@ -8,6 +7,7 @@ import (
 	"errors"
 	"syscall"
 	"time"
+	"unicode/utf16"
 	"unsafe"
 )
 
@@ -24,7 +24,6 @@ type PerformanceQuery interface {
 	AddCounterToQuery(counterPath string) (PDH_HCOUNTER, error)
 	AddEnglishCounterToQuery(counterPath string) (PDH_HCOUNTER, error)
 	GetCounterPath(counterHandle PDH_HCOUNTER) (string, error)
-	ExpandWildCardPath(counterPath string) ([]string, error)
 	GetFormattedCounterValueDouble(hCounter PDH_HCOUNTER) (float64, error)
 	GetFormattedCounterArrayDouble(hCounter PDH_HCOUNTER) ([]CounterValue, error)
 	CollectData() error
@@ -124,24 +123,6 @@ func (m *PerformanceQueryImpl) GetCounterPath(counterHandle PDH_HCOUNTER) (strin
 	return "", NewPdhError(ret)
 }
 
-// ExpandWildCardPath  examines local computer and returns those counter paths that match the given counter path which contains wildcard characters.
-func (m *PerformanceQueryImpl) ExpandWildCardPath(counterPath string) ([]string, error) {
-	var bufSize uint32
-	var buff []uint16
-	var ret uint32
-
-	if ret = PdhExpandWildCardPath(counterPath, nil, &bufSize); ret == PDH_MORE_DATA {
-		buff = make([]uint16, bufSize)
-		bufSize = uint32(len(buff))
-		ret = PdhExpandWildCardPath(counterPath, &buff[0], &bufSize)
-		if ret == ERROR_SUCCESS {
-			list := UTF16ToStringArray(buff)
-			return list, nil
-		}
-	}
-	return nil, NewPdhError(ret)
-}
-
 // GetFormattedCounterValueDouble computes a displayable value for the specified counter
 func (m *PerformanceQueryImpl) GetFormattedCounterValueDouble(hCounter PDH_HCOUNTER) (float64, error) {
 	var counterType uint32
@@ -168,7 +149,7 @@ func (m *PerformanceQueryImpl) GetFormattedCounterArrayDouble(hCounter PDH_HCOUN
 		buff := make([]byte, buffSize)
 
 		if ret = PdhGetFormattedCounterArrayDouble(hCounter, &buffSize, &itemCount, &buff[0]); ret == ERROR_SUCCESS {
-			items := (*[1 << 20]PDH_FMT_COUNTERVALUE_ITEM_DOUBLE)(unsafe.Pointer(&buff[0]))[:itemCount]
+			items := unsafe.Slice((*PDH_FMT_COUNTERVALUE_ITEM_DOUBLE)(unsafe.Pointer(&buff[0])), itemCount)
 			values := make([]CounterValue, 0, itemCount)
 			for _, item := range items {
 				if item.FmtValue.CStatus == PDH_CSTATUS_VALID_DATA || item.FmtValue.CStatus == PDH_CSTATUS_NEW_DATA {
@@ -209,24 +190,51 @@ func (m *PerformanceQueryImpl) IsVistaOrNewer() bool {
 	return PdhAddEnglishCounterSupported()
 }
 
+// ExpandWildCardPath examines local computer and returns those counter paths that match the given counter path which contains wildcard characters.
+func ExpandWildCardPath(counterPath string) ([]string, error) {
+	var bufSize uint32
+	var buff []uint16
+	var ret uint32
+
+	if ret = PdhExpandWildCardPath(counterPath, nil, &bufSize); ret == PDH_MORE_DATA {
+		buff = make([]uint16, bufSize)
+		bufSize = uint32(len(buff))
+		ret = PdhExpandWildCardPath(counterPath, &buff[0], &bufSize)
+		if ret == ERROR_SUCCESS {
+			list := UTF16ToStringArray(buff)
+			return list, nil
+		}
+	}
+	return nil, NewPdhError(ret)
+}
+
 // UTF16PtrToString converts Windows API LPTSTR (pointer to string) to go string
 func UTF16PtrToString(s *uint16) string {
 	if s == nil {
 		return ""
 	}
-	return syscall.UTF16ToString((*[1 << 29]uint16)(unsafe.Pointer(s))[0:])
+
+	len := 0
+	curPtr := unsafe.Pointer(s)
+	for *(*uint16)(curPtr) != 0 {
+		curPtr = unsafe.Pointer(uintptr(curPtr) + unsafe.Sizeof(*s))
+		len++
+	}
+
+	slice := unsafe.Slice(s, len)
+	return string(utf16.Decode(slice))
 }
 
-// UTF16ToStringArray converts list of Windows API NULL terminated strings  to go string array
+// UTF16ToStringArray converts list of Windows API NULL terminated strings to go string array
 func UTF16ToStringArray(buf []uint16) []string {
 	var strings []string
 	nextLineStart := 0
-	stringLine := UTF16PtrToString(&buf[0])
+	stringLine := syscall.UTF16ToString(buf)
 	for stringLine != "" {
 		strings = append(strings, stringLine)
 		nextLineStart += len([]rune(stringLine)) + 1
 		remainingBuf := buf[nextLineStart:]
-		stringLine = UTF16PtrToString(&remainingBuf[0])
+		stringLine = syscall.UTF16ToString(remainingBuf)
 	}
 	return strings
 }

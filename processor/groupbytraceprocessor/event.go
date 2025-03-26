@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package groupbytraceprocessor // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/groupbytraceprocessor"
 
@@ -22,11 +11,13 @@ import (
 	"sync"
 	"time"
 
-	"go.opencensus.io/stats"
-	"go.opencensus.io/tag"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 	"go.uber.org/zap"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/groupbytraceprocessor/internal/metadata"
 )
 
 const (
@@ -49,7 +40,7 @@ var (
 	seed = maphash.MakeSeed()
 
 	hashPool = sync.Pool{
-		New: func() interface{} {
+		New: func() any {
 			var hash maphash.Hash
 			hash.SetSeed(seed)
 			return &hash
@@ -57,11 +48,13 @@ var (
 	}
 )
 
-type eventType int
-type event struct {
-	typ     eventType
-	payload interface{}
-}
+type (
+	eventType int
+	event     struct {
+		typ     eventType
+		payload any
+	}
+)
 
 type tracesWithID struct {
 	id pcommon.TraceID
@@ -79,8 +72,8 @@ type eventMachine struct {
 	metricsCollectionInterval time.Duration
 	shutdownTimeout           time.Duration
 
-	logger *zap.Logger
-
+	logger          *zap.Logger
+	telemetry       *metadata.TelemetryBuilder
 	onTraceReceived func(td tracesWithID, worker *eventMachineWorker) error
 	onTraceExpired  func(traceID pcommon.TraceID, worker *eventMachineWorker) error
 	onTraceReleased func(rss []ptrace.ResourceSpans) error
@@ -93,9 +86,10 @@ type eventMachine struct {
 	closed       bool
 }
 
-func newEventMachine(logger *zap.Logger, bufferSize int, numWorkers int, numTraces int) *eventMachine {
+func newEventMachine(logger *zap.Logger, bufferSize int, numWorkers int, numTraces int, telemetry *metadata.TelemetryBuilder) *eventMachine {
 	em := &eventMachine{
 		logger:                    logger,
+		telemetry:                 telemetry,
 		workers:                   make([]*eventMachineWorker, numWorkers),
 		close:                     make(chan struct{}),
 		shutdownLock:              &sync.RWMutex{},
@@ -128,7 +122,7 @@ func (em *eventMachine) numEvents() int {
 func (em *eventMachine) periodicMetrics() {
 	numEvents := em.numEvents()
 	em.logger.Debug("recording current state of the queue", zap.Int("num-events", numEvents))
-	stats.Record(context.Background(), mNumEventsInQueue.M(int64(numEvents)))
+	em.telemetry.ProcessorGroupbytraceNumEventsInQueue.Record(context.Background(), int64(numEvents))
 
 	em.shutdownLock.RLock()
 	closed := em.closed
@@ -249,8 +243,7 @@ func workerIndexForTraceID(traceID pcommon.TraceID, numWorkers int) uint64 {
 		hashPool.Put(hash)
 	}()
 
-	bytes := traceID.Bytes()
-	_, _ = hash.Write(bytes[:])
+	_, _ = hash.Write(traceID[:])
 	return hash.Sum64() % uint64(numWorkers)
 }
 
@@ -298,9 +291,7 @@ func (em *eventMachine) handleEventWithObservability(event string, do func() err
 	start := time.Now()
 	succeeded, err := doWithTimeout(time.Second, do)
 	duration := time.Since(start)
-
-	ctx, _ := tag.New(context.Background(), tag.Upsert(tag.MustNewKey("event"), event))
-	stats.Record(ctx, mEventLatency.M(duration.Milliseconds()))
+	em.telemetry.ProcessorGroupbytraceEventLatency.Record(context.Background(), duration.Milliseconds(), metric.WithAttributeSet(attribute.NewSet(attribute.String("event", event))))
 
 	if err != nil {
 		em.logger.Error("failed to process event", zap.Error(err), zap.String("event", event))
@@ -365,17 +356,17 @@ func doWithTimeout(timeout time.Duration, do func() error) (bool, error) {
 func getTraceID(td ptrace.Traces) (pcommon.TraceID, error) {
 	rss := td.ResourceSpans()
 	if rss.Len() == 0 {
-		return pcommon.EmptyTraceID, errNoTraceID
+		return pcommon.NewTraceIDEmpty(), errNoTraceID
 	}
 
 	ilss := rss.At(0).ScopeSpans()
 	if ilss.Len() == 0 {
-		return pcommon.EmptyTraceID, errNoTraceID
+		return pcommon.NewTraceIDEmpty(), errNoTraceID
 	}
 
 	spans := ilss.At(0).Spans()
 	if spans.Len() == 0 {
-		return pcommon.EmptyTraceID, errNoTraceID
+		return pcommon.NewTraceIDEmpty(), errNoTraceID
 	}
 
 	return spans.At(0).TraceID(), nil

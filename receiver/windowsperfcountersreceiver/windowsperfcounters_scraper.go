@@ -1,19 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build windows
-// +build windows
 
 package windowsperfcountersreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/windowsperfcountersreceiver"
 
@@ -24,6 +12,7 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/scraper/scrapererror"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 
@@ -35,12 +24,13 @@ const instanceLabelName = "instance"
 type perfCounterMetricWatcher struct {
 	winperfcounters.PerfCounterWatcher
 	MetricRep
+	recreate bool
 }
 
 type newWatcherFunc func(string, string, string) (winperfcounters.PerfCounterWatcher, error)
 
-// scraper is the type that scrapes various host metrics.
-type scraper struct {
+// windowsPerfCountersScraper is the type that scrapes various host metrics.
+type windowsPerfCountersScraper struct {
 	cfg      *Config
 	settings component.TelemetrySettings
 	watchers []perfCounterMetricWatcher
@@ -49,11 +39,11 @@ type scraper struct {
 	newWatcher newWatcherFunc
 }
 
-func newScraper(cfg *Config, settings component.TelemetrySettings) *scraper {
-	return &scraper{cfg: cfg, settings: settings, newWatcher: winperfcounters.NewWatcher}
+func newScraper(cfg *Config, settings component.TelemetrySettings) *windowsPerfCountersScraper {
+	return &windowsPerfCountersScraper{cfg: cfg, settings: settings, newWatcher: winperfcounters.NewWatcher}
 }
 
-func (s *scraper) start(context.Context, component.Host) error {
+func (s *windowsPerfCountersScraper) start(context.Context, component.Host) error {
 	watchers, err := s.initWatchers()
 	if err != nil {
 		s.settings.Logger.Warn("some performance counters could not be initialized", zap.Error(err))
@@ -62,7 +52,7 @@ func (s *scraper) start(context.Context, component.Host) error {
 	return nil
 }
 
-func (s *scraper) initWatchers() ([]perfCounterMetricWatcher, error) {
+func (s *windowsPerfCountersScraper) initWatchers() ([]perfCounterMetricWatcher, error) {
 	var errs error
 	var watchers []perfCounterMetricWatcher
 
@@ -78,6 +68,7 @@ func (s *scraper) initWatchers() ([]perfCounterMetricWatcher, error) {
 				watcher := perfCounterMetricWatcher{
 					PerfCounterWatcher: pcw,
 					MetricRep:          MetricRep{Name: pcw.Path()},
+					recreate:           counterCfg.RecreateQuery,
 				}
 				if counterCfg.MetricRep.Name != "" {
 					watcher.MetricRep.Name = counterCfg.MetricRep.Name
@@ -94,7 +85,7 @@ func (s *scraper) initWatchers() ([]perfCounterMetricWatcher, error) {
 	return watchers, errs
 }
 
-func (s *scraper) shutdown(context.Context) error {
+func (s *windowsPerfCountersScraper) shutdown(context.Context) error {
 	var errs error
 	for _, watcher := range s.watchers {
 		err := watcher.Close()
@@ -105,7 +96,7 @@ func (s *scraper) shutdown(context.Context) error {
 	return errs
 }
 
-func (s *scraper) scrape(context.Context) (pmetric.Metrics, error) {
+func (s *windowsPerfCountersScraper) scrape(context.Context) (pmetric.Metrics, error) {
 	md := pmetric.NewMetrics()
 	metricSlice := md.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics()
 	now := pcommon.NewTimestampFromTime(time.Now())
@@ -121,27 +112,35 @@ func (s *scraper) scrape(context.Context) (pmetric.Metrics, error) {
 		builtMetric.SetUnit(metricCfg.Unit)
 
 		if (metricCfg.Sum != SumMetric{}) {
-			builtMetric.SetDataType(pmetric.MetricDataTypeSum)
-			builtMetric.Sum().SetIsMonotonic(metricCfg.Sum.Monotonic)
+			builtMetric.SetEmptySum().SetIsMonotonic(metricCfg.Sum.Monotonic)
 
 			switch metricCfg.Sum.Aggregation {
 			case "cumulative":
-				builtMetric.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+				builtMetric.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 			case "delta":
-				builtMetric.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityDelta)
+				builtMetric.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityDelta)
 			}
 		} else {
-			builtMetric.SetDataType(pmetric.MetricDataTypeGauge)
+			builtMetric.SetEmptyGauge()
 		}
 
 		metrics[name] = builtMetric
 	}
 
+	scrapeFailures := 0
 	for _, watcher := range s.watchers {
 		counterVals, err := watcher.ScrapeData()
 		if err != nil {
 			errs = multierr.Append(errs, err)
+			scrapeFailures++
 			continue
+		}
+
+		if watcher.recreate {
+			err := watcher.Reset()
+			if err != nil {
+				errs = multierr.Append(errs, err)
+			}
 		}
 
 		for _, val := range counterVals {
@@ -150,22 +149,41 @@ func (s *scraper) scrape(context.Context) (pmetric.Metrics, error) {
 				metric = builtmetric
 			} else {
 				metric = metricSlice.AppendEmpty()
-				metric.SetDataType(pmetric.MetricDataTypeGauge)
 				metric.SetName(watcher.MetricRep.Name)
 				metric.SetUnit("1")
+				metric.SetEmptyGauge()
 			}
 
 			initializeMetricDps(metric, now, val, watcher.MetricRep.Attributes)
 		}
 	}
+
+	// Drop metrics with no datapoints. This happens when configured counters don't exist on the host.
+	// This may result in a Metrics message with no metrics if all counters are missing.
+	metricSlice.RemoveIf(func(m pmetric.Metric) bool {
+		switch m.Type() {
+		case pmetric.MetricTypeGauge:
+			return m.Gauge().DataPoints().Len() == 0
+		case pmetric.MetricTypeSum:
+			return m.Sum().DataPoints().Len() == 0
+		default:
+			return false
+		}
+	})
+
+	if scrapeFailures != 0 && scrapeFailures != len(s.watchers) {
+		errs = scrapererror.NewPartialScrapeError(errs, scrapeFailures)
+	}
+
 	return md, errs
 }
 
 func initializeMetricDps(metric pmetric.Metric, now pcommon.Timestamp, counterValue winperfcounters.CounterValue,
-	attributes map[string]string) {
+	attributes map[string]string,
+) {
 	var dps pmetric.NumberDataPointSlice
 
-	if metric.DataType() == pmetric.MetricDataTypeGauge {
+	if metric.Type() == pmetric.MetricTypeGauge {
 		dps = metric.Gauge().DataPoints()
 	} else {
 		dps = metric.Sum().DataPoints()
@@ -173,16 +191,15 @@ func initializeMetricDps(metric pmetric.Metric, now pcommon.Timestamp, counterVa
 
 	dp := dps.AppendEmpty()
 	if counterValue.InstanceName != "" {
-		dp.Attributes().UpsertString(instanceLabelName, counterValue.InstanceName)
+		dp.Attributes().PutStr(instanceLabelName, counterValue.InstanceName)
 	}
-	if attributes != nil {
-		for attKey, attVal := range attributes {
-			dp.Attributes().UpsertString(attKey, attVal)
-		}
+
+	for attKey, attVal := range attributes {
+		dp.Attributes().PutStr(attKey, attVal)
 	}
 
 	dp.SetTimestamp(now)
-	dp.SetDoubleVal(counterValue.Value)
+	dp.SetDoubleValue(counterValue.Value)
 }
 
 func instancesFromConfig(oc ObjectConfig) []string {

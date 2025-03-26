@@ -1,16 +1,5 @@
-// Copyright 2019 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package awskinesisexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awskinesisexporter"
 
@@ -18,20 +7,18 @@ import (
 	"context"
 	"errors"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials/stscreds"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+	"github.com/aws/aws-sdk-go-v2/service/kinesis"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awskinesisexporter/internal/batch"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awskinesisexporter/internal/compress"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awskinesisexporter/internal/producer"
 )
 
@@ -41,38 +28,63 @@ type Exporter struct {
 	batcher  batch.Encoder
 }
 
-var (
-	_ component.TracesExporter  = (*Exporter)(nil)
-	_ component.MetricsExporter = (*Exporter)(nil)
-	_ component.LogsExporter    = (*Exporter)(nil)
-)
+// options is used to override the default shipped behavior
+// to allow for testing correct setup of components
+type options struct {
+	NewKinesisClient func(conf aws.Config, opts ...func(*kinesis.Options)) *kinesis.Client
+}
 
-func createExporter(c config.Exporter, log *zap.Logger) (*Exporter, error) {
+func createExporter(ctx context.Context, c component.Config, log *zap.Logger, opts ...func(opt *options)) (*Exporter, error) {
+	options := &options{
+		NewKinesisClient: kinesis.NewFromConfig,
+	}
+
+	for _, opt := range opts {
+		opt(options)
+	}
+
 	conf, ok := c.(*Config)
 	if !ok || conf == nil {
 		return nil, errors.New("incorrect config provided")
 	}
-	sess, err := session.NewSession(aws.NewConfig().WithRegion(conf.AWS.Region))
+
+	var configOpts []func(*awsconfig.LoadOptions) error
+	if conf.AWS.Region != "" {
+		configOpts = append(configOpts, func(lo *awsconfig.LoadOptions) error {
+			lo.Region = conf.AWS.Region
+			return nil
+		})
+	}
+
+	awsconf, err := awsconfig.LoadDefaultConfig(ctx, configOpts...)
 	if err != nil {
 		return nil, err
 	}
 
-	var cfgs []*aws.Config
+	var kinesisOpts []func(*kinesis.Options)
 	if conf.AWS.Role != "" {
-		cfgs = append(cfgs, &aws.Config{Credentials: stscreds.NewCredentials(sess, conf.AWS.Role)})
-	}
-	if conf.AWS.KinesisEndpoint != "" {
-		cfgs = append(cfgs, &aws.Config{Endpoint: aws.String(conf.AWS.KinesisEndpoint)})
+		kinesisOpts = append(kinesisOpts, func(o *kinesis.Options) {
+			roleProvider := stscreds.NewAssumeRoleProvider(
+				sts.NewFromConfig(awsconf),
+				conf.AWS.Role,
+			)
+			o.Credentials = aws.NewCredentialsCache(roleProvider)
+		})
 	}
 
-	producer, err := producer.NewBatcher(kinesis.New(sess, cfgs...), conf.AWS.StreamName,
+	if conf.AWS.KinesisEndpoint != "" {
+		kinesisOpts = append(kinesisOpts,
+			func(o *kinesis.Options) {
+				o.BaseEndpoint = aws.String(conf.AWS.KinesisEndpoint)
+			},
+		)
+	}
+
+	producer, err := producer.NewBatcher(
+		options.NewKinesisClient(awsconf, kinesisOpts...),
+		conf.AWS.StreamName,
 		producer.WithLogger(log),
 	)
-	if err != nil {
-		return nil, err
-	}
-
-	compressor, err := compress.NewCompressor(conf.Encoding.Compression)
 	if err != nil {
 		return nil, err
 	}
@@ -81,9 +93,8 @@ func createExporter(c config.Exporter, log *zap.Logger) (*Exporter, error) {
 		conf.Encoding.Name,
 		batch.WithMaxRecordSize(conf.MaxRecordSize),
 		batch.WithMaxRecordsPerBatch(conf.MaxRecordsPerBatch),
-		batch.WithCompression(compressor),
+		batch.WithCompressionType(conf.Compression),
 	)
-
 	if err != nil {
 		return nil, err
 	}
@@ -98,26 +109,13 @@ func createExporter(c config.Exporter, log *zap.Logger) (*Exporter, error) {
 	}, nil
 }
 
-// Start tells the exporter to start. The exporter may prepare for exporting
-// by connecting to the endpoint. Host parameter can be used for communicating
-// with the host after Start() has already returned. If error is returned by
-// Start() then the collector startup will be aborted.
-func (e Exporter) Start(ctx context.Context, _ component.Host) error {
+// start validates that the Kinesis stream is available.
+func (e Exporter) start(ctx context.Context, _ component.Host) error {
 	return e.producer.Ready(ctx)
 }
 
-// Capabilities implements the consumer interface.
-func (e Exporter) Capabilities() consumer.Capabilities {
-	return consumer.Capabilities{MutatesData: false}
-}
-
-// Shutdown is invoked during exporter shutdown.
-func (e Exporter) Shutdown(context.Context) error {
-	return nil
-}
-
 // ConsumeTraces receives a span batch and exports it to AWS Kinesis
-func (e Exporter) ConsumeTraces(ctx context.Context, td ptrace.Traces) error {
+func (e Exporter) consumeTraces(ctx context.Context, td ptrace.Traces) error {
 	bt, err := e.batcher.Traces(td)
 	if err != nil {
 		return err
@@ -125,7 +123,7 @@ func (e Exporter) ConsumeTraces(ctx context.Context, td ptrace.Traces) error {
 	return e.producer.Put(ctx, bt)
 }
 
-func (e Exporter) ConsumeMetrics(ctx context.Context, md pmetric.Metrics) error {
+func (e Exporter) consumeMetrics(ctx context.Context, md pmetric.Metrics) error {
 	bt, err := e.batcher.Metrics(md)
 	if err != nil {
 		return err
@@ -133,7 +131,7 @@ func (e Exporter) ConsumeMetrics(ctx context.Context, md pmetric.Metrics) error 
 	return e.producer.Put(ctx, bt)
 }
 
-func (e Exporter) ConsumeLogs(ctx context.Context, ld plog.Logs) error {
+func (e Exporter) consumeLogs(ctx context.Context, ld plog.Logs) error {
 	bt, err := e.batcher.Logs(ld)
 	if err != nil {
 		return err

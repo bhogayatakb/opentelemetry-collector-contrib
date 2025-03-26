@@ -1,38 +1,38 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package awsfirehosereceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsfirehosereceiver"
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/consumer/consumererror"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/receiver"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsfirehosereceiver/internal/unmarshaler"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsfirehosereceiver/internal/unmarshaler/cwmetricstream"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsfirehosereceiver/internal/unmarshaler/otlpmetricstream"
 )
+
+const defaultMetricsEncoding = cwmetricstream.TypeStr
 
 // The metricsConsumer implements the firehoseConsumer
 // to use a metrics consumer and unmarshaler.
 type metricsConsumer struct {
+	config   *Config
+	settings receiver.Settings
 	// consumer passes the translated metrics on to the
 	// next consumer.
 	consumer consumer.Metrics
-	// unmarshaler is the configured MetricsUnmarshaler
+	// unmarshaler is the configured pmetric.Unmarshaler
 	// to use when processing the records.
-	unmarshaler unmarshaler.MetricsUnmarshaler
+	unmarshaler pmetric.Unmarshaler
 }
 
 var _ firehoseConsumer = (*metricsConsumer)(nil)
@@ -41,54 +41,77 @@ var _ firehoseConsumer = (*metricsConsumer)(nil)
 // with a metricsConsumer.
 func newMetricsReceiver(
 	config *Config,
-	set component.ReceiverCreateSettings,
-	unmarshalers map[string]unmarshaler.MetricsUnmarshaler,
+	set receiver.Settings,
 	nextConsumer consumer.Metrics,
-) (component.MetricsReceiver, error) {
-	if nextConsumer == nil {
-		return nil, component.ErrNilNextConsumer
+) (receiver.Metrics, error) {
+	c := &metricsConsumer{
+		config:   config,
+		settings: set,
+		consumer: nextConsumer,
 	}
-
-	configuredUnmarshaler := unmarshalers[config.RecordType]
-	if configuredUnmarshaler == nil {
-		return nil, errUnrecognizedRecordType
-	}
-
-	mc := &metricsConsumer{
-		consumer:    nextConsumer,
-		unmarshaler: configuredUnmarshaler,
-	}
-
 	return &firehoseReceiver{
-		instanceID: config.ID(),
-		settings:   set,
-		config:     config,
-		consumer:   mc,
+		settings: set,
+		config:   config,
+		consumer: c,
 	}, nil
 }
 
-// Consume uses the configured unmarshaler to deserialize the records into a
-// single pmetric.Metrics. If there are common attributes available, then it will
-// attach those to each of the pcommon.Resources. It will send the final result
-// to the next consumer.
-func (mc *metricsConsumer) Consume(ctx context.Context, records [][]byte, commonAttributes map[string]string) (int, error) {
-	md, err := mc.unmarshaler.Unmarshal(records)
-	if err != nil {
-		return http.StatusBadRequest, err
-	}
-
-	if commonAttributes != nil {
-		for i := 0; i < md.ResourceMetrics().Len(); i++ {
-			rm := md.ResourceMetrics().At(i)
-			for k, v := range commonAttributes {
-				rm.Resource().Attributes().InsertString(k, v)
-			}
+func (c *metricsConsumer) Start(_ context.Context, host component.Host) error {
+	encoding := c.config.Encoding
+	if encoding == "" {
+		encoding = c.config.RecordType
+		if encoding == "" {
+			encoding = defaultMetricsEncoding
 		}
 	}
+	switch encoding {
+	case cwmetricstream.TypeStr:
+		// TODO: make cwmetrics an encoding extension
+		c.unmarshaler = cwmetricstream.NewUnmarshaler(c.settings.Logger, c.settings.BuildInfo)
+	case otlpmetricstream.TypeStr:
+		// TODO: make otlp_v1 an encoding extension
+		c.unmarshaler = otlpmetricstream.NewUnmarshaler(c.settings.Logger, c.settings.BuildInfo)
+	default:
+		unmarshaler, err := loadEncodingExtension[pmetric.Unmarshaler](host, encoding, "metrics")
+		if err != nil {
+			return fmt.Errorf("failed to load encoding extension: %w", err)
+		}
+		c.unmarshaler = unmarshaler
+	}
+	return nil
+}
 
-	err = mc.consumer.ConsumeMetrics(ctx, md)
-	if err != nil {
-		return http.StatusInternalServerError, err
+// Consume uses the configured unmarshaler to deserialize each record,
+// with each resulting pmetric.Metrics being sent to the next consumer
+// as they are unmarshalled.
+func (c *metricsConsumer) Consume(ctx context.Context, nextRecord nextRecordFunc, commonAttributes map[string]string) (int, error) {
+	for {
+		record, err := nextRecord()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		metrics, err := c.unmarshaler.UnmarshalMetrics(record)
+		if err != nil {
+			return http.StatusBadRequest, err
+		}
+
+		if commonAttributes != nil {
+			for i := 0; i < metrics.ResourceMetrics().Len(); i++ {
+				rm := metrics.ResourceMetrics().At(i)
+				for k, v := range commonAttributes {
+					if _, found := rm.Resource().Attributes().Get(k); !found {
+						rm.Resource().Attributes().PutStr(k, v)
+					}
+				}
+			}
+		}
+
+		if err := c.consumer.ConsumeMetrics(ctx, metrics); err != nil {
+			if consumererror.IsPermanent(err) {
+				return http.StatusBadRequest, err
+			}
+			return http.StatusServiceUnavailable, err
+		}
 	}
 	return http.StatusOK, nil
 }

@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package goldendataset // import "github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/goldendataset"
 
@@ -27,14 +16,14 @@ func GenerateMetrics(metricPairsFile string) ([]pmetric.Metrics, error) {
 	if err != nil {
 		return nil, err
 	}
-	var out []pmetric.Metrics
+	out := make([]pmetric.Metrics, 0, len(pictData))
 	for i, values := range pictData {
 		if i == 0 {
 			continue
 		}
 		metricInputs := PICTMetricInputs{
 			NumPtsPerMetric: PICTNumPtsPerMetric(values[0]),
-			MetricType:      PICTMetricDataType(values[1]),
+			MetricType:      PICTMetricType(values[1]),
 			NumPtLabels:     PICTNumPtLabels(values[2]),
 		}
 		cfg := pictToCfg(metricInputs)
@@ -65,33 +54,33 @@ func pictToCfg(inputs PICTMetricInputs) MetricsCfg {
 
 	switch inputs.MetricType {
 	case MetricTypeIntGauge:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeGauge
+		cfg.MetricDescriptorType = pmetric.MetricTypeGauge
 		cfg.MetricValueType = pmetric.NumberDataPointValueTypeInt
 	case MetricTypeMonotonicIntSum:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeSum
+		cfg.MetricDescriptorType = pmetric.MetricTypeSum
 		cfg.MetricValueType = pmetric.NumberDataPointValueTypeInt
 		cfg.IsMonotonicSum = true
 	case MetricTypeNonMonotonicIntSum:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeSum
+		cfg.MetricDescriptorType = pmetric.MetricTypeSum
 		cfg.MetricValueType = pmetric.NumberDataPointValueTypeInt
 		cfg.IsMonotonicSum = false
 	case MetricTypeDoubleGauge:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeGauge
+		cfg.MetricDescriptorType = pmetric.MetricTypeGauge
 		cfg.MetricValueType = pmetric.NumberDataPointValueTypeDouble
 	case MetricTypeMonotonicDoubleSum:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeSum
+		cfg.MetricDescriptorType = pmetric.MetricTypeSum
 		cfg.MetricValueType = pmetric.NumberDataPointValueTypeDouble
 		cfg.IsMonotonicSum = true
 	case MetricTypeNonMonotonicDoubleSum:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeSum
+		cfg.MetricDescriptorType = pmetric.MetricTypeSum
 		cfg.MetricValueType = pmetric.NumberDataPointValueTypeDouble
 		cfg.IsMonotonicSum = false
 	case MetricTypeDoubleExemplarsHistogram:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeHistogram
-		cfg.MetricValueType = pmetric.NumberDataPointValueTypeNone
+		cfg.MetricDescriptorType = pmetric.MetricTypeHistogram
+		cfg.MetricValueType = pmetric.NumberDataPointValueTypeEmpty
 	case MetricTypeIntExemplarsHistogram:
-		cfg.MetricDescriptorType = pmetric.MetricDataTypeHistogram
-		cfg.MetricValueType = pmetric.NumberDataPointValueTypeNone
+		cfg.MetricDescriptorType = pmetric.MetricTypeHistogram
+		cfg.MetricValueType = pmetric.NumberDataPointValueTypeEmpty
 	default:
 		panic("Should not happen, unsupported type " + string(inputs.MetricType))
 	}

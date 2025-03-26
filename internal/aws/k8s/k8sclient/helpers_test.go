@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package k8sclient
 
@@ -18,14 +7,13 @@ import (
 	"os"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
-type mockReflectorSyncChecker struct {
-}
+type mockReflectorSyncChecker struct{}
 
 func (m *mockReflectorSyncChecker) Check(_ cacheReflector, _ string) {
-
 }
 
 var kubeConfigPath string
@@ -61,13 +49,9 @@ users:
       command: foo-command
       provideClusterInfo: true
 `
-	tmpfile, err := os.CreateTemp("", "kubeconfig")
-	if err != nil {
-		t.Error(err)
-	}
-	if err := os.WriteFile(tmpfile.Name(), []byte(content), 0600); err != nil {
-		t.Error(err)
-	}
+	tmpfile, err := os.CreateTemp(t.TempDir(), "kubeconfig")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(tmpfile.Name(), []byte(content), 0o600))
 	// overwrite the default kube config path
 	kubeConfigPath = tmpfile.Name()
 	return kubeConfigPath
@@ -78,8 +62,8 @@ func removeTempKubeConfig() {
 	kubeConfigPath = ""
 }
 
-func convertToInterfaceArray(objArray []runtime.Object) []interface{} {
-	array := make([]interface{}, len(objArray))
+func convertToInterfaceArray(objArray []runtime.Object) []any {
+	array := make([]any, len(objArray))
 	for i := range array {
 		array[i] = objArray[i]
 	}

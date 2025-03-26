@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package tests
 
@@ -22,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/testutil"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/testbed/testbed"
 )
 
@@ -29,14 +19,13 @@ var (
 	mockedConsumedResourceWithType = func() pmetric.Metrics {
 		md := pmetric.NewMetrics()
 		rm := md.ResourceMetrics().AppendEmpty()
-		rm.Resource().Attributes().UpsertString("opencensus.resourcetype", "host")
-		rm.Resource().Attributes().UpsertString("label-key", "label-value")
+		rm.Resource().Attributes().PutStr("opencensus.resourcetype", "host")
+		rm.Resource().Attributes().PutStr("label-key", "label-value")
 		m := rm.ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
 		m.SetName("metric-name")
 		m.SetDescription("metric-description")
 		m.SetUnit("metric-unit")
-		m.SetDataType(pmetric.MetricDataTypeGauge)
-		m.Gauge().DataPoints().AppendEmpty().SetIntVal(0)
+		m.SetEmptyGauge().DataPoints().AppendEmpty().SetIntValue(0)
 		return md
 	}()
 
@@ -47,8 +36,7 @@ var (
 		m.SetName("metric-name")
 		m.SetDescription("metric-description")
 		m.SetUnit("metric-unit")
-		m.SetDataType(pmetric.MetricDataTypeGauge)
-		m.Gauge().DataPoints().AppendEmpty().SetIntVal(0)
+		m.SetEmptyGauge().DataPoints().AppendEmpty().SetIntValue(0)
 		return md
 	}()
 )
@@ -61,7 +49,6 @@ type resourceProcessorTestCase struct {
 }
 
 func getResourceProcessorTestCases() []resourceProcessorTestCase {
-
 	tests := []resourceProcessorTestCase{
 		{
 			name: "update_and_rename_existing_attributes",
@@ -81,8 +68,8 @@ func getResourceProcessorTestCases() []resourceProcessorTestCase {
 			expectedMetrics: func() pmetric.Metrics {
 				md := pmetric.NewMetrics()
 				rm := md.ResourceMetrics().AppendEmpty()
-				rm.Resource().Attributes().UpsertString("resource-type", "host")
-				rm.Resource().Attributes().UpsertString("label-key", "new-label-value")
+				rm.Resource().Attributes().PutStr("label-key", "new-label-value")
+				rm.Resource().Attributes().PutStr("resource-type", "host")
 				return md
 			}(),
 		},
@@ -100,7 +87,7 @@ func getResourceProcessorTestCases() []resourceProcessorTestCase {
 			expectedMetrics: func() pmetric.Metrics {
 				md := pmetric.NewMetrics()
 				rm := md.ResourceMetrics().AppendEmpty()
-				rm.Resource().Attributes().UpsertString("additional-label-key", "additional-label-value")
+				rm.Resource().Attributes().PutStr("additional-label-key", "additional-label-value")
 				return md
 			}(),
 		},
@@ -110,8 +97,8 @@ func getResourceProcessorTestCases() []resourceProcessorTestCase {
 }
 
 func TestMetricResourceProcessor(t *testing.T) {
-	sender := testbed.NewOTLPMetricDataSender(testbed.DefaultHost, testbed.GetAvailablePort(t))
-	receiver := testbed.NewOTLPDataReceiver(testbed.GetAvailablePort(t))
+	sender := testbed.NewOTLPMetricDataSender(testbed.DefaultHost, testutil.GetAvailablePort(t))
+	receiver := testbed.NewOTLPDataReceiver(testutil.GetAvailablePort(t))
 
 	tests := getResourceProcessorTestCases()
 
@@ -120,12 +107,12 @@ func TestMetricResourceProcessor(t *testing.T) {
 			resultDir, err := filepath.Abs(filepath.Join("results", t.Name()))
 			require.NoError(t, err)
 
-			agentProc := testbed.NewChildProcessCollector()
-			processors := map[string]string{
-				"resource": test.resourceProcessorConfig,
+			agentProc := testbed.NewChildProcessCollector(testbed.WithEnvVar("GOMAXPROCS", "2"))
+			processors := []ProcessorNameAndConfigBody{
+				{Name: "resource", Body: test.resourceProcessorConfig},
 			}
 			configStr := createConfigYaml(t, sender, receiver, resultDir, processors, nil)
-			configCleanup, err := agentProc.PrepareConfig(configStr)
+			configCleanup, err := agentProc.PrepareConfig(t, configStr)
 			require.NoError(t, err)
 			defer configCleanup()
 
@@ -154,7 +141,7 @@ func TestMetricResourceProcessor(t *testing.T) {
 			tc.MockBackend.ClearReceivedItems()
 			startCounter := tc.MockBackend.DataItemsReceived()
 
-			sender, ok := tc.Sender.(testbed.MetricDataSender)
+			sender, ok := tc.LoadGenerator.(*testbed.ProviderSender).Sender.(testbed.MetricDataSender)
 			require.True(t, ok, "unsupported metric sender")
 
 			require.NoError(t, sender.ConsumeMetrics(context.Background(), test.mockedConsumedMetrics))
@@ -173,8 +160,8 @@ func TestMetricResourceProcessor(t *testing.T) {
 
 			expectidMD := test.expectedMetrics
 			require.Equal(t,
-				expectidMD.ResourceMetrics().At(0).Resource().Attributes().Sort(),
-				rm.At(0).Resource().Attributes().Sort(),
+				expectidMD.ResourceMetrics().At(0).Resource().Attributes().AsRaw(),
+				rm.At(0).Resource().Attributes().AsRaw(),
 			)
 		})
 	}

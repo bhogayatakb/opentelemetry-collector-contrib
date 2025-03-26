@@ -1,21 +1,11 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package kubeletstatsreceiver
 
 import (
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -23,7 +13,7 @@ import (
 
 // getValidMockedObjects returns a list of volume claims and persistent
 // volume objects based on values present in testdata/pods.json. These
-// values will be used to mock objects returned by the Kuberentes API.
+// values will be used to mock objects returned by the Kubernetes API.
 func getValidMockedObjects() []runtime.Object {
 	return []runtime.Object{
 		volumeClaim1,
@@ -35,9 +25,45 @@ func getValidMockedObjects() []runtime.Object {
 	}
 }
 
-var volumeClaim1 = getPVC("volume_claim_1", "kube-system", "storage-provisioner-token-qzlx6")
-var volumeClaim2 = getPVC("volume_claim_2", "kube-system", "kube-proxy")
-var volumeClaim3 = getPVC("volume_claim_3", "kube-system", "coredns-token-dzc5t")
+func getNodeWithCPUCapacity(nodeName string, cpuCap int) *v1.Node {
+	resourceList := make(v1.ResourceList)
+	q := resource.Quantity{}
+	q.Set(int64(cpuCap))
+	resourceList["cpu"] = q
+	return &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			UID:  "asdfg",
+		},
+		Spec: v1.NodeSpec{},
+		Status: v1.NodeStatus{
+			Capacity: resourceList,
+		},
+	}
+}
+
+func getNodeWithMemoryCapacity(nodeName string, memoryCap string) *v1.Node {
+	resourceList := make(v1.ResourceList)
+	q := resource.QuantityValue{}
+	_ = q.Set(memoryCap)
+	resourceList["memory"] = q.Quantity
+	return &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: nodeName,
+			UID:  "asdfg",
+		},
+		Spec: v1.NodeSpec{},
+		Status: v1.NodeStatus{
+			Capacity: resourceList,
+		},
+	}
+}
+
+var (
+	volumeClaim1 = getPVC("volume_claim_1", "kube-system", "storage-provisioner-token-qzlx6")
+	volumeClaim2 = getPVC("volume_claim_2", "kube-system", "kube-proxy")
+	volumeClaim3 = getPVC("volume_claim_3", "kube-system", "coredns-token-dzc5t")
+)
 
 func getPVC(claimName, namespace, volumeName string) *v1.PersistentVolumeClaim {
 	return &v1.PersistentVolumeClaim{

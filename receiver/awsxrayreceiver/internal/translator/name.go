@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package translator // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsxrayreceiver/internal/translator"
 
@@ -25,9 +14,10 @@ import (
 const (
 	validAWSNamespace    = "aws"
 	validRemoteNamespace = "remote"
+	validLocalNamespace  = "local"
 )
 
-func addNameAndNamespace(seg *awsxray.Segment, span *ptrace.Span) error {
+func addNameAndNamespace(seg *awsxray.Segment, span ptrace.Span) error {
 	// https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/c615d2db351929b99e46f7b427f39c12afe15b54/exporter/awsxrayexporter/translator/segment.go#L160
 	span.SetName(*seg.Name)
 
@@ -40,7 +30,7 @@ func addNameAndNamespace(seg *awsxray.Segment, span *ptrace.Span) error {
 		span.SetKind(ptrace.SpanKindServer)
 	}
 
-	if seg.Namespace == nil {
+	if seg.Namespace == nil || *seg.Namespace == validLocalNamespace {
 		if span.Kind() == ptrace.SpanKindUnspecified {
 			span.SetKind(ptrace.SpanKindInternal)
 		}
@@ -56,10 +46,11 @@ func addNameAndNamespace(seg *awsxray.Segment, span *ptrace.Span) error {
 	switch *seg.Namespace {
 	case validAWSNamespace:
 		// https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/c615d2db351929b99e46f7b427f39c12afe15b54/exporter/awsxrayexporter/translator/segment.go#L116
-		attrs.UpsertString(awsxray.AWSServiceAttribute, *seg.Name)
+		attrs.PutStr(awsxray.AWSServiceAttribute, *seg.Name)
 
 	case validRemoteNamespace:
 		// no op
+
 	default:
 		return fmt.Errorf("unexpected namespace: %s", *seg.Namespace)
 	}

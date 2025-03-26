@@ -1,42 +1,34 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package gcp // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal/gcp"
 
 import (
 	"context"
-	"fmt"
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp"
-	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/featuregate"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/processor"
 	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal"
+	localMetadata "github.com/open-telemetry/opentelemetry-collector-contrib/processor/resourcedetectionprocessor/internal/gcp/internal/metadata"
 )
 
 const (
 	// TypeStr is type of detector.
 	TypeStr = "gcp"
-	// 'gke' and 'gce' detectors are replaced with the unified 'gcp' detector
-	// TODO(#10348): Remove these after the v0.54.0 release.
-	DeprecatedGKETypeStr = "gke"
-	DeprecatedGCETypeStr = "gce"
 )
+
+var removeGCPFaasID = featuregate.GlobalRegistry().MustRegister(
+	"processor.resourcedetection.removeGCPFaasID",
+	featuregate.StageAlpha,
+	featuregate.WithRegisterDescription("Remove faas.id from the GCP detector. Use faas.instance instead."),
+	featuregate.WithRegisterFromVersion("v0.87.0"))
 
 // NewDetector returns a detector which can detect resource attributes on:
 // * Google Compute Engine (GCE).
@@ -44,146 +36,127 @@ const (
 // * Google App Engine (GAE).
 // * Cloud Run.
 // * Cloud Functions.
-func NewDetector(set component.ProcessorCreateSettings, _ internal.DetectorConfig) (internal.Detector, error) {
+// * Bare Metal Solutions (BMS).
+func NewDetector(set processor.Settings, dcfg internal.DetectorConfig) (internal.Detector, error) {
+	cfg := dcfg.(Config)
 	return &detector{
 		logger:   set.Logger,
 		detector: gcp.NewDetector(),
+		rb:       localMetadata.NewResourceBuilder(cfg.ResourceAttributes),
 	}, nil
 }
 
 type detector struct {
 	logger   *zap.Logger
 	detector gcpDetector
+	rb       *localMetadata.ResourceBuilder
 }
 
 func (d *detector) Detect(context.Context) (resource pcommon.Resource, schemaURL string, err error) {
-	res := pcommon.NewResource()
-	if !metadata.OnGCE() {
-		return res, "", nil
+	if d.detector.CloudPlatform() == gcp.BareMetalSolution {
+		d.rb.SetCloudProvider(conventions.AttributeCloudProviderGCP)
+		errs := d.rb.SetFromCallable(d.rb.SetCloudAccountID, d.detector.BareMetalSolutionProjectID)
+
+		d.rb.SetCloudPlatform("gcp_bare_metal_solution")
+		errs = multierr.Combine(errs,
+			d.rb.SetFromCallable(d.rb.SetHostName, d.detector.BareMetalSolutionInstanceID),
+			d.rb.SetFromCallable(d.rb.SetCloudRegion, d.detector.BareMetalSolutionCloudRegion),
+		)
+		return d.rb.Emit(), conventions.SchemaURL, errs
 	}
-	b := &resourceBuilder{logger: d.logger, attrs: res.Attributes()}
-	b.attrs.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderGCP)
-	b.add(conventions.AttributeCloudAccountID, d.detector.ProjectID)
+
+	if !metadata.OnGCE() {
+		return pcommon.NewResource(), "", nil
+	}
+
+	d.rb.SetCloudProvider(conventions.AttributeCloudProviderGCP)
+	errs := d.rb.SetFromCallable(d.rb.SetCloudAccountID, d.detector.ProjectID)
 
 	switch d.detector.CloudPlatform() {
 	case gcp.GKE:
-		b.attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformGCPKubernetesEngine)
-		b.addZoneOrRegion(d.detector.GKEAvailabilityZoneOrRegion)
-		b.add(conventions.AttributeK8SClusterName, d.detector.GKEClusterName)
-		b.add(conventions.AttributeHostID, d.detector.GKEHostID)
+		d.rb.SetCloudPlatform(conventions.AttributeCloudPlatformGCPKubernetesEngine)
+		errs = multierr.Combine(errs,
+			d.rb.SetZoneOrRegion(d.detector.GKEAvailabilityZoneOrRegion),
+			d.rb.SetFromCallable(d.rb.SetK8sClusterName, d.detector.GKEClusterName),
+			d.rb.SetFromCallable(d.rb.SetHostID, d.detector.GKEHostID),
+		)
 		// GCEHostname is fallible on GKE, since it's not available when using workload identity.
-		b.addFallible(conventions.AttributeHostName, d.detector.GCEHostName)
+		if v, err := d.detector.GCEHostName(); err == nil {
+			d.rb.SetHostName(v)
+		} else {
+			d.logger.Info("Fallible detector failed. This attribute will not be available.",
+				zap.String("key", conventions.AttributeHostName), zap.Error(err))
+		}
 	case gcp.CloudRun:
-		b.attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformGCPCloudRun)
-		b.add(conventions.AttributeFaaSName, d.detector.FaaSName)
-		b.add(conventions.AttributeFaaSVersion, d.detector.FaaSVersion)
-		b.add(conventions.AttributeFaaSID, d.detector.FaaSID)
-		b.add(conventions.AttributeCloudRegion, d.detector.FaaSCloudRegion)
+		d.rb.SetCloudPlatform(conventions.AttributeCloudPlatformGCPCloudRun)
+		errs = multierr.Combine(errs,
+			d.rb.SetFromCallable(d.rb.SetFaasName, d.detector.FaaSName),
+			d.rb.SetFromCallable(d.rb.SetFaasVersion, d.detector.FaaSVersion),
+			d.rb.SetFromCallable(d.rb.SetFaasInstance, d.detector.FaaSID),
+			d.rb.SetFromCallable(d.rb.SetCloudRegion, d.detector.FaaSCloudRegion),
+		)
+		if !removeGCPFaasID.IsEnabled() {
+			errs = multierr.Combine(errs, d.rb.SetFromCallable(d.rb.SetFaasID, d.detector.FaaSID))
+		}
+	case gcp.CloudRunJob:
+		d.rb.SetCloudPlatform(conventions.AttributeCloudPlatformGCPCloudRun)
+		errs = multierr.Combine(errs,
+			d.rb.SetFromCallable(d.rb.SetFaasName, d.detector.FaaSName),
+			d.rb.SetFromCallable(d.rb.SetCloudRegion, d.detector.FaaSCloudRegion),
+			d.rb.SetFromCallable(d.rb.SetFaasInstance, d.detector.FaaSID),
+			d.rb.SetFromCallable(d.rb.SetGcpCloudRunJobExecution, d.detector.CloudRunJobExecution),
+			d.rb.SetFromCallable(d.rb.SetGcpCloudRunJobTaskIndex, d.detector.CloudRunJobTaskIndex),
+		)
+		if !removeGCPFaasID.IsEnabled() {
+			errs = multierr.Combine(errs, d.rb.SetFromCallable(d.rb.SetFaasID, d.detector.FaaSID))
+		}
 	case gcp.CloudFunctions:
-		b.attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformGCPCloudFunctions)
-		b.add(conventions.AttributeFaaSName, d.detector.FaaSName)
-		b.add(conventions.AttributeFaaSVersion, d.detector.FaaSVersion)
-		b.add(conventions.AttributeFaaSID, d.detector.FaaSID)
-		b.add(conventions.AttributeCloudRegion, d.detector.FaaSCloudRegion)
+		d.rb.SetCloudPlatform(conventions.AttributeCloudPlatformGCPCloudFunctions)
+		errs = multierr.Combine(errs,
+			d.rb.SetFromCallable(d.rb.SetFaasName, d.detector.FaaSName),
+			d.rb.SetFromCallable(d.rb.SetFaasVersion, d.detector.FaaSVersion),
+			d.rb.SetFromCallable(d.rb.SetFaasInstance, d.detector.FaaSID),
+			d.rb.SetFromCallable(d.rb.SetCloudRegion, d.detector.FaaSCloudRegion),
+		)
+		if !removeGCPFaasID.IsEnabled() {
+			errs = multierr.Combine(errs, d.rb.SetFromCallable(d.rb.SetFaasID, d.detector.FaaSID))
+		}
 	case gcp.AppEngineFlex:
-		b.attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformGCPAppEngine)
-		b.addZoneAndRegion(d.detector.AppEngineFlexAvailabilityZoneAndRegion)
-		b.add(conventions.AttributeFaaSName, d.detector.AppEngineServiceName)
-		b.add(conventions.AttributeFaaSVersion, d.detector.AppEngineServiceVersion)
-		b.add(conventions.AttributeFaaSID, d.detector.AppEngineServiceInstance)
+		d.rb.SetCloudPlatform(conventions.AttributeCloudPlatformGCPAppEngine)
+		errs = multierr.Combine(errs,
+			d.rb.SetZoneAndRegion(d.detector.AppEngineFlexAvailabilityZoneAndRegion),
+			d.rb.SetFromCallable(d.rb.SetFaasName, d.detector.AppEngineServiceName),
+			d.rb.SetFromCallable(d.rb.SetFaasVersion, d.detector.AppEngineServiceVersion),
+			d.rb.SetFromCallable(d.rb.SetFaasInstance, d.detector.AppEngineServiceInstance),
+		)
+		if !removeGCPFaasID.IsEnabled() {
+			errs = multierr.Combine(errs, d.rb.SetFromCallable(d.rb.SetFaasID, d.detector.AppEngineServiceInstance))
+		}
 	case gcp.AppEngineStandard:
-		b.attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformGCPAppEngine)
-		b.add(conventions.AttributeFaaSName, d.detector.AppEngineServiceName)
-		b.add(conventions.AttributeFaaSVersion, d.detector.AppEngineServiceVersion)
-		b.add(conventions.AttributeFaaSID, d.detector.AppEngineServiceInstance)
-		b.add(conventions.AttributeCloudAvailabilityZone, d.detector.AppEngineStandardAvailabilityZone)
-		b.add(conventions.AttributeCloudRegion, d.detector.AppEngineStandardCloudRegion)
+		d.rb.SetCloudPlatform(conventions.AttributeCloudPlatformGCPAppEngine)
+		errs = multierr.Combine(errs,
+			d.rb.SetFromCallable(d.rb.SetFaasName, d.detector.AppEngineServiceName),
+			d.rb.SetFromCallable(d.rb.SetFaasVersion, d.detector.AppEngineServiceVersion),
+			d.rb.SetFromCallable(d.rb.SetFaasInstance, d.detector.AppEngineServiceInstance),
+			d.rb.SetFromCallable(d.rb.SetCloudAvailabilityZone, d.detector.AppEngineStandardAvailabilityZone),
+			d.rb.SetFromCallable(d.rb.SetCloudRegion, d.detector.AppEngineStandardCloudRegion),
+		)
+		if !removeGCPFaasID.IsEnabled() {
+			errs = multierr.Combine(errs, d.rb.SetFromCallable(d.rb.SetFaasID, d.detector.AppEngineServiceInstance))
+		}
 	case gcp.GCE:
-		b.attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformGCPComputeEngine)
-		b.addZoneAndRegion(d.detector.GCEAvailabilityZoneAndRegion)
-		b.add(conventions.AttributeHostType, d.detector.GCEHostType)
-		b.add(conventions.AttributeHostID, d.detector.GCEHostID)
-		b.add(conventions.AttributeHostName, d.detector.GCEHostName)
+		d.rb.SetCloudPlatform(conventions.AttributeCloudPlatformGCPComputeEngine)
+		errs = multierr.Combine(errs,
+			d.rb.SetZoneAndRegion(d.detector.GCEAvailabilityZoneAndRegion),
+			d.rb.SetFromCallable(d.rb.SetHostType, d.detector.GCEHostType),
+			d.rb.SetFromCallable(d.rb.SetHostID, d.detector.GCEHostID),
+			d.rb.SetFromCallable(d.rb.SetHostName, d.detector.GCEHostName),
+			d.rb.SetFromCallable(d.rb.SetGcpGceInstanceHostname, d.detector.GCEInstanceHostname),
+			d.rb.SetFromCallable(d.rb.SetGcpGceInstanceName, d.detector.GCEInstanceName),
+			d.rb.SetManagedInstanceGroup(d.detector.GCEManagedInstanceGroup),
+		)
 	default:
 		// We don't support this platform yet, so just return with what we have
 	}
-	return res, conventions.SchemaURL, multierr.Combine(b.errs...)
-}
-
-// resourceBuilder simplifies constructing resources using GCP detection
-// library functions.
-type resourceBuilder struct {
-	logger *zap.Logger
-	errs   []error
-	attrs  pcommon.Map
-}
-
-func (r *resourceBuilder) add(key string, detect func() (string, error)) {
-	if v, err := detect(); err == nil {
-		r.attrs.InsertString(key, v)
-	} else {
-		r.errs = append(r.errs, err)
-	}
-}
-
-// addFallible adds a detect function whose failures should be ignored
-func (r *resourceBuilder) addFallible(key string, detect func() (string, error)) {
-	if v, err := detect(); err == nil {
-		r.attrs.InsertString(key, v)
-	} else {
-		r.logger.Info("Fallible detector failed. This attribute will not be available.", zap.String("key", key), zap.Error(err))
-	}
-}
-
-// zoneAndRegion functions are expected to return zone, region, err.
-func (r *resourceBuilder) addZoneAndRegion(detect func() (string, string, error)) {
-	if zone, region, err := detect(); err == nil {
-		r.attrs.InsertString(conventions.AttributeCloudAvailabilityZone, zone)
-		r.attrs.InsertString(conventions.AttributeCloudRegion, region)
-	} else {
-		r.errs = append(r.errs, err)
-	}
-}
-
-func (r *resourceBuilder) addZoneOrRegion(detect func() (string, gcp.LocationType, error)) {
-	if v, locType, err := detect(); err == nil {
-		switch locType {
-		case gcp.Zone:
-			r.attrs.InsertString(conventions.AttributeCloudAvailabilityZone, v)
-		case gcp.Region:
-			r.attrs.InsertString(conventions.AttributeCloudRegion, v)
-		default:
-			r.errs = append(r.errs, fmt.Errorf("location must be zone or region. Got %v", locType))
-		}
-	} else {
-		r.errs = append(r.errs, err)
-	}
-}
-
-// DeduplicateDetectors ensures only one of ['gcp','gke','gce'] are present in
-// the list of detectors. Currently, users configure both GCE and GKE detectors
-// when running on GKE. Resource merge would fail in this case if we don't
-// deduplicate, which would break users.
-// TODO(#10348): Remove this function after the v0.54.0 release.
-func DeduplicateDetectors(set component.ProcessorCreateSettings, detectors []string) []string {
-	var out []string
-	var found bool
-	for _, d := range detectors {
-		switch d {
-		case DeprecatedGKETypeStr:
-			set.Logger.Warn("The 'gke' detector is deprecated.  Use the 'gcp' detector instead.")
-		case DeprecatedGCETypeStr:
-			set.Logger.Warn("The 'gce' detector is deprecated.  Use the 'gcp' detector instead.")
-		case TypeStr:
-		default:
-			out = append(out, d)
-			continue
-		}
-		// ensure we only keep the first GCP detector we find.
-		if !found {
-			found = true
-			out = append(out, d)
-		}
-	}
-	return out
+	return d.rb.Emit(), conventions.SchemaURL, errs
 }

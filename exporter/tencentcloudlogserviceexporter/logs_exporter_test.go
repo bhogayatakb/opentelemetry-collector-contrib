@@ -1,16 +1,5 @@
-// Copyright 2021, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package tencentcloudlogserviceexporter
 
@@ -21,11 +10,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/exporter/exportertest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.27.0"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/tencentcloudlogserviceexporter/internal/metadata"
 )
 
 func createSimpleLogData(numberOfLogs int) plog.Logs {
@@ -38,11 +28,11 @@ func createSimpleLogData(numberOfLogs int) plog.Logs {
 	for i := 0; i < numberOfLogs; i++ {
 		ts := pcommon.Timestamp(int64(i) * time.Millisecond.Nanoseconds())
 		logRecord := sl.LogRecords().AppendEmpty()
-		logRecord.Body().SetStringVal("mylog")
-		logRecord.Attributes().UpsertString(conventions.AttributeServiceName, "myapp")
-		logRecord.Attributes().UpsertString("my-label", "myapp-type")
-		logRecord.Attributes().UpsertString(conventions.AttributeHostName, "myhost")
-		logRecord.Attributes().UpsertString("custom", "custom")
+		logRecord.Body().SetStr("mylog")
+		logRecord.Attributes().PutStr(conventions.AttributeServiceName, "myapp")
+		logRecord.Attributes().PutStr("my-label", "myapp-type")
+		logRecord.Attributes().PutStr(conventions.AttributeHostName, "myhost")
+		logRecord.Attributes().PutStr("custom", "custom")
 		logRecord.SetTimestamp(ts)
 	}
 	sl.LogRecords().AppendEmpty()
@@ -51,11 +41,10 @@ func createSimpleLogData(numberOfLogs int) plog.Logs {
 }
 
 func TestNewLogsExporter(t *testing.T) {
-	got, err := newLogsExporter(componenttest.NewNopExporterCreateSettings(), &Config{
-		ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-		Region:           "ap-beijing",
-		LogSet:           "demo-logset",
-		Topic:            "demo-topic",
+	got, err := newLogsExporter(exportertest.NewNopSettings(metadata.Type), &Config{
+		Region: "ap-beijing",
+		LogSet: "demo-logset",
+		Topic:  "demo-topic",
 	})
 	assert.NoError(t, err)
 	require.NotNil(t, got)
@@ -66,7 +55,7 @@ func TestNewLogsExporter(t *testing.T) {
 }
 
 func TestNewFailsWithEmptyLogsExporterName(t *testing.T) {
-	got, err := newLogsExporter(componenttest.NewNopExporterCreateSettings(), &Config{})
+	got, err := newLogsExporter(exportertest.NewNopSettings(metadata.Type), &Config{})
 	assert.NoError(t, err)
 	require.NotNil(t, got)
 }

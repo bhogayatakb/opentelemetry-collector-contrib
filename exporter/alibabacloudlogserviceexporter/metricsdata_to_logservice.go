@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package alibabacloudlogserviceexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/alibabacloudlogserviceexporter"
 
@@ -108,12 +97,11 @@ func formatMetricName(name string) string {
 			b == '_' ||
 			b == ':' {
 			continue
-		} else {
-			if newName == nil {
-				newName = []byte(name)
-			}
-			newName[i] = '_'
 		}
+		if newName == nil {
+			newName = []byte(name)
+		}
+		newName[i] = '_'
 	}
 	if newName == nil {
 		return name
@@ -125,7 +113,8 @@ func newMetricLogFromRaw(
 	name string,
 	labels KeyValues,
 	nsec int64,
-	value float64) *sls.Log {
+	value float64,
+) *sls.Log {
 	labels.Sort()
 	return &sls.Log{
 		Time: proto.Uint32(uint32(nsec / 1e9)),
@@ -150,22 +139,11 @@ func newMetricLogFromRaw(
 	}
 }
 
-func min(l, r int) int {
-	if l < r {
-		return l
-	}
-	return r
-}
-
 func resourceToMetricLabels(labels *KeyValues, resource pcommon.Resource) {
 	attrs := resource.Attributes()
-	attrs.Range(func(k string, v pcommon.Value) bool {
-		labels.keyValues = append(labels.keyValues, KeyValue{
-			Key:   k,
-			Value: v.AsString(),
-		})
-		return true
-	})
+	for k, v := range attrs.All() {
+		labels.Append(k, v.AsString())
+	}
 }
 
 func numberMetricsToLogs(name string, data pmetric.NumberDataPointSlice, defaultLabels KeyValues) (logs []*sls.Log) {
@@ -173,17 +151,16 @@ func numberMetricsToLogs(name string, data pmetric.NumberDataPointSlice, default
 		dataPoint := data.At(i)
 		attributeMap := dataPoint.Attributes()
 		labels := defaultLabels.Clone()
-		attributeMap.Range(func(k string, v pcommon.Value) bool {
+		for k, v := range attributeMap.All() {
 			labels.Append(k, v.AsString())
-			return true
-		})
+		}
 		switch dataPoint.ValueType() {
 		case pmetric.NumberDataPointValueTypeInt:
 			logs = append(logs,
 				newMetricLogFromRaw(name,
 					labels,
 					int64(dataPoint.Timestamp()),
-					float64(dataPoint.IntVal()),
+					float64(dataPoint.IntValue()),
 				),
 			)
 		case pmetric.NumberDataPointValueTypeDouble:
@@ -191,7 +168,7 @@ func numberMetricsToLogs(name string, data pmetric.NumberDataPointSlice, default
 				newMetricLogFromRaw(name,
 					labels,
 					int64(dataPoint.Timestamp()),
-					dataPoint.DoubleVal(),
+					dataPoint.DoubleValue(),
 				),
 			)
 		}
@@ -204,10 +181,9 @@ func doubleHistogramMetricsToLogs(name string, data pmetric.HistogramDataPointSl
 		dataPoint := data.At(i)
 		attributeMap := dataPoint.Attributes()
 		labels := defaultLabels.Clone()
-		attributeMap.Range(func(k string, v pcommon.Value) bool {
+		for k, v := range attributeMap.All() {
 			labels.Append(k, v.AsString())
-			return true
-		})
+		}
 		logs = append(logs, newMetricLogFromRaw(name+"_sum",
 			labels,
 			int64(dataPoint.Timestamp()),
@@ -242,7 +218,6 @@ func doubleHistogramMetricsToLogs(name string, data pmetric.HistogramDataPointSl
 					float64(bucket),
 				))
 		}
-
 	}
 	return logs
 }
@@ -252,10 +227,9 @@ func doubleSummaryMetricsToLogs(name string, data pmetric.SummaryDataPointSlice,
 		dataPoint := data.At(i)
 		attributeMap := dataPoint.Attributes()
 		labels := defaultLabels.Clone()
-		attributeMap.Range(func(k string, v pcommon.Value) bool {
+		for k, v := range attributeMap.All() {
 			labels.Append(k, v.AsString())
-			return true
-		})
+		}
 		logs = append(logs, newMetricLogFromRaw(name+"_sum",
 			labels,
 			int64(dataPoint.Timestamp()),
@@ -284,16 +258,17 @@ func doubleSummaryMetricsToLogs(name string, data pmetric.SummaryDataPointSlice,
 }
 
 func metricDataToLogServiceData(md pmetric.Metric, defaultLabels KeyValues) (logs []*sls.Log) {
-	switch md.DataType() {
-	case pmetric.MetricDataTypeNone:
+	//exhaustive:enforce
+	switch md.Type() {
+	case pmetric.MetricTypeEmpty, pmetric.MetricTypeExponentialHistogram:
 		break
-	case pmetric.MetricDataTypeGauge:
+	case pmetric.MetricTypeGauge:
 		return numberMetricsToLogs(md.Name(), md.Gauge().DataPoints(), defaultLabels)
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		return numberMetricsToLogs(md.Name(), md.Sum().DataPoints(), defaultLabels)
-	case pmetric.MetricDataTypeHistogram:
+	case pmetric.MetricTypeHistogram:
 		return doubleHistogramMetricsToLogs(md.Name(), md.Histogram().DataPoints(), defaultLabels)
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeSummary:
 		return doubleSummaryMetricsToLogs(md.Name(), md.Summary().DataPoints(), defaultLabels)
 	}
 	return logs
@@ -303,7 +278,6 @@ func metricsDataToLogServiceData(
 	_ *zap.Logger,
 	md pmetric.Metrics,
 ) (logs []*sls.Log) {
-
 	resMetrics := md.ResourceMetrics()
 	for i := 0; i < resMetrics.Len(); i++ {
 		resMetricSlice := resMetrics.At(i)

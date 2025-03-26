@@ -1,23 +1,13 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package goldendataset // import "github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/goldendataset"
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
-	"math/rand"
+	"math/rand/v2"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -28,7 +18,7 @@ import (
 // spans for for defined in the file specified by the spanPairsFile parameter.
 // The slice of ResourceSpans are returned. If an err is returned, the slice elements will be nil.
 func GenerateTraces(tracePairsFile string, spanPairsFile string) ([]ptrace.Traces, error) {
-	random := io.Reader(rand.New(rand.NewSource(42)))
+	random := (*randReader)(rand.New(rand.NewPCG(42, 0)))
 	pairsData, err := loadPictOutputFile(tracePairsFile)
 	if err != nil {
 		return nil, err
@@ -53,6 +43,23 @@ func GenerateTraces(tracePairsFile string, spanPairsFile string) ([]ptrace.Trace
 	return traces, err
 }
 
+// TODO: use math/rand/v2.ChaCha8.Read when we upgrade to go1.23.
+type randReader rand.Rand
+
+func (r *randReader) Read(p []byte) (n int, err error) {
+	for len(p) >= 8 {
+		binary.BigEndian.PutUint64(p[:8], (*rand.Rand)(r).Uint64())
+		p = p[8:]
+		n += 8
+	}
+	if len(p) > 0 {
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], (*rand.Rand)(r).Uint64())
+		n += copy(p, buf[:])
+	}
+	return
+}
+
 // generateResourceSpan generates a single PData ResourceSpans populated based on the provided inputs. They are:
 //
 //	tracingInputs - the pairwise combination of field value variations for this ResourceSpans
@@ -61,7 +68,8 @@ func GenerateTraces(tracePairsFile string, spanPairsFile string) ([]ptrace.Trace
 //
 // The generated resource spans. If err is not nil, some or all of the resource spans fields will be nil.
 func appendResourceSpan(tracingInputs *PICTTracingInputs, spanPairsFile string,
-	random io.Reader, resourceSpansSlice ptrace.ResourceSpansSlice) error {
+	random io.Reader, resourceSpansSlice ptrace.ResourceSpansSlice,
+) error {
 	resourceSpan := resourceSpansSlice.AppendEmpty()
 	err := appendScopeSpans(tracingInputs, spanPairsFile, random, resourceSpan.ScopeSpans())
 	if err != nil {
@@ -72,7 +80,8 @@ func appendResourceSpan(tracingInputs *PICTTracingInputs, spanPairsFile string,
 }
 
 func appendScopeSpans(tracingInputs *PICTTracingInputs, spanPairsFile string,
-	random io.Reader, scopeSpansSlice ptrace.ScopeSpansSlice) error {
+	random io.Reader, scopeSpansSlice ptrace.ScopeSpansSlice,
+) error {
 	var count int
 	switch tracingInputs.InstrumentationLibrary {
 	case LibraryNone:

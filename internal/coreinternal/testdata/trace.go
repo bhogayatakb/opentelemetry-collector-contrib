@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package testdata
 
@@ -106,7 +95,7 @@ func fillSpanOne(span ptrace.Span) {
 	ev0 := evs.AppendEmpty()
 	ev0.SetTimestamp(TestSpanEventTimestamp)
 	ev0.SetName("event-with-attr")
-	initSpanEventAttributes(ev0.Attributes())
+	ev0.Attributes().PutStr("span-event-attr", "span-event-attr-val")
 	ev0.SetDroppedAttributesCount(2)
 	ev1 := evs.AppendEmpty()
 	ev1.SetTimestamp(TestSpanEventTimestamp)
@@ -123,7 +112,7 @@ func fillSpanTwo(span ptrace.Span) {
 	span.SetStartTimestamp(TestSpanStartTimestamp)
 	span.SetEndTimestamp(TestSpanEndTimestamp)
 	link0 := span.Links().AppendEmpty()
-	initSpanLinkAttributes(link0.Attributes())
+	link0.Attributes().PutStr("span-link-attr", "span-link-attr-val")
 	link0.SetDroppedAttributesCount(4)
 	link1 := span.Links().AppendEmpty()
 	link1.SetDroppedAttributesCount(4)
@@ -134,6 +123,6 @@ func fillSpanThree(span ptrace.Span) {
 	span.SetName("operationC")
 	span.SetStartTimestamp(TestSpanStartTimestamp)
 	span.SetEndTimestamp(TestSpanEndTimestamp)
-	initSpanAttributes(span.Attributes())
+	span.Attributes().PutStr("span-attr", "span-attr-val")
 	span.SetDroppedAttributesCount(5)
 }

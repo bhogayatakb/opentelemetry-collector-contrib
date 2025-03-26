@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package mezmoexporter
 
@@ -19,69 +8,103 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/configopaque"
+	"go.opentelemetry.io/collector/config/configretry"
+	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-	"go.opentelemetry.io/collector/service/servicetest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/mezmoexporter/internal/metadata"
 )
 
-func TestLoadDefaultConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
-	assert.Nil(t, err)
+func TestLoadConfig(t *testing.T) {
+	t.Parallel()
 
-	factory := NewFactory()
-	factories.Exporters[typeStr] = factory
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
-
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
 	require.NoError(t, err)
-	require.NotNil(t, cfg)
 
-	// Verify the "default"/required values-only configuration
-	e := cfg.Exporters[config.NewComponentID(typeStr)]
-
-	// Our expected default configuration should use the defaultIngestURL
-	defaultCfg := factory.CreateDefaultConfig().(*Config)
+	defaultCfg := createDefaultConfig().(*Config)
 	defaultCfg.IngestURL = defaultIngestURL
 	defaultCfg.IngestKey = "00000000000000000000000000000000"
-	assert.Equal(t, defaultCfg, e)
+
+	tests := []struct {
+		id       component.ID
+		expected component.Config
+	}{
+		{
+			id:       component.NewIDWithName(metadata.Type, ""),
+			expected: defaultCfg,
+		},
+		{
+			id: component.NewIDWithName(metadata.Type, "allsettings"),
+			expected: &Config{
+				ClientConfig: confighttp.ClientConfig{
+					Timeout:             5 * time.Second,
+					MaxIdleConns:        defaultMaxIdleConns,
+					MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+					MaxConnsPerHost:     defaultMaxConnsPerHost,
+					IdleConnTimeout:     defaultIdleConnTimeout,
+					Headers:             map[string]configopaque.String{},
+				},
+				BackOffConfig: configretry.BackOffConfig{
+					Enabled:             false,
+					InitialInterval:     99 * time.Second,
+					MaxInterval:         199 * time.Second,
+					MaxElapsedTime:      299 * time.Minute,
+					RandomizationFactor: backoff.DefaultRandomizationFactor,
+					Multiplier:          backoff.DefaultMultiplier,
+				},
+				QueueSettings: exporterhelper.QueueConfig{
+					Enabled:      false,
+					NumConsumers: 7,
+					QueueSize:    17,
+				},
+				IngestURL: "https://alternate.mezmo.com/otel/ingest/rest",
+				IngestKey: "1234509876",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.id.String(), func(t *testing.T) {
+			factory := NewFactory()
+			cfg := factory.CreateDefaultConfig()
+
+			sub, err := cm.Sub(tt.id.String())
+			require.NoError(t, err)
+			require.NoError(t, sub.Unmarshal(cfg))
+
+			assert.NoError(t, xconfmap.Validate(cfg))
+			assert.Equal(t, tt.expected, cfg)
+		})
+	}
 }
 
-func TestLoadAllSettingsConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
-	assert.Nil(t, err)
+func TestConfigInvalidEndpoint(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.IngestURL = "urn:something:12345"
+	assert.Error(t, cfg.Validate())
+}
 
+func TestConfig_Validate_Path(t *testing.T) {
 	factory := NewFactory()
-	factories.Exporters[typeStr] = factory
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
 
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
+	cfg := factory.CreateDefaultConfig().(*Config)
+	cfg.IngestURL = "https://example.com:8088/ingest/rest"
+	cfg.IngestKey = "1234-1234"
+	assert.NoError(t, cfg.Validate())
 
-	// Verify values from the config override the default configuration
-	e := cfg.Exporters[config.NewComponentIDWithName(typeStr, "allsettings")]
+	cfg.IngestURL = "https://example.com:8088/v1/ABC123"
+	cfg.IngestKey = "1234-1234"
+	assert.NoError(t, cfg.Validate())
 
-	// Our expected default configuration should use the defaultIngestURL
-	expectedCfg := Config{
-		ExporterSettings: config.NewExporterSettings(config.NewComponentIDWithName(typeStr, "allsettings")),
-		HTTPClientSettings: confighttp.HTTPClientSettings{
-			Timeout: 5 * time.Second,
-		},
-		RetrySettings: exporterhelper.RetrySettings{
-			Enabled:         false,
-			InitialInterval: 99 * time.Second,
-			MaxInterval:     199 * time.Second,
-			MaxElapsedTime:  299 * time.Minute,
-		},
-		QueueSettings: exporterhelper.QueueSettings{
-			Enabled:      false,
-			NumConsumers: 7,
-			QueueSize:    17,
-		},
-		IngestURL: "https://alternate.mezmo.com/otel/ingest/rest",
-		IngestKey: "1234509876",
-	}
-	assert.Equal(t, &expectedCfg, e)
+	// Set values that don't have a valid default.
+	cfg.IngestURL = "/nohost/path"
+	cfg.IngestKey = "testToken"
+	assert.Error(t, cfg.Validate())
 }

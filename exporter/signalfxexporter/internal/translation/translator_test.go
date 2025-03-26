@@ -1,16 +1,5 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package translation
 
@@ -44,8 +33,14 @@ type byDimensions []*sfxpb.Dimension
 
 func (dims byDimensions) Len() int { return len(dims) }
 func (dims byDimensions) Less(i, j int) bool {
-	ib, _ := json.Marshal(dims[i])
-	jb, _ := json.Marshal(dims[j])
+	ib, err := json.Marshal(dims[i])
+	if err != nil {
+		panic(err)
+	}
+	jb, err := json.Marshal(dims[j])
+	if err != nil {
+		panic(err)
+	}
 	return string(ib) < string(jb)
 }
 func (dims byDimensions) Swap(i, j int) { dims[i], dims[j] = dims[j], dims[i] }
@@ -543,7 +538,7 @@ func TestNewMetricTranslator(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mt, err := NewMetricTranslator(tt.trs, 1)
+			mt, err := NewMetricTranslator(tt.trs, 1, make(chan struct{}))
 			if tt.wantError == "" {
 				require.NoError(t, err)
 				require.NotNil(t, mt)
@@ -558,8 +553,10 @@ func TestNewMetricTranslator(t *testing.T) {
 	}
 }
 
-var msec = time.Now().Unix() * 1e3
-var gaugeType = sfxpb.MetricType_GAUGE
+var (
+	msec      = time.Now().Unix() * 1e3
+	gaugeType = sfxpb.MetricType_GAUGE
+)
 
 func TestTranslateDataPoints(t *testing.T) {
 	tests := []struct {
@@ -1213,7 +1210,7 @@ func TestTranslateDataPoints(t *testing.T) {
 						},
 						{
 							Key:   "dim2",
-							Value: "val2-aleternate",
+							Value: "val2-alternate",
 						},
 					},
 				},
@@ -1283,7 +1280,7 @@ func TestTranslateDataPoints(t *testing.T) {
 					Dimensions: []*sfxpb.Dimension{
 						{
 							Key:   "dim2",
-							Value: "val2-aleternate",
+							Value: "val2-alternate",
 						},
 					},
 				},
@@ -1884,7 +1881,7 @@ func TestTranslateDataPoints(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			mt, err := NewMetricTranslator(tt.trs, 1)
+			mt, err := NewMetricTranslator(tt.trs, 1, make(chan struct{}))
 			require.NoError(t, err)
 			assert.NotEqualValues(t, tt.want, tt.dps)
 			got := mt.TranslateDataPoints(zap.NewNop(), tt.dps)
@@ -1930,7 +1927,7 @@ func TestTestTranslateDimension(t *testing.T) {
 				"old.dimension": "new.dimension",
 			},
 		},
-	}, 1)
+	}, 1, make(chan struct{}))
 	require.NoError(t, err)
 
 	assert.Equal(t, "new_dimension", mt.translateDimension("old_dimension"))
@@ -1938,7 +1935,7 @@ func TestTestTranslateDimension(t *testing.T) {
 	assert.Equal(t, "another_dimension", mt.translateDimension("another_dimension"))
 
 	// Test no rename_dimension_keys translation rule
-	mt, err = NewMetricTranslator([]Rule{}, 1)
+	mt, err = NewMetricTranslator([]Rule{}, 1, make(chan struct{}))
 	require.NoError(t, err)
 	assert.Equal(t, "old_dimension", mt.translateDimension("old_dimension"))
 }
@@ -2029,10 +2026,10 @@ func TestNewCalculateNewMetricErrors(t *testing.T) {
 				Operand1Metric: "metric1",
 				Operand2Metric: "metric2",
 				Operator:       MetricOperatorDivision,
-			}}, 1)
+			}}, 1, make(chan struct{}))
 			require.NoError(t, err)
 			tr := mt.TranslateDataPoints(logger, dps)
-			require.Equal(t, 2, len(tr))
+			require.Len(t, tr, 2)
 			if test.wantErr == "" {
 				require.Equal(t, 0, observedLogs.Len())
 			} else {
@@ -2050,7 +2047,7 @@ func TestNewMetricTranslator_InvalidOperator(t *testing.T) {
 		Operand1Metric: "metric1",
 		Operand2Metric: "metric2",
 		Operator:       "*",
-	}}, 1)
+	}}, 1, make(chan struct{}))
 	require.Errorf(
 		t,
 		err,
@@ -2091,7 +2088,7 @@ func TestCalcNewMetricInputPairs_SameDims(t *testing.T) {
 		},
 	}
 	pairs := calcNewMetricInputPairs(pts, rule)
-	require.Equal(t, 1, len(pairs))
+	require.Len(t, pairs, 1)
 	pair := pairs[0]
 	require.Equal(t, "m1", pair[0].Metric)
 	require.Equal(t, "m2", pair[1].Metric)
@@ -2154,7 +2151,7 @@ func TestNewMetricInputPairs_MultiPairs(t *testing.T) {
 		},
 	}
 	pairs := calcNewMetricInputPairs(pts, rule)
-	require.Equal(t, 2, len(pairs))
+	require.Len(t, pairs, 2)
 	pair1 := pairs[0]
 	require.EqualValues(t, 1, *pair1[0].Value.IntValue)
 	require.EqualValues(t, 2, *pair1[1].Value.IntValue)
@@ -2206,7 +2203,7 @@ func TestCalculateNewMetric_MatchingDims_Single(t *testing.T) {
 		Operand1Metric: "metric1",
 		Operand2Metric: "metric2",
 		Operator:       "/",
-	}}, 1)
+	}}, 1, make(chan struct{}))
 	require.NoError(t, err)
 	m1 := &sfxpb.DataPoint{
 		Metric:     "metric1",
@@ -2257,7 +2254,7 @@ func TestCalculateNewMetric_MatchingDims_Multi(t *testing.T) {
 		Operand1Metric: "metric1",
 		Operand2Metric: "metric2",
 		Operator:       "/",
-	}}, 1)
+	}}, 1, make(chan struct{}))
 	require.NoError(t, err)
 	m1 := &sfxpb.DataPoint{
 		Metric:     "metric1",
@@ -2344,7 +2341,7 @@ func TestUnsupportedOperator(t *testing.T) {
 		Operand1Metric: "metric1",
 		Operand2Metric: "metric2",
 		Operator:       "*",
-	}}, 1)
+	}}, 1, make(chan struct{}))
 	require.Error(t, err)
 }
 
@@ -2355,7 +2352,7 @@ func TestCalculateNewMetric_Double(t *testing.T) {
 		Operand1Metric: "metric1",
 		Operand2Metric: "metric2",
 		Operator:       "/",
-	}}, 1)
+	}}, 1, make(chan struct{}))
 	require.NoError(t, err)
 	m1 := &sfxpb.DataPoint{
 		Metric:     "metric1",
@@ -2400,12 +2397,12 @@ func TestCalculateNewMetric_Double(t *testing.T) {
 }
 
 func generateIntPtr(i int) *int64 {
-	var iPtr = int64(i)
+	iPtr := int64(i)
 	return &iPtr
 }
 
 func generateFloatPtr(i float64) *float64 {
-	var iPtr = i
+	iPtr := i
 	return &iPtr
 }
 
@@ -2533,22 +2530,20 @@ func TestDeltaTranslatorNoMatchingMapping(t *testing.T) {
 	c := testConverter(t, map[string]string{"foo": "bar"})
 	md := intMD(1, 1)
 	idx := indexPts(c.MetricsToSignalFxV2(md))
-	require.Equal(t, 1, len(idx))
+	require.Len(t, idx, 1)
 }
 
 func TestDeltaTranslatorMismatchedValueTypes(t *testing.T) {
 	c := testConverter(t, map[string]string{"system.cpu.time": "system.cpu.delta"})
 	md1 := baseMD()
-	md1.SetDataType(pmetric.MetricDataTypeSum)
-	intTS("cpu0", "user", 1, 1, 1, md1.Sum().DataPoints().AppendEmpty())
+	intTS("cpu0", "user", 1, 1, 1, md1.SetEmptySum().DataPoints().AppendEmpty())
 
 	_ = c.MetricsToSignalFxV2(wrapMetric(md1))
 	md2 := baseMD()
-	md2.SetDataType(pmetric.MetricDataTypeSum)
-	dblTS("cpu0", "user", 1, 1, 1, md2.Sum().DataPoints().AppendEmpty())
+	dblTS("cpu0", "user", 1, 1, 1, md2.SetEmptySum().DataPoints().AppendEmpty())
 	pts := c.MetricsToSignalFxV2(wrapMetric(md2))
 	idx := indexPts(pts)
-	require.Equal(t, 1, len(idx))
+	require.Len(t, idx, 1)
 }
 
 func requireDeltaMetricOk(t *testing.T, md1, md2, md3 pmetric.Metrics) (
@@ -2558,11 +2553,11 @@ func requireDeltaMetricOk(t *testing.T, md1, md2, md3 pmetric.Metrics) (
 
 	dp1 := c.MetricsToSignalFxV2(md1)
 	m1 := indexPts(dp1)
-	require.Equal(t, 1, len(m1))
+	require.Len(t, m1, 1)
 
 	dp2 := c.MetricsToSignalFxV2(md2)
 	m2 := indexPts(dp2)
-	require.Equal(t, 2, len(m2))
+	require.Len(t, m2, 2)
 
 	origPts, ok := m2["system.cpu.time"]
 	require.True(t, ok)
@@ -2577,7 +2572,7 @@ func requireDeltaMetricOk(t *testing.T, md1, md2, md3 pmetric.Metrics) (
 
 	dp3 := c.MetricsToSignalFxV2(md3)
 	m3 := indexPts(dp3)
-	require.Equal(t, 2, len(m3))
+	require.Len(t, m3, 2)
 
 	deltaPts2, ok := m3["system.cpu.delta"]
 	require.True(t, ok)
@@ -2891,7 +2886,8 @@ func TestDropDimensions(t *testing.T) {
 					},
 				},
 			},
-		}, {
+		},
+		{
 			name: "No op when dimensions do not exist on dp",
 			rules: []Rule{
 				{
@@ -2917,7 +2913,7 @@ func TestDropDimensions(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			mt, err := NewMetricTranslator(test.rules, 1)
+			mt, err := NewMetricTranslator(test.rules, 1, make(chan struct{}))
 			require.NoError(t, err)
 			outputSFxDps := mt.TranslateDataPoints(zap.NewNop(), test.inputDps)
 			require.Equal(t, test.expectedDps, outputSFxDps)
@@ -2952,7 +2948,7 @@ func TestDropDimensionsErrorCases(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			mt, err := NewMetricTranslator(test.rules, 1)
+			mt, err := NewMetricTranslator(test.rules, 1, make(chan struct{}))
 			require.EqualError(t, err, test.expectedError)
 			require.Nil(t, mt)
 		})
@@ -2964,10 +2960,10 @@ func testConverter(t *testing.T, mapping map[string]string) *MetricsConverter {
 		Action:  ActionDeltaMetric,
 		Mapping: mapping,
 	}}
-	tr, err := NewMetricTranslator(rules, 1)
+	tr, err := NewMetricTranslator(rules, 1, make(chan struct{}))
 	require.NoError(t, err)
 
-	c, err := NewMetricsConverter(zap.NewNop(), tr, nil, nil, "")
+	c, err := NewMetricsConverter(zap.NewNop(), tr, nil, nil, "", false, true)
 	require.NoError(t, err)
 	return c
 }
@@ -2983,8 +2979,7 @@ func indexPts(pts []*sfxpb.DataPoint) map[string][]*sfxpb.DataPoint {
 
 func doubleMD(secondsDelta int64, valueDelta float64) pmetric.Metrics {
 	md := baseMD()
-	md.SetDataType(pmetric.MetricDataTypeSum)
-	ms := md.Sum()
+	ms := md.SetEmptySum()
 	dblTS("cpu0", "user", secondsDelta, 100, valueDelta, ms.DataPoints().AppendEmpty())
 	dblTS("cpu0", "system", secondsDelta, 200, valueDelta, ms.DataPoints().AppendEmpty())
 	dblTS("cpu0", "idle", secondsDelta, 300, valueDelta, ms.DataPoints().AppendEmpty())
@@ -2997,8 +2992,7 @@ func doubleMD(secondsDelta int64, valueDelta float64) pmetric.Metrics {
 
 func intMD(secondsDelta int64, valueDelta int64) pmetric.Metrics {
 	md := baseMD()
-	md.SetDataType(pmetric.MetricDataTypeSum)
-	ms := md.Sum()
+	ms := md.SetEmptySum()
 	intTS("cpu0", "user", secondsDelta, 100, valueDelta, ms.DataPoints().AppendEmpty())
 	intTS("cpu0", "system", secondsDelta, 200, valueDelta, ms.DataPoints().AppendEmpty())
 	intTS("cpu0", "idle", secondsDelta, 300, valueDelta, ms.DataPoints().AppendEmpty())
@@ -3011,8 +3005,7 @@ func intMD(secondsDelta int64, valueDelta int64) pmetric.Metrics {
 
 func intMDAfterReset(secondsDelta int64, valueDelta int64) pmetric.Metrics {
 	md := baseMD()
-	md.SetDataType(pmetric.MetricDataTypeSum)
-	ms := md.Sum()
+	ms := md.SetEmptySum()
 	intTS("cpu0", "user", secondsDelta, 0, valueDelta, ms.DataPoints().AppendEmpty())
 	intTS("cpu0", "system", secondsDelta, 0, valueDelta, ms.DataPoints().AppendEmpty())
 	intTS("cpu0", "idle", secondsDelta, 0, valueDelta, ms.DataPoints().AppendEmpty())
@@ -3031,19 +3024,19 @@ func baseMD() pmetric.Metric {
 }
 
 func dblTS(lbl0 string, lbl1 string, secondsDelta int64, v float64, valueDelta float64, out pmetric.NumberDataPoint) {
-	out.Attributes().UpsertString("cpu", lbl0)
-	out.Attributes().UpsertString("state", lbl1)
+	out.Attributes().PutStr("cpu", lbl0)
+	out.Attributes().PutStr("state", lbl1)
 	const startTime = 1600000000
 	out.SetTimestamp(pcommon.Timestamp(time.Duration(startTime+secondsDelta) * time.Second))
-	out.SetDoubleVal(v + valueDelta)
+	out.SetDoubleValue(v + valueDelta)
 }
 
 func intTS(lbl0 string, lbl1 string, secondsDelta int64, v int64, valueDelta int64, out pmetric.NumberDataPoint) {
-	out.Attributes().UpsertString("cpu", lbl0)
-	out.Attributes().UpsertString("state", lbl1)
+	out.Attributes().PutStr("cpu", lbl0)
+	out.Attributes().PutStr("state", lbl1)
 	const startTime = 1600000000
 	out.SetTimestamp(pcommon.Timestamp(time.Duration(startTime+secondsDelta) * time.Second))
-	out.SetIntVal(v + valueDelta)
+	out.SetIntValue(v + valueDelta)
 }
 
 func wrapMetric(m pmetric.Metric) pmetric.Metrics {

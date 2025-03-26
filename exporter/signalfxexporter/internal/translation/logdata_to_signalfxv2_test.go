@@ -1,16 +1,5 @@
-// Copyright OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package translation
 
@@ -43,7 +32,7 @@ func TestLogDataToSignalFxEvents(t *testing.T) {
 			Timestamp:  msec,
 			Category:   &userDefinedCat,
 			Dimensions: buildNDimensions(4),
-			Properties: mapToEventProps(map[string]interface{}{
+			Properties: mapToEventProps(map[string]any{
 				"env":      "prod",
 				"isActive": true,
 				"rack":     5,
@@ -56,9 +45,10 @@ func TestLogDataToSignalFxEvents(t *testing.T) {
 		logs := plog.NewLogs()
 		resourceLogs := logs.ResourceLogs()
 		resourceLog := resourceLogs.AppendEmpty()
-		resourceLog.Resource().Attributes().UpsertString("k0", "should use ILL attr value instead")
-		resourceLog.Resource().Attributes().UpsertString("k3", "v3")
-		resourceLog.Resource().Attributes().UpsertInt("k4", 123)
+		resourceLog.Resource().Attributes().PutStr("k0", "should use ILL attr value instead")
+		resourceLog.Resource().Attributes().PutStr("k3", "v3")
+		resourceLog.Resource().Attributes().PutInt("k4", 123)
+		resourceLog.Resource().Attributes().PutStr("com.splunk.signalfx.access_token", "hunter2")
 
 		ilLogs := resourceLog.ScopeLogs()
 		logSlice := ilLogs.AppendEmpty().LogRecords()
@@ -67,20 +57,17 @@ func TestLogDataToSignalFxEvents(t *testing.T) {
 		l.SetTimestamp(pcommon.NewTimestampFromTime(now.Truncate(time.Millisecond)))
 		attrs := l.Attributes()
 
-		attrs.UpsertString("k0", "v0")
-		attrs.UpsertString("k1", "v1")
-		attrs.UpsertString("k2", "v2")
-		attrs.UpsertInt("com.splunk.signalfx.event_category", int64(sfxpb.EventCategory_USER_DEFINED))
-		attrs.UpsertString("com.splunk.signalfx.event_type", "shutdown")
+		attrs.PutStr("k0", "v0")
+		attrs.PutStr("k1", "v1")
+		attrs.PutStr("k2", "v2")
+		attrs.PutInt("com.splunk.signalfx.event_category", int64(sfxpb.EventCategory_USER_DEFINED))
+		attrs.PutStr("com.splunk.signalfx.event_type", "shutdown")
 
-		propMap := attrs.UpsertEmptyMap("com.splunk.signalfx.event_properties")
-		propMap.UpsertString("env", "prod")
-		propMap.UpsertBool("isActive", true)
-		propMap.UpsertInt("rack", 5)
-		propMap.UpsertDouble("temp", 40.5)
-		propMap.Sort()
-
-		l.Attributes().Sort()
+		propMap := attrs.PutEmptyMap("com.splunk.signalfx.event_properties")
+		propMap.PutStr("env", "prod")
+		propMap.PutBool("isActive", true)
+		propMap.PutInt("rack", 5)
+		propMap.PutDouble("temp", 40.5)
 
 		return logs
 	}
@@ -106,7 +93,7 @@ func TestLogDataToSignalFxEvents(t *testing.T) {
 			logData: func() plog.Logs {
 				logs := buildDefaultLogs()
 				lrs := logs.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
-				lrs.At(0).Attributes().UpsertEmpty("com.splunk.signalfx.event_category")
+				lrs.At(0).Attributes().PutEmpty("com.splunk.signalfx.event_category")
 				return logs
 			}(),
 		},
@@ -131,9 +118,6 @@ func TestLogDataToSignalFxEvents(t *testing.T) {
 			resource := tt.logData.ResourceLogs().At(0).Resource()
 			logSlice := tt.logData.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
 			events, dropped := LogRecordSliceToSignalFxV2(zap.NewNop(), logSlice, resource.Attributes())
-			for i := 0; i < logSlice.Len(); i++ {
-				logSlice.At(i).Attributes().Sort()
-			}
 
 			for k := range events {
 				sort.Slice(events[k].Properties, func(i, j int) bool {
@@ -149,8 +133,8 @@ func TestLogDataToSignalFxEvents(t *testing.T) {
 	}
 }
 
-func mapToEventProps(m map[string]interface{}) []*sfxpb.Property {
-	var out []*sfxpb.Property
+func mapToEventProps(m map[string]any) []*sfxpb.Property {
+	out := make([]*sfxpb.Property, 0, len(m))
 	for k, v := range m {
 		var pval sfxpb.PropertyValue
 

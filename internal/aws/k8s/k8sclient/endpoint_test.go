@@ -1,22 +1,11 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package k8sclient
 
 import (
 	"log"
-	"reflect"
+	goruntime "runtime"
 	"testing"
 	"time"
 
@@ -371,7 +360,7 @@ func setUpEndpointClient() (*epClient, chan struct{}) {
 func TestEpClient_PodKeyToServiceNames(t *testing.T) {
 	client, stopChan := setUpEndpointClient()
 	defer close(stopChan)
-	arrays := make([]interface{}, len(endpointsArray))
+	arrays := make([]any, len(endpointsArray))
 	for i := range arrays {
 		arrays[i] = endpointsArray[i]
 	}
@@ -389,7 +378,7 @@ func TestEpClient_PodKeyToServiceNames(t *testing.T) {
 	}
 	resultMap := client.PodKeyToServiceNames()
 	log.Printf("PodKeyToServiceNames (len=%v): %v", len(resultMap), awsutil.Prettify(resultMap))
-	assert.True(t, reflect.DeepEqual(resultMap, expectedMap))
+	assert.Equal(t, expectedMap, resultMap)
 }
 
 func TestEpClient_ServiceNameToPodNum(t *testing.T) {
@@ -405,7 +394,7 @@ func TestEpClient_ServiceNameToPodNum(t *testing.T) {
 	}
 	resultMap := client.ServiceToPodNum()
 	log.Printf("ServiceNameToPodNum (len=%v): %v", len(resultMap), awsutil.Prettify(resultMap))
-	assert.True(t, reflect.DeepEqual(resultMap, expectedMap))
+	assert.Equal(t, expectedMap, resultMap)
 	client.shutdown()
 	time.Sleep(2 * time.Millisecond)
 	select {
@@ -418,15 +407,19 @@ func TestEpClient_ServiceNameToPodNum(t *testing.T) {
 func TestTransformFuncEndpoint(t *testing.T) {
 	info, err := transformFuncEndpoint(nil)
 	assert.Nil(t, info)
-	assert.NotNil(t, err)
+	assert.Error(t, err)
 }
 
 func TestNewEndpointClient(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/38903")
+	}
 	setKubeConfigPath(t)
 	setOption := epSyncCheckerOption(&mockReflectorSyncChecker{})
 
 	fakeClientSet := fake.NewSimpleClientset(endpointsArray...)
 	client := newEpClient(fakeClientSet, zap.NewNop(), setOption)
 	assert.NotNil(t, client)
+	client.shutdown()
 	removeTempKubeConfig()
 }

@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package spanprocessor
 
@@ -20,24 +9,24 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterconfig"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterconfig"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterset"
 )
 
 func TestLoadingConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		id       config.ComponentID
-		expected config.Processor
+		id       component.ID
+		expected component.Config
 	}{
 		{
-			id: config.NewComponentIDWithName("span", "custom"),
+			id: component.MustNewIDWithName("span", "custom"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID("span")),
 				Rename: Name{
 					FromAttributes: []string{"db.svc", "operation", "id"},
 					Separator:      "::",
@@ -45,9 +34,8 @@ func TestLoadingConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName("span", "no-separator"),
+			id: component.MustNewIDWithName("span", "no-separator"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID("span")),
 				Rename: Name{
 					FromAttributes: []string{"db.svc", "operation", "id"},
 					Separator:      "",
@@ -55,20 +43,30 @@ func TestLoadingConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName("span", "to_attributes"),
+			id: component.MustNewIDWithName("span", "to_attributes"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID("span")),
 				Rename: Name{
 					ToAttributes: &ToAttributes{
-						Rules: []string{`^\/api\/v1\/document\/(?P<documentId>.*)\/update$`},
+						Rules:            []string{`^\/api\/v1\/document\/(?P<documentId>.*)\/update$`},
+						KeepOriginalName: false,
 					},
 				},
 			},
 		},
 		{
-			id: config.NewComponentIDWithName("span", "includeexclude"),
+			id: component.MustNewIDWithName("span", "to_attributes_keep_original_name"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID("span")),
+				Rename: Name{
+					ToAttributes: &ToAttributes{
+						Rules:            []string{`^\/api\/v1\/document\/(?P<documentId>.*)\/update$`},
+						KeepOriginalName: true,
+					},
+				},
+			},
+		},
+		{
+			id: component.MustNewIDWithName("span", "includeexclude"),
+			expected: &Config{
 				MatchConfig: filterconfig.MatchConfig{
 					Include: &filterconfig.MatchProperties{
 						Config:    *createMatchConfig(filterset.Regexp),
@@ -89,9 +87,8 @@ func TestLoadingConfig(t *testing.T) {
 		},
 		{
 			// Set name
-			id: config.NewComponentIDWithName("span", "set_status_err"),
+			id: component.MustNewIDWithName("span", "set_status_err"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID("span")),
 				SetStatus: &Status{
 					Code:        "Error",
 					Description: "some additional error description",
@@ -99,9 +96,8 @@ func TestLoadingConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName("span", "set_status_ok"),
+			id: component.MustNewIDWithName("span", "set_status_ok"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID("span")),
 				MatchConfig: filterconfig.MatchConfig{
 					Include: &filterconfig.MatchProperties{
 						Attributes: []filterconfig.Attribute{
@@ -125,9 +121,9 @@ func TestLoadingConfig(t *testing.T) {
 
 			sub, err := cm.Sub(tt.id.String())
 			require.NoError(t, err)
-			require.NoError(t, config.UnmarshalProcessor(sub, cfg))
+			require.NoError(t, sub.Unmarshal(cfg))
 
-			assert.NoError(t, cfg.Validate())
+			assert.NoError(t, xconfmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}

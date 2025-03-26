@@ -1,19 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build windows
-// +build windows
 
 package iisreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/iisreceiver"
 
@@ -23,7 +11,7 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/iisreceiver/internal/metadata"
 )
 
-type recordFunc = func(*metadata.MetricsBuilder, pcommon.Timestamp, float64)
+type recordFunc = func(md *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64)
 
 type perfCounterRecorderConf struct {
 	object    string
@@ -31,10 +19,22 @@ type perfCounterRecorderConf struct {
 	recorders map[string]recordFunc
 }
 
-var perfCounterRecorders = []perfCounterRecorderConf{
+var totalPerfCounterRecorders = []perfCounterRecorderConf{
+	{
+		object:   "Process",
+		instance: "_Total",
+		recorders: map[string]recordFunc{
+			"Thread Count": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
+				mb.RecordIisThreadActiveDataPoint(ts, int64(val))
+			},
+		},
+	},
+}
+
+var sitePerfCounterRecorders = []perfCounterRecorderConf{
 	{
 		object:   "Web Service",
-		instance: "_Total",
+		instance: "*",
 		recorders: map[string]recordFunc{
 			"Current Connections": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
 				mb.RecordIisConnectionActiveDataPoint(ts, int64(val))
@@ -46,7 +46,8 @@ var perfCounterRecorders = []perfCounterRecorderConf{
 				mb.RecordIisNetworkIoDataPoint(ts, int64(val), metadata.AttributeDirectionSent)
 			},
 			"Total Connection Attempts (all instances)": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp,
-				val float64) {
+				val float64,
+			) {
 				mb.RecordIisConnectionAttemptCountDataPoint(ts, int64(val))
 			},
 			"Total Delete Requests": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
@@ -87,6 +88,9 @@ var perfCounterRecorders = []perfCounterRecorderConf{
 			},
 		},
 	},
+}
+
+var appPoolPerfCounterRecorders = []perfCounterRecorderConf{
 	{
 		object:   "HTTP Service Request Queues",
 		instance: "*",
@@ -97,18 +101,22 @@ var perfCounterRecorders = []perfCounterRecorderConf{
 			"CurrentQueueSize": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
 				mb.RecordIisRequestQueueCountDataPoint(ts, int64(val))
 			},
-			"MaxQueueItemAge": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
-				mb.RecordIisRequestQueueAgeMaxDataPoint(ts, int64(val))
-			},
 		},
 	},
 	{
-		object:   "Process",
-		instance: "_Total",
+		object:   "APP_POOL_WAS",
+		instance: "*",
 		recorders: map[string]recordFunc{
-			"Thread Count": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
-				mb.RecordIisThreadActiveDataPoint(ts, int64(val))
+			"Current Application Pool State": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
+				mb.RecordIisApplicationPoolStateDataPoint(ts, int64(val))
+			},
+			"Current Application Pool Uptime": func(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
+				mb.RecordIisApplicationPoolUptimeDataPoint(ts, int64(val))
 			},
 		},
 	},
+}
+
+func recordMaxQueueItemAge(mb *metadata.MetricsBuilder, ts pcommon.Timestamp, val float64) {
+	mb.RecordIisRequestQueueAgeMaxDataPoint(ts, int64(val))
 }

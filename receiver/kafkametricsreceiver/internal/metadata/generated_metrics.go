@@ -6,71 +6,66 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/filter"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/receiver"
 )
 
-// MetricSettings provides common settings for a particular metric.
-type MetricSettings struct {
-	Enabled bool `mapstructure:"enabled"`
+type metricKafkaBrokerLogRetentionPeriod struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
 }
 
-// MetricsSettings provides settings for kafkametricsreceiver metrics.
-type MetricsSettings struct {
-	KafkaBrokers                 MetricSettings `mapstructure:"kafka.brokers"`
-	KafkaConsumerGroupLag        MetricSettings `mapstructure:"kafka.consumer_group.lag"`
-	KafkaConsumerGroupLagSum     MetricSettings `mapstructure:"kafka.consumer_group.lag_sum"`
-	KafkaConsumerGroupMembers    MetricSettings `mapstructure:"kafka.consumer_group.members"`
-	KafkaConsumerGroupOffset     MetricSettings `mapstructure:"kafka.consumer_group.offset"`
-	KafkaConsumerGroupOffsetSum  MetricSettings `mapstructure:"kafka.consumer_group.offset_sum"`
-	KafkaPartitionCurrentOffset  MetricSettings `mapstructure:"kafka.partition.current_offset"`
-	KafkaPartitionOldestOffset   MetricSettings `mapstructure:"kafka.partition.oldest_offset"`
-	KafkaPartitionReplicas       MetricSettings `mapstructure:"kafka.partition.replicas"`
-	KafkaPartitionReplicasInSync MetricSettings `mapstructure:"kafka.partition.replicas_in_sync"`
-	KafkaTopicPartitions         MetricSettings `mapstructure:"kafka.topic.partitions"`
+// init fills kafka.broker.log_retention_period metric with initial data.
+func (m *metricKafkaBrokerLogRetentionPeriod) init() {
+	m.data.SetName("kafka.broker.log_retention_period")
+	m.data.SetDescription("log retention time (s) of a broker.")
+	m.data.SetUnit("s")
+	m.data.SetEmptyGauge()
+	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
-func DefaultMetricsSettings() MetricsSettings {
-	return MetricsSettings{
-		KafkaBrokers: MetricSettings{
-			Enabled: true,
-		},
-		KafkaConsumerGroupLag: MetricSettings{
-			Enabled: true,
-		},
-		KafkaConsumerGroupLagSum: MetricSettings{
-			Enabled: true,
-		},
-		KafkaConsumerGroupMembers: MetricSettings{
-			Enabled: true,
-		},
-		KafkaConsumerGroupOffset: MetricSettings{
-			Enabled: true,
-		},
-		KafkaConsumerGroupOffsetSum: MetricSettings{
-			Enabled: true,
-		},
-		KafkaPartitionCurrentOffset: MetricSettings{
-			Enabled: true,
-		},
-		KafkaPartitionOldestOffset: MetricSettings{
-			Enabled: true,
-		},
-		KafkaPartitionReplicas: MetricSettings{
-			Enabled: true,
-		},
-		KafkaPartitionReplicasInSync: MetricSettings{
-			Enabled: true,
-		},
-		KafkaTopicPartitions: MetricSettings{
-			Enabled: true,
-		},
+func (m *metricKafkaBrokerLogRetentionPeriod) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, brokerAttributeValue string) {
+	if !m.config.Enabled {
+		return
 	}
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("broker", brokerAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricKafkaBrokerLogRetentionPeriod) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricKafkaBrokerLogRetentionPeriod) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricKafkaBrokerLogRetentionPeriod(cfg MetricConfig) metricKafkaBrokerLogRetentionPeriod {
+	m := metricKafkaBrokerLogRetentionPeriod{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
 }
 
 type metricKafkaBrokers struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -79,38 +74,40 @@ func (m *metricKafkaBrokers) init() {
 	m.data.SetName("kafka.brokers")
 	m.data.SetDescription("Number of brokers in the cluster.")
 	m.data.SetUnit("{brokers}")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
 func (m *metricKafkaBrokers) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
-	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
 func (m *metricKafkaBrokers) updateCapacity() {
-	if m.data.Gauge().DataPoints().Len() > m.capacity {
-		m.capacity = m.data.Gauge().DataPoints().Len()
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaBrokers) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaBrokers(settings MetricSettings) metricKafkaBrokers {
-	m := metricKafkaBrokers{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaBrokers(cfg MetricConfig) metricKafkaBrokers {
+	m := metricKafkaBrokers{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -119,7 +116,7 @@ func newMetricKafkaBrokers(settings MetricSettings) metricKafkaBrokers {
 
 type metricKafkaConsumerGroupLag struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -128,21 +125,21 @@ func (m *metricKafkaConsumerGroupLag) init() {
 	m.data.SetName("kafka.consumer_group.lag")
 	m.data.SetDescription("Current approximate lag of consumer group at partition of topic")
 	m.data.SetUnit("1")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaConsumerGroupLag) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, groupAttributeValue string, topicAttributeValue string, partitionAttributeValue int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("group", groupAttributeValue)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
-	dp.Attributes().UpsertInt("partition", partitionAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("group", groupAttributeValue)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+	dp.Attributes().PutInt("partition", partitionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -154,16 +151,16 @@ func (m *metricKafkaConsumerGroupLag) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaConsumerGroupLag) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaConsumerGroupLag(settings MetricSettings) metricKafkaConsumerGroupLag {
-	m := metricKafkaConsumerGroupLag{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaConsumerGroupLag(cfg MetricConfig) metricKafkaConsumerGroupLag {
+	m := metricKafkaConsumerGroupLag{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -172,7 +169,7 @@ func newMetricKafkaConsumerGroupLag(settings MetricSettings) metricKafkaConsumer
 
 type metricKafkaConsumerGroupLagSum struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -181,20 +178,20 @@ func (m *metricKafkaConsumerGroupLagSum) init() {
 	m.data.SetName("kafka.consumer_group.lag_sum")
 	m.data.SetDescription("Current approximate sum of consumer group lag across all partitions of topic")
 	m.data.SetUnit("1")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaConsumerGroupLagSum) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, groupAttributeValue string, topicAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("group", groupAttributeValue)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("group", groupAttributeValue)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -206,16 +203,16 @@ func (m *metricKafkaConsumerGroupLagSum) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaConsumerGroupLagSum) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaConsumerGroupLagSum(settings MetricSettings) metricKafkaConsumerGroupLagSum {
-	m := metricKafkaConsumerGroupLagSum{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaConsumerGroupLagSum(cfg MetricConfig) metricKafkaConsumerGroupLagSum {
+	m := metricKafkaConsumerGroupLagSum{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -224,7 +221,7 @@ func newMetricKafkaConsumerGroupLagSum(settings MetricSettings) metricKafkaConsu
 
 type metricKafkaConsumerGroupMembers struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -233,40 +230,42 @@ func (m *metricKafkaConsumerGroupMembers) init() {
 	m.data.SetName("kafka.consumer_group.members")
 	m.data.SetDescription("Count of members in the consumer group")
 	m.data.SetUnit("{members}")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
-	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaConsumerGroupMembers) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, groupAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
-	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("group", groupAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("group", groupAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
 func (m *metricKafkaConsumerGroupMembers) updateCapacity() {
-	if m.data.Gauge().DataPoints().Len() > m.capacity {
-		m.capacity = m.data.Gauge().DataPoints().Len()
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaConsumerGroupMembers) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaConsumerGroupMembers(settings MetricSettings) metricKafkaConsumerGroupMembers {
-	m := metricKafkaConsumerGroupMembers{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaConsumerGroupMembers(cfg MetricConfig) metricKafkaConsumerGroupMembers {
+	m := metricKafkaConsumerGroupMembers{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -275,7 +274,7 @@ func newMetricKafkaConsumerGroupMembers(settings MetricSettings) metricKafkaCons
 
 type metricKafkaConsumerGroupOffset struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -284,21 +283,21 @@ func (m *metricKafkaConsumerGroupOffset) init() {
 	m.data.SetName("kafka.consumer_group.offset")
 	m.data.SetDescription("Current offset of the consumer group at partition of topic")
 	m.data.SetUnit("1")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaConsumerGroupOffset) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, groupAttributeValue string, topicAttributeValue string, partitionAttributeValue int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("group", groupAttributeValue)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
-	dp.Attributes().UpsertInt("partition", partitionAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("group", groupAttributeValue)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+	dp.Attributes().PutInt("partition", partitionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -310,16 +309,16 @@ func (m *metricKafkaConsumerGroupOffset) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaConsumerGroupOffset) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaConsumerGroupOffset(settings MetricSettings) metricKafkaConsumerGroupOffset {
-	m := metricKafkaConsumerGroupOffset{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaConsumerGroupOffset(cfg MetricConfig) metricKafkaConsumerGroupOffset {
+	m := metricKafkaConsumerGroupOffset{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -328,7 +327,7 @@ func newMetricKafkaConsumerGroupOffset(settings MetricSettings) metricKafkaConsu
 
 type metricKafkaConsumerGroupOffsetSum struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -337,20 +336,20 @@ func (m *metricKafkaConsumerGroupOffsetSum) init() {
 	m.data.SetName("kafka.consumer_group.offset_sum")
 	m.data.SetDescription("Sum of consumer group offset across partitions of topic")
 	m.data.SetUnit("1")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaConsumerGroupOffsetSum) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, groupAttributeValue string, topicAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("group", groupAttributeValue)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("group", groupAttributeValue)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -362,16 +361,16 @@ func (m *metricKafkaConsumerGroupOffsetSum) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaConsumerGroupOffsetSum) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaConsumerGroupOffsetSum(settings MetricSettings) metricKafkaConsumerGroupOffsetSum {
-	m := metricKafkaConsumerGroupOffsetSum{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaConsumerGroupOffsetSum(cfg MetricConfig) metricKafkaConsumerGroupOffsetSum {
+	m := metricKafkaConsumerGroupOffsetSum{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -380,7 +379,7 @@ func newMetricKafkaConsumerGroupOffsetSum(settings MetricSettings) metricKafkaCo
 
 type metricKafkaPartitionCurrentOffset struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -389,20 +388,20 @@ func (m *metricKafkaPartitionCurrentOffset) init() {
 	m.data.SetName("kafka.partition.current_offset")
 	m.data.SetDescription("Current offset of partition of topic.")
 	m.data.SetUnit("1")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaPartitionCurrentOffset) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string, partitionAttributeValue int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
-	dp.Attributes().UpsertInt("partition", partitionAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+	dp.Attributes().PutInt("partition", partitionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -414,16 +413,16 @@ func (m *metricKafkaPartitionCurrentOffset) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaPartitionCurrentOffset) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaPartitionCurrentOffset(settings MetricSettings) metricKafkaPartitionCurrentOffset {
-	m := metricKafkaPartitionCurrentOffset{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaPartitionCurrentOffset(cfg MetricConfig) metricKafkaPartitionCurrentOffset {
+	m := metricKafkaPartitionCurrentOffset{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -432,7 +431,7 @@ func newMetricKafkaPartitionCurrentOffset(settings MetricSettings) metricKafkaPa
 
 type metricKafkaPartitionOldestOffset struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -441,20 +440,20 @@ func (m *metricKafkaPartitionOldestOffset) init() {
 	m.data.SetName("kafka.partition.oldest_offset")
 	m.data.SetDescription("Oldest offset of partition of topic")
 	m.data.SetUnit("1")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaPartitionOldestOffset) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string, partitionAttributeValue int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
-	dp.Attributes().UpsertInt("partition", partitionAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+	dp.Attributes().PutInt("partition", partitionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -466,16 +465,16 @@ func (m *metricKafkaPartitionOldestOffset) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaPartitionOldestOffset) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaPartitionOldestOffset(settings MetricSettings) metricKafkaPartitionOldestOffset {
-	m := metricKafkaPartitionOldestOffset{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaPartitionOldestOffset(cfg MetricConfig) metricKafkaPartitionOldestOffset {
+	m := metricKafkaPartitionOldestOffset{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -484,7 +483,7 @@ func newMetricKafkaPartitionOldestOffset(settings MetricSettings) metricKafkaPar
 
 type metricKafkaPartitionReplicas struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -493,41 +492,43 @@ func (m *metricKafkaPartitionReplicas) init() {
 	m.data.SetName("kafka.partition.replicas")
 	m.data.SetDescription("Number of replicas for partition of topic")
 	m.data.SetUnit("{replicas}")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
-	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaPartitionReplicas) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string, partitionAttributeValue int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
-	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
-	dp.Attributes().UpsertInt("partition", partitionAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+	dp.Attributes().PutInt("partition", partitionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
 func (m *metricKafkaPartitionReplicas) updateCapacity() {
-	if m.data.Gauge().DataPoints().Len() > m.capacity {
-		m.capacity = m.data.Gauge().DataPoints().Len()
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaPartitionReplicas) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaPartitionReplicas(settings MetricSettings) metricKafkaPartitionReplicas {
-	m := metricKafkaPartitionReplicas{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaPartitionReplicas(cfg MetricConfig) metricKafkaPartitionReplicas {
+	m := metricKafkaPartitionReplicas{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -536,7 +537,7 @@ func newMetricKafkaPartitionReplicas(settings MetricSettings) metricKafkaPartiti
 
 type metricKafkaPartitionReplicasInSync struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -545,41 +546,196 @@ func (m *metricKafkaPartitionReplicasInSync) init() {
 	m.data.SetName("kafka.partition.replicas_in_sync")
 	m.data.SetDescription("Number of synchronized replicas of partition")
 	m.data.SetUnit("{replicas}")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
-	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaPartitionReplicasInSync) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string, partitionAttributeValue int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
-	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
-	dp.Attributes().UpsertInt("partition", partitionAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+	dp.Attributes().PutInt("partition", partitionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
 func (m *metricKafkaPartitionReplicasInSync) updateCapacity() {
-	if m.data.Gauge().DataPoints().Len() > m.capacity {
-		m.capacity = m.data.Gauge().DataPoints().Len()
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaPartitionReplicasInSync) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaPartitionReplicasInSync(settings MetricSettings) metricKafkaPartitionReplicasInSync {
-	m := metricKafkaPartitionReplicasInSync{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaPartitionReplicasInSync(cfg MetricConfig) metricKafkaPartitionReplicasInSync {
+	m := metricKafkaPartitionReplicasInSync{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricKafkaTopicLogRetentionPeriod struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills kafka.topic.log_retention_period metric with initial data.
+func (m *metricKafkaTopicLogRetentionPeriod) init() {
+	m.data.SetName("kafka.topic.log_retention_period")
+	m.data.SetDescription("log retention period of a topic (s).")
+	m.data.SetUnit("s")
+	m.data.SetEmptyGauge()
+	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+}
+
+func (m *metricKafkaTopicLogRetentionPeriod) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricKafkaTopicLogRetentionPeriod) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricKafkaTopicLogRetentionPeriod) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricKafkaTopicLogRetentionPeriod(cfg MetricConfig) metricKafkaTopicLogRetentionPeriod {
+	m := metricKafkaTopicLogRetentionPeriod{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricKafkaTopicLogRetentionSize struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills kafka.topic.log_retention_size metric with initial data.
+func (m *metricKafkaTopicLogRetentionSize) init() {
+	m.data.SetName("kafka.topic.log_retention_size")
+	m.data.SetDescription("log retention size of a topic in Bytes, The value (-1) indicates infinite size.")
+	m.data.SetUnit("By")
+	m.data.SetEmptyGauge()
+	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+}
+
+func (m *metricKafkaTopicLogRetentionSize) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricKafkaTopicLogRetentionSize) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricKafkaTopicLogRetentionSize) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricKafkaTopicLogRetentionSize(cfg MetricConfig) metricKafkaTopicLogRetentionSize {
+	m := metricKafkaTopicLogRetentionSize{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricKafkaTopicMinInsyncReplicas struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills kafka.topic.min_insync_replicas metric with initial data.
+func (m *metricKafkaTopicMinInsyncReplicas) init() {
+	m.data.SetName("kafka.topic.min_insync_replicas")
+	m.data.SetDescription("minimum in-sync replicas of a topic.")
+	m.data.SetUnit("{replicas}")
+	m.data.SetEmptyGauge()
+	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+}
+
+func (m *metricKafkaTopicMinInsyncReplicas) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricKafkaTopicMinInsyncReplicas) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricKafkaTopicMinInsyncReplicas) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricKafkaTopicMinInsyncReplicas(cfg MetricConfig) metricKafkaTopicMinInsyncReplicas {
+	m := metricKafkaTopicMinInsyncReplicas{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -588,7 +744,7 @@ func newMetricKafkaPartitionReplicasInSync(settings MetricSettings) metricKafkaP
 
 type metricKafkaTopicPartitions struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -597,40 +753,93 @@ func (m *metricKafkaTopicPartitions) init() {
 	m.data.SetName("kafka.topic.partitions")
 	m.data.SetDescription("Number of partitions in topic.")
 	m.data.SetUnit("{partitions}")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
-	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricKafkaTopicPartitions) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
-	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("topic", topicAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
 func (m *metricKafkaTopicPartitions) updateCapacity() {
-	if m.data.Gauge().DataPoints().Len() > m.capacity {
-		m.capacity = m.data.Gauge().DataPoints().Len()
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricKafkaTopicPartitions) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricKafkaTopicPartitions(settings MetricSettings) metricKafkaTopicPartitions {
-	m := metricKafkaTopicPartitions{settings: settings}
-	if settings.Enabled {
+func newMetricKafkaTopicPartitions(cfg MetricConfig) metricKafkaTopicPartitions {
+	m := metricKafkaTopicPartitions{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricKafkaTopicReplicationFactor struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills kafka.topic.replication_factor metric with initial data.
+func (m *metricKafkaTopicReplicationFactor) init() {
+	m.data.SetName("kafka.topic.replication_factor")
+	m.data.SetDescription("replication factor of a topic.")
+	m.data.SetUnit("1")
+	m.data.SetEmptyGauge()
+	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+}
+
+func (m *metricKafkaTopicReplicationFactor) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("topic", topicAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricKafkaTopicReplicationFactor) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricKafkaTopicReplicationFactor) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricKafkaTopicReplicationFactor(cfg MetricConfig) metricKafkaTopicReplicationFactor {
+	m := metricKafkaTopicReplicationFactor{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -638,57 +847,91 @@ func newMetricKafkaTopicPartitions(settings MetricSettings) metricKafkaTopicPart
 }
 
 // MetricsBuilder provides an interface for scrapers to report metrics while taking care of all the transformations
-// required to produce metric representation defined in metadata and user settings.
+// required to produce metric representation defined in metadata and user config.
 type MetricsBuilder struct {
-	startTime                          pcommon.Timestamp   // start time that will be applied to all recorded data points.
-	metricsCapacity                    int                 // maximum observed number of metrics per resource.
-	resourceCapacity                   int                 // maximum observed number of resource attributes.
-	metricsBuffer                      pmetric.Metrics     // accumulates metrics data before emitting.
-	buildInfo                          component.BuildInfo // contains version information
-	metricKafkaBrokers                 metricKafkaBrokers
-	metricKafkaConsumerGroupLag        metricKafkaConsumerGroupLag
-	metricKafkaConsumerGroupLagSum     metricKafkaConsumerGroupLagSum
-	metricKafkaConsumerGroupMembers    metricKafkaConsumerGroupMembers
-	metricKafkaConsumerGroupOffset     metricKafkaConsumerGroupOffset
-	metricKafkaConsumerGroupOffsetSum  metricKafkaConsumerGroupOffsetSum
-	metricKafkaPartitionCurrentOffset  metricKafkaPartitionCurrentOffset
-	metricKafkaPartitionOldestOffset   metricKafkaPartitionOldestOffset
-	metricKafkaPartitionReplicas       metricKafkaPartitionReplicas
-	metricKafkaPartitionReplicasInSync metricKafkaPartitionReplicasInSync
-	metricKafkaTopicPartitions         metricKafkaTopicPartitions
+	config                              MetricsBuilderConfig // config of the metrics builder.
+	startTime                           pcommon.Timestamp    // start time that will be applied to all recorded data points.
+	metricsCapacity                     int                  // maximum observed number of metrics per resource.
+	metricsBuffer                       pmetric.Metrics      // accumulates metrics data before emitting.
+	buildInfo                           component.BuildInfo  // contains version information.
+	resourceAttributeIncludeFilter      map[string]filter.Filter
+	resourceAttributeExcludeFilter      map[string]filter.Filter
+	metricKafkaBrokerLogRetentionPeriod metricKafkaBrokerLogRetentionPeriod
+	metricKafkaBrokers                  metricKafkaBrokers
+	metricKafkaConsumerGroupLag         metricKafkaConsumerGroupLag
+	metricKafkaConsumerGroupLagSum      metricKafkaConsumerGroupLagSum
+	metricKafkaConsumerGroupMembers     metricKafkaConsumerGroupMembers
+	metricKafkaConsumerGroupOffset      metricKafkaConsumerGroupOffset
+	metricKafkaConsumerGroupOffsetSum   metricKafkaConsumerGroupOffsetSum
+	metricKafkaPartitionCurrentOffset   metricKafkaPartitionCurrentOffset
+	metricKafkaPartitionOldestOffset    metricKafkaPartitionOldestOffset
+	metricKafkaPartitionReplicas        metricKafkaPartitionReplicas
+	metricKafkaPartitionReplicasInSync  metricKafkaPartitionReplicasInSync
+	metricKafkaTopicLogRetentionPeriod  metricKafkaTopicLogRetentionPeriod
+	metricKafkaTopicLogRetentionSize    metricKafkaTopicLogRetentionSize
+	metricKafkaTopicMinInsyncReplicas   metricKafkaTopicMinInsyncReplicas
+	metricKafkaTopicPartitions          metricKafkaTopicPartitions
+	metricKafkaTopicReplicationFactor   metricKafkaTopicReplicationFactor
 }
 
-// metricBuilderOption applies changes to default metrics builder.
-type metricBuilderOption func(*MetricsBuilder)
+// MetricBuilderOption applies changes to default metrics builder.
+type MetricBuilderOption interface {
+	apply(*MetricsBuilder)
+}
+
+type metricBuilderOptionFunc func(mb *MetricsBuilder)
+
+func (mbof metricBuilderOptionFunc) apply(mb *MetricsBuilder) {
+	mbof(mb)
+}
 
 // WithStartTime sets startTime on the metrics builder.
-func WithStartTime(startTime pcommon.Timestamp) metricBuilderOption {
-	return func(mb *MetricsBuilder) {
+func WithStartTime(startTime pcommon.Timestamp) MetricBuilderOption {
+	return metricBuilderOptionFunc(func(mb *MetricsBuilder) {
 		mb.startTime = startTime
-	}
+	})
 }
-
-func NewMetricsBuilder(settings MetricsSettings, buildInfo component.BuildInfo, options ...metricBuilderOption) *MetricsBuilder {
+func NewMetricsBuilder(mbc MetricsBuilderConfig, settings receiver.Settings, options ...MetricBuilderOption) *MetricsBuilder {
 	mb := &MetricsBuilder{
-		startTime:                          pcommon.NewTimestampFromTime(time.Now()),
-		metricsBuffer:                      pmetric.NewMetrics(),
-		buildInfo:                          buildInfo,
-		metricKafkaBrokers:                 newMetricKafkaBrokers(settings.KafkaBrokers),
-		metricKafkaConsumerGroupLag:        newMetricKafkaConsumerGroupLag(settings.KafkaConsumerGroupLag),
-		metricKafkaConsumerGroupLagSum:     newMetricKafkaConsumerGroupLagSum(settings.KafkaConsumerGroupLagSum),
-		metricKafkaConsumerGroupMembers:    newMetricKafkaConsumerGroupMembers(settings.KafkaConsumerGroupMembers),
-		metricKafkaConsumerGroupOffset:     newMetricKafkaConsumerGroupOffset(settings.KafkaConsumerGroupOffset),
-		metricKafkaConsumerGroupOffsetSum:  newMetricKafkaConsumerGroupOffsetSum(settings.KafkaConsumerGroupOffsetSum),
-		metricKafkaPartitionCurrentOffset:  newMetricKafkaPartitionCurrentOffset(settings.KafkaPartitionCurrentOffset),
-		metricKafkaPartitionOldestOffset:   newMetricKafkaPartitionOldestOffset(settings.KafkaPartitionOldestOffset),
-		metricKafkaPartitionReplicas:       newMetricKafkaPartitionReplicas(settings.KafkaPartitionReplicas),
-		metricKafkaPartitionReplicasInSync: newMetricKafkaPartitionReplicasInSync(settings.KafkaPartitionReplicasInSync),
-		metricKafkaTopicPartitions:         newMetricKafkaTopicPartitions(settings.KafkaTopicPartitions),
+		config:                              mbc,
+		startTime:                           pcommon.NewTimestampFromTime(time.Now()),
+		metricsBuffer:                       pmetric.NewMetrics(),
+		buildInfo:                           settings.BuildInfo,
+		metricKafkaBrokerLogRetentionPeriod: newMetricKafkaBrokerLogRetentionPeriod(mbc.Metrics.KafkaBrokerLogRetentionPeriod),
+		metricKafkaBrokers:                  newMetricKafkaBrokers(mbc.Metrics.KafkaBrokers),
+		metricKafkaConsumerGroupLag:         newMetricKafkaConsumerGroupLag(mbc.Metrics.KafkaConsumerGroupLag),
+		metricKafkaConsumerGroupLagSum:      newMetricKafkaConsumerGroupLagSum(mbc.Metrics.KafkaConsumerGroupLagSum),
+		metricKafkaConsumerGroupMembers:     newMetricKafkaConsumerGroupMembers(mbc.Metrics.KafkaConsumerGroupMembers),
+		metricKafkaConsumerGroupOffset:      newMetricKafkaConsumerGroupOffset(mbc.Metrics.KafkaConsumerGroupOffset),
+		metricKafkaConsumerGroupOffsetSum:   newMetricKafkaConsumerGroupOffsetSum(mbc.Metrics.KafkaConsumerGroupOffsetSum),
+		metricKafkaPartitionCurrentOffset:   newMetricKafkaPartitionCurrentOffset(mbc.Metrics.KafkaPartitionCurrentOffset),
+		metricKafkaPartitionOldestOffset:    newMetricKafkaPartitionOldestOffset(mbc.Metrics.KafkaPartitionOldestOffset),
+		metricKafkaPartitionReplicas:        newMetricKafkaPartitionReplicas(mbc.Metrics.KafkaPartitionReplicas),
+		metricKafkaPartitionReplicasInSync:  newMetricKafkaPartitionReplicasInSync(mbc.Metrics.KafkaPartitionReplicasInSync),
+		metricKafkaTopicLogRetentionPeriod:  newMetricKafkaTopicLogRetentionPeriod(mbc.Metrics.KafkaTopicLogRetentionPeriod),
+		metricKafkaTopicLogRetentionSize:    newMetricKafkaTopicLogRetentionSize(mbc.Metrics.KafkaTopicLogRetentionSize),
+		metricKafkaTopicMinInsyncReplicas:   newMetricKafkaTopicMinInsyncReplicas(mbc.Metrics.KafkaTopicMinInsyncReplicas),
+		metricKafkaTopicPartitions:          newMetricKafkaTopicPartitions(mbc.Metrics.KafkaTopicPartitions),
+		metricKafkaTopicReplicationFactor:   newMetricKafkaTopicReplicationFactor(mbc.Metrics.KafkaTopicReplicationFactor),
+		resourceAttributeIncludeFilter:      make(map[string]filter.Filter),
+		resourceAttributeExcludeFilter:      make(map[string]filter.Filter),
 	}
+	if mbc.ResourceAttributes.KafkaClusterAlias.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["kafka.cluster.alias"] = filter.CreateFilter(mbc.ResourceAttributes.KafkaClusterAlias.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.KafkaClusterAlias.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["kafka.cluster.alias"] = filter.CreateFilter(mbc.ResourceAttributes.KafkaClusterAlias.MetricsExclude)
+	}
+
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 	return mb
+}
+
+// NewResourceBuilder returns a new resource builder that should be used to build a resource associated with for the emitted metrics.
+func (mb *MetricsBuilder) NewResourceBuilder() *ResourceBuilder {
+	return NewResourceBuilder(mb.config.ResourceAttributes)
 }
 
 // updateCapacity updates max length of metrics and resource attributes that will be used for the slice capacity.
@@ -696,32 +939,45 @@ func (mb *MetricsBuilder) updateCapacity(rm pmetric.ResourceMetrics) {
 	if mb.metricsCapacity < rm.ScopeMetrics().At(0).Metrics().Len() {
 		mb.metricsCapacity = rm.ScopeMetrics().At(0).Metrics().Len()
 	}
-	if mb.resourceCapacity < rm.Resource().Attributes().Len() {
-		mb.resourceCapacity = rm.Resource().Attributes().Len()
-	}
 }
 
 // ResourceMetricsOption applies changes to provided resource metrics.
-type ResourceMetricsOption func(pmetric.ResourceMetrics)
+type ResourceMetricsOption interface {
+	apply(pmetric.ResourceMetrics)
+}
+
+type resourceMetricsOptionFunc func(pmetric.ResourceMetrics)
+
+func (rmof resourceMetricsOptionFunc) apply(rm pmetric.ResourceMetrics) {
+	rmof(rm)
+}
+
+// WithResource sets the provided resource on the emitted ResourceMetrics.
+// It's recommended to use ResourceBuilder to create the resource.
+func WithResource(res pcommon.Resource) ResourceMetricsOption {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
+		res.CopyTo(rm.Resource())
+	})
+}
 
 // WithStartTimeOverride overrides start time for all the resource metrics data points.
 // This option should be only used if different start time has to be set on metrics coming from different resources.
 func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
 		var dps pmetric.NumberDataPointSlice
 		metrics := rm.ScopeMetrics().At(0).Metrics()
 		for i := 0; i < metrics.Len(); i++ {
-			switch metrics.At(i).DataType() {
-			case pmetric.MetricDataTypeGauge:
+			switch metrics.At(i).Type() {
+			case pmetric.MetricTypeGauge:
 				dps = metrics.At(i).Gauge().DataPoints()
-			case pmetric.MetricDataTypeSum:
+			case pmetric.MetricTypeSum:
 				dps = metrics.At(i).Sum().DataPoints()
 			}
 			for j := 0; j < dps.Len(); j++ {
 				dps.At(j).SetStartTimestamp(start)
 			}
 		}
-	}
+	})
 }
 
 // EmitForResource saves all the generated metrics under a new resource and updates the internal state to be ready for
@@ -729,13 +985,13 @@ func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
 // needs to emit metrics from several resources. Otherwise calling this function is not required,
 // just `Emit` function can be called instead.
 // Resource attributes should be provided as ResourceMetricsOption arguments.
-func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
+func (mb *MetricsBuilder) EmitForResource(options ...ResourceMetricsOption) {
 	rm := pmetric.NewResourceMetrics()
-	rm.Resource().Attributes().EnsureCapacity(mb.resourceCapacity)
 	ils := rm.ScopeMetrics().AppendEmpty()
-	ils.Scope().SetName("otelcol/kafkametricsreceiver")
+	ils.Scope().SetName(ScopeName)
 	ils.Scope().SetVersion(mb.buildInfo.Version)
 	ils.Metrics().EnsureCapacity(mb.metricsCapacity)
+	mb.metricKafkaBrokerLogRetentionPeriod.emit(ils.Metrics())
 	mb.metricKafkaBrokers.emit(ils.Metrics())
 	mb.metricKafkaConsumerGroupLag.emit(ils.Metrics())
 	mb.metricKafkaConsumerGroupLagSum.emit(ils.Metrics())
@@ -746,10 +1002,26 @@ func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
 	mb.metricKafkaPartitionOldestOffset.emit(ils.Metrics())
 	mb.metricKafkaPartitionReplicas.emit(ils.Metrics())
 	mb.metricKafkaPartitionReplicasInSync.emit(ils.Metrics())
+	mb.metricKafkaTopicLogRetentionPeriod.emit(ils.Metrics())
+	mb.metricKafkaTopicLogRetentionSize.emit(ils.Metrics())
+	mb.metricKafkaTopicMinInsyncReplicas.emit(ils.Metrics())
 	mb.metricKafkaTopicPartitions.emit(ils.Metrics())
-	for _, op := range rmo {
-		op(rm)
+	mb.metricKafkaTopicReplicationFactor.emit(ils.Metrics())
+
+	for _, op := range options {
+		op.apply(rm)
 	}
+	for attr, filter := range mb.resourceAttributeIncludeFilter {
+		if val, ok := rm.Resource().Attributes().Get(attr); ok && !filter.Matches(val.AsString()) {
+			return
+		}
+	}
+	for attr, filter := range mb.resourceAttributeExcludeFilter {
+		if val, ok := rm.Resource().Attributes().Get(attr); ok && filter.Matches(val.AsString()) {
+			return
+		}
+	}
+
 	if ils.Metrics().Len() > 0 {
 		mb.updateCapacity(rm)
 		rm.MoveTo(mb.metricsBuffer.ResourceMetrics().AppendEmpty())
@@ -758,12 +1030,17 @@ func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
 
 // Emit returns all the metrics accumulated by the metrics builder and updates the internal state to be ready for
 // recording another set of metrics. This function will be responsible for applying all the transformations required to
-// produce metric representation defined in metadata and user settings, e.g. delta or cumulative.
-func (mb *MetricsBuilder) Emit(rmo ...ResourceMetricsOption) pmetric.Metrics {
-	mb.EmitForResource(rmo...)
-	metrics := pmetric.NewMetrics()
-	mb.metricsBuffer.MoveTo(metrics)
+// produce metric representation defined in metadata and user config, e.g. delta or cumulative.
+func (mb *MetricsBuilder) Emit(options ...ResourceMetricsOption) pmetric.Metrics {
+	mb.EmitForResource(options...)
+	metrics := mb.metricsBuffer
+	mb.metricsBuffer = pmetric.NewMetrics()
 	return metrics
+}
+
+// RecordKafkaBrokerLogRetentionPeriodDataPoint adds a data point to kafka.broker.log_retention_period metric.
+func (mb *MetricsBuilder) RecordKafkaBrokerLogRetentionPeriodDataPoint(ts pcommon.Timestamp, val int64, brokerAttributeValue string) {
+	mb.metricKafkaBrokerLogRetentionPeriod.recordDataPoint(mb.startTime, ts, val, brokerAttributeValue)
 }
 
 // RecordKafkaBrokersDataPoint adds a data point to kafka.brokers metric.
@@ -816,16 +1093,36 @@ func (mb *MetricsBuilder) RecordKafkaPartitionReplicasInSyncDataPoint(ts pcommon
 	mb.metricKafkaPartitionReplicasInSync.recordDataPoint(mb.startTime, ts, val, topicAttributeValue, partitionAttributeValue)
 }
 
+// RecordKafkaTopicLogRetentionPeriodDataPoint adds a data point to kafka.topic.log_retention_period metric.
+func (mb *MetricsBuilder) RecordKafkaTopicLogRetentionPeriodDataPoint(ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	mb.metricKafkaTopicLogRetentionPeriod.recordDataPoint(mb.startTime, ts, val, topicAttributeValue)
+}
+
+// RecordKafkaTopicLogRetentionSizeDataPoint adds a data point to kafka.topic.log_retention_size metric.
+func (mb *MetricsBuilder) RecordKafkaTopicLogRetentionSizeDataPoint(ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	mb.metricKafkaTopicLogRetentionSize.recordDataPoint(mb.startTime, ts, val, topicAttributeValue)
+}
+
+// RecordKafkaTopicMinInsyncReplicasDataPoint adds a data point to kafka.topic.min_insync_replicas metric.
+func (mb *MetricsBuilder) RecordKafkaTopicMinInsyncReplicasDataPoint(ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	mb.metricKafkaTopicMinInsyncReplicas.recordDataPoint(mb.startTime, ts, val, topicAttributeValue)
+}
+
 // RecordKafkaTopicPartitionsDataPoint adds a data point to kafka.topic.partitions metric.
 func (mb *MetricsBuilder) RecordKafkaTopicPartitionsDataPoint(ts pcommon.Timestamp, val int64, topicAttributeValue string) {
 	mb.metricKafkaTopicPartitions.recordDataPoint(mb.startTime, ts, val, topicAttributeValue)
 }
 
+// RecordKafkaTopicReplicationFactorDataPoint adds a data point to kafka.topic.replication_factor metric.
+func (mb *MetricsBuilder) RecordKafkaTopicReplicationFactorDataPoint(ts pcommon.Timestamp, val int64, topicAttributeValue string) {
+	mb.metricKafkaTopicReplicationFactor.recordDataPoint(mb.startTime, ts, val, topicAttributeValue)
+}
+
 // Reset resets metrics builder to its initial state. It should be used when external metrics source is restarted,
 // and metrics builder should update its startTime and reset it's internal state accordingly.
-func (mb *MetricsBuilder) Reset(options ...metricBuilderOption) {
+func (mb *MetricsBuilder) Reset(options ...MetricBuilderOption) {
 	mb.startTime = pcommon.NewTimestampFromTime(time.Now())
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 }

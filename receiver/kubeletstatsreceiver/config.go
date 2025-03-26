@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package kubeletstatsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver"
 
@@ -18,10 +7,10 @@ import (
 	"errors"
 	"fmt"
 
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/confmap"
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
@@ -30,13 +19,13 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver/internal/metadata"
 )
 
-var _ config.Receiver = (*Config)(nil)
+var _ component.Config = (*Config)(nil)
 
 type Config struct {
-	scraperhelper.ScraperControllerSettings `mapstructure:",squash"`
+	scraperhelper.ControllerConfig `mapstructure:",squash"`
 
-	kube.ClientConfig `mapstructure:",squash"`
-	confignet.TCPAddr `mapstructure:",squash"`
+	kube.ClientConfig       `mapstructure:",squash"`
+	confignet.TCPAddrConfig `mapstructure:",squash"`
 
 	// ExtraMetadataLabels contains list of extra metadata that should be taken from /pods endpoint
 	// and put as extra labels on metrics resource.
@@ -51,20 +40,21 @@ type Config struct {
 	// Configuration of the Kubernetes API client.
 	K8sAPIConfig *k8sconfig.APIConfig `mapstructure:"k8s_api_config"`
 
-	// Metrics allows customizing scraped metrics representation.
-	Metrics metadata.MetricsSettings `mapstructure:"metrics"`
-}
+	// NodeName is the node name to limit the discovery of nodes.
+	// For example, node name can be set using the downward API inside the collector
+	// pod spec as follows:
+	//
+	// env:
+	//   - name: K8S_NODE_NAME
+	//     valueFrom:
+	//       fieldRef:
+	//         fieldPath: spec.nodeName
+	//
+	// Then set this value to ${env:K8S_NODE_NAME} in the configuration.
+	NodeName string `mapstructure:"node"`
 
-func (cfg *Config) Validate() error {
-	if err := cfg.ReceiverSettings.Validate(); err != nil {
-		return err
-	}
-	if cfg.K8sAPIConfig != nil {
-		if err := cfg.K8sAPIConfig.Validate(); err != nil {
-			return err
-		}
-	}
-	return nil
+	// MetricsBuilderConfig allows customizing scraped metrics/attributes representation.
+	metadata.MetricsBuilderConfig `mapstructure:",squash"`
 }
 
 // getReceiverOptions returns scraperOptions is the config is valid,
@@ -89,7 +79,6 @@ func (cfg *Config) getReceiverOptions() (*scraperOptions, error) {
 	}
 
 	return &scraperOptions{
-		id:                    cfg.ID(),
 		collectionInterval:    cfg.CollectionInterval,
 		extraMetadataLabels:   cfg.ExtraMetadataLabels,
 		metricGroupsToCollect: mgs,
@@ -117,15 +106,31 @@ func (cfg *Config) Unmarshal(componentParser *confmap.Conf) error {
 		return nil
 	}
 
-	if err := componentParser.UnmarshalExact(cfg); err != nil {
+	if err := componentParser.Unmarshal(cfg); err != nil {
 		return err
 	}
 
-	// custom unmarhalling is required to get []kubelet.MetricGroup, the default
+	// custom unmarshalling is required to get []kubelet.MetricGroup, the default
 	// unmarshaller does not correctly overwrite slices.
 	if !componentParser.IsSet(metricGroupsConfig) {
 		cfg.MetricGroupsToCollect = defaultMetricGroups
 	}
 
+	return nil
+}
+
+func (cfg *Config) Validate() error {
+	if cfg.NodeName == "" {
+		switch {
+		case cfg.Metrics.K8sContainerCPUNodeUtilization.Enabled:
+			return errors.New("for k8s.container.cpu.node.utilization node setting is required. Check the readme on how to set the required setting")
+		case cfg.Metrics.K8sPodCPUNodeUtilization.Enabled:
+			return errors.New("for k8s.pod.cpu.node.utilization node setting is required. Check the readme on how to set the required setting")
+		case cfg.Metrics.K8sContainerMemoryNodeUtilization.Enabled:
+			return errors.New("for k8s.container.memory.node.utilization node setting is required. Check the readme on how to set the required setting")
+		case cfg.Metrics.K8sPodMemoryNodeUtilization.Enabled:
+			return errors.New("for k8s.pod.memory.node.utilization node setting is required. Check the readme on how to set the required setting")
+		}
+	}
 	return nil
 }

@@ -1,24 +1,13 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package helper // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 
+	"go.opentelemetry.io/collector/component"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
@@ -34,13 +23,13 @@ func NewWriterConfig(operatorID, operatorType string) WriterConfig {
 
 // WriterConfig is the configuration of a writer operator.
 type WriterConfig struct {
-	BasicConfig `mapstructure:",squash" yaml:",inline"`
-	OutputIDs   OutputIDs `mapstructure:"output" json:"output" yaml:"output"`
+	BasicConfig `mapstructure:",squash"`
+	OutputIDs   []string `mapstructure:"output"`
 }
 
 // Build will build a writer operator from the config.
-func (c WriterConfig) Build(logger *zap.SugaredLogger) (WriterOperator, error) {
-	basicOperator, err := c.BasicConfig.Build(logger)
+func (c WriterConfig) Build(set component.TelemetrySettings) (WriterOperator, error) {
+	basicOperator, err := c.BasicConfig.Build(set)
 	if err != nil {
 		return WriterOperator{}, err
 	}
@@ -54,19 +43,41 @@ func (c WriterConfig) Build(logger *zap.SugaredLogger) (WriterOperator, error) {
 // WriterOperator is an operator that can write to other operators.
 type WriterOperator struct {
 	BasicOperator
-	OutputIDs       OutputIDs
+	OutputIDs       []string
 	OutputOperators []operator.Operator
 }
 
-// Write will write an entry to the outputs of the operator.
-func (w *WriterOperator) Write(ctx context.Context, e *entry.Entry) {
-	for i, operator := range w.OutputOperators {
+// WriteBatch writes a batch of entries to the outputs of the operator.
+// A batch is a collection of entries that are sent in one go.
+func (w *WriterOperator) WriteBatch(ctx context.Context, entries []*entry.Entry) error {
+	for i, op := range w.OutputOperators {
 		if i == len(w.OutputOperators)-1 {
-			_ = operator.Process(ctx, e)
-			return
+			return op.ProcessBatch(ctx, entries)
 		}
-		_ = operator.Process(ctx, e.Copy())
+		copyOfEntries := make([]*entry.Entry, 0, len(entries))
+		for i := range entries {
+			copyOfEntries = append(copyOfEntries, entries[i].Copy())
+		}
+		err := op.ProcessBatch(ctx, copyOfEntries)
+		if err != nil {
+			w.Logger().Error("Failed to process entries", zap.Error(err))
+		}
 	}
+	return nil
+}
+
+// Write will write an entry to the outputs of the operator.
+func (w *WriterOperator) Write(ctx context.Context, e *entry.Entry) error {
+	for i, op := range w.OutputOperators {
+		if i == len(w.OutputOperators)-1 {
+			return op.Process(ctx, e)
+		}
+		err := op.Process(ctx, e.Copy())
+		if err != nil {
+			w.Logger().Error("Failed to process entry", zap.Error(err))
+		}
+	}
+	return nil
 }
 
 // CanOutput always returns true for a writer operator.
@@ -86,9 +97,9 @@ func (w *WriterOperator) GetOutputIDs() []string {
 
 // SetOutputs will set the outputs of the operator.
 func (w *WriterOperator) SetOutputs(operators []operator.Operator) error {
-	var outputOperators []operator.Operator
+	outputOperators := make([]operator.Operator, len(w.OutputIDs))
 
-	for _, operatorID := range w.OutputIDs {
+	for i, operatorID := range w.OutputIDs {
 		operator, ok := w.findOperator(operators, operatorID)
 		if !ok {
 			return fmt.Errorf("operator '%s' does not exist", operatorID)
@@ -98,7 +109,7 @@ func (w *WriterOperator) SetOutputs(operators []operator.Operator) error {
 			return fmt.Errorf("operator '%s' can not process entries", operatorID)
 		}
 
-		outputOperators = append(outputOperators, operator)
+		outputOperators[i] = operator
 	}
 
 	w.OutputOperators = outputOperators
@@ -106,8 +117,8 @@ func (w *WriterOperator) SetOutputs(operators []operator.Operator) error {
 }
 
 // SetOutputIDs will set the outputs of the operator.
-func (w *WriterOperator) SetOutputIDs(opIds []string) {
-	w.OutputIDs = opIds
+func (w *WriterOperator) SetOutputIDs(opIDs []string) {
+	w.OutputIDs = opIDs
 }
 
 // FindOperator will find an operator matching the supplied id.
@@ -118,67 +129,4 @@ func (w *WriterOperator) findOperator(operators []operator.Operator, operatorID 
 		}
 	}
 	return nil, false
-}
-
-// OutputIDs is a collection of operator IDs used as outputs.
-type OutputIDs []string
-
-// UnmarshalJSON will unmarshal a string or array of strings to OutputIDs.
-func (o *OutputIDs) UnmarshalJSON(bytes []byte) error {
-	var value interface{}
-	err := json.Unmarshal(bytes, &value)
-	if err != nil {
-		return err
-	}
-
-	ids, err := NewOutputIDsFromInterface(value)
-	if err != nil {
-		return err
-	}
-
-	*o = ids
-	return nil
-}
-
-// UnmarshalYAML will unmarshal a string or array of strings to OutputIDs.
-func (o *OutputIDs) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	var value interface{}
-	err := unmarshal(&value)
-	if err != nil {
-		return err
-	}
-
-	ids, err := NewOutputIDsFromInterface(value)
-	if err != nil {
-		return err
-	}
-
-	*o = ids
-	return nil
-}
-
-// NewOutputIDsFromInterface creates a new OutputIDs object from an interface
-func NewOutputIDsFromInterface(value interface{}) (OutputIDs, error) {
-	if str, ok := value.(string); ok {
-		return OutputIDs{str}, nil
-	}
-
-	if array, ok := value.([]interface{}); ok {
-		return NewOutputIDsFromArray(array)
-	}
-
-	return nil, fmt.Errorf("value is not of type string or string array")
-}
-
-// NewOutputIDsFromArray creates a new OutputIDs object from an array
-func NewOutputIDsFromArray(array []interface{}) (OutputIDs, error) {
-	ids := OutputIDs{}
-	for _, rawValue := range array {
-		strValue, ok := rawValue.(string)
-		if !ok {
-			return nil, fmt.Errorf("value in array is not of type string")
-		}
-		ids = append(ids, strValue)
-	}
-	return ids, nil
 }

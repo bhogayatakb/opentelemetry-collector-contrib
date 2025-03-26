@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package hostobserver
 
@@ -21,14 +10,13 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"syscall"
 	"testing"
 	"time"
 
-	psnet "github.com/shirou/gopsutil/v3/net"
-	"github.com/shirou/gopsutil/v3/process"
+	psnet "github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component/componenttest"
@@ -36,6 +24,7 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/endpointswatcher"
 )
 
 // Tests observer with real connections on system.
@@ -92,11 +81,11 @@ func TestHostObserver(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			hostPorts, notifier := tt.setup()
 			if tt.errorListingConnections {
-				require.Equal(t, len(notifier.endpointsMap), 0)
+				require.Empty(t, notifier.endpointsMap)
 				return
 			}
 
-			require.True(t, len(notifier.endpointsMap) >= len(hostPorts))
+			require.GreaterOrEqual(t, len(notifier.endpointsMap), len(hostPorts))
 
 			for _, hp := range hostPorts {
 				require.NoError(t, hp.err, "Failed to et host and port")
@@ -123,7 +112,6 @@ func TestHostObserver(t *testing.T) {
 				assert.Equal(t, filepath.Base(exe), details.ProcessName)
 				assert.Equal(t, tt.protocol, details.Transport)
 				assert.Equal(t, isIPv6, details.IsIPv6)
-
 			}
 		})
 	}
@@ -135,7 +123,7 @@ type hostPort struct {
 	err  error
 }
 
-func getHostAndPort(i interface{}) hostPort {
+func getHostAndPort(i any) hostPort {
 	var host, port string
 	var err error
 	switch conn := i.(type) {
@@ -168,7 +156,8 @@ func getExpectedHost(host string, isIPv6 bool) string {
 
 func startAndStopObserver(
 	t *testing.T,
-	getConnectionsOverride func() (conns []psnet.ConnectionStat, err error)) mockNotifier {
+	getConnectionsOverride func() (conns []psnet.ConnectionStat, err error),
+) mockNotifier {
 	ml := endpointsLister{
 		logger:                zap.NewNop(),
 		observerName:          "host_observer/1",
@@ -185,7 +174,7 @@ func startAndStopObserver(
 	require.NotNil(t, ml.getProcess)
 	require.NotNil(t, ml.collectProcessDetails)
 
-	h := &hostObserver{EndpointsWatcher: observer.NewEndpointsWatcher(ml, 10*time.Second, zaptest.NewLogger(t))}
+	h := &hostObserver{EndpointsWatcher: endpointswatcher.New(ml, 10*time.Second, zaptest.NewLogger(t))}
 
 	mn := mockNotifier{map[observer.EndpointID]observer.Endpoint{}}
 
@@ -316,12 +305,12 @@ func TestPortTypeToProtocol(t *testing.T) {
 func TestCollectConnectionDetails(t *testing.T) {
 	tests := []struct {
 		name string
-		conn psnet.ConnectionStat
+		conn *psnet.ConnectionStat
 		want connectionDetails
 	}{
 		{
 			name: "TCPv4 connection",
-			conn: psnet.ConnectionStat{
+			conn: &psnet.ConnectionStat{
 				Family: syscall.AF_INET,
 				Type:   syscall.SOCK_STREAM,
 				Laddr: psnet.Addr{
@@ -339,7 +328,7 @@ func TestCollectConnectionDetails(t *testing.T) {
 		},
 		{
 			name: "TCPv6 connection",
-			conn: psnet.ConnectionStat{
+			conn: &psnet.ConnectionStat{
 				Family: syscall.AF_INET6,
 				Type:   syscall.SOCK_STREAM,
 				Laddr: psnet.Addr{
@@ -357,7 +346,7 @@ func TestCollectConnectionDetails(t *testing.T) {
 		},
 		{
 			name: "TCPv4 connection - 0.0.0.0",
-			conn: psnet.ConnectionStat{
+			conn: &psnet.ConnectionStat{
 				Family: syscall.AF_INET,
 				Type:   syscall.SOCK_STREAM,
 				Laddr: psnet.Addr{
@@ -375,7 +364,7 @@ func TestCollectConnectionDetails(t *testing.T) {
 		},
 		{
 			name: "UDPv4 connection",
-			conn: psnet.ConnectionStat{
+			conn: &psnet.ConnectionStat{
 				Family: syscall.AF_INET,
 				Type:   syscall.SOCK_DGRAM,
 				Laddr: psnet.Addr{
@@ -393,7 +382,7 @@ func TestCollectConnectionDetails(t *testing.T) {
 		},
 		{
 			name: "UDPv6 connection",
-			conn: psnet.ConnectionStat{
+			conn: &psnet.ConnectionStat{
 				Family: syscall.AF_INET6,
 				Type:   syscall.SOCK_DGRAM,
 				Laddr: psnet.Addr{
@@ -411,7 +400,7 @@ func TestCollectConnectionDetails(t *testing.T) {
 		},
 		{
 			name: "Listening on all interfaces (Darwin)",
-			conn: psnet.ConnectionStat{
+			conn: &psnet.ConnectionStat{
 				Family: syscall.AF_INET,
 				Type:   syscall.SOCK_DGRAM,
 				Laddr: psnet.Addr{
@@ -430,9 +419,7 @@ func TestCollectConnectionDetails(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := collectConnectionDetails(&tt.conn); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("collectConnectionDetails() = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, collectConnectionDetails(tt.conn))
 		})
 	}
 }
@@ -524,7 +511,7 @@ func TestCollectEndpoints(t *testing.T) {
 			newProc: func(pid int32) (*process.Process, error) {
 				return &process.Process{Pid: pid}, nil
 			},
-			procDetails: func(proc *process.Process) (*processDetails, error) {
+			procDetails: func(_ *process.Process) (*processDetails, error) {
 				return nil, errors.New("always fail")
 			},
 			want: []observer.Endpoint{},
@@ -548,10 +535,7 @@ func TestCollectEndpoints(t *testing.T) {
 
 			require.NotNil(t, e.collectProcessDetails)
 			require.NotNil(t, e.getProcess)
-
-			if got := e.collectEndpoints(tt.conns); !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("collectEndpoints() = %v, want %v", got, tt.want)
-			}
+			assert.Equal(t, tt.want, e.collectEndpoints(tt.conns))
 		})
 	}
 }

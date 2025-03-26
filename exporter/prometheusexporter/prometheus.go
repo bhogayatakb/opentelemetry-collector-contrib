@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package prometheusexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter"
 
@@ -23,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
@@ -30,7 +20,7 @@ type prometheusExporter struct {
 	config       Config
 	name         string
 	endpoint     string
-	shutdownFunc func() error
+	shutdownFunc func(ctx context.Context) error
 	handler      http.Handler
 	collector    *collector
 	registry     *prometheus.Registry
@@ -39,7 +29,7 @@ type prometheusExporter struct {
 
 var errBlankPrometheusAddress = errors.New("expecting a non-blank address to run the Prometheus metrics handler")
 
-func newPrometheusExporter(config *Config, set component.ExporterCreateSettings) (*prometheusExporter, error) {
+func newPrometheusExporter(config *Config, set exporter.Settings) (*prometheusExporter, error) {
 	addr := strings.TrimSpace(config.Endpoint)
 	if strings.TrimSpace(config.Endpoint) == "" {
 		return nil, errBlankPrometheusAddress
@@ -50,11 +40,11 @@ func newPrometheusExporter(config *Config, set component.ExporterCreateSettings)
 	_ = registry.Register(collector)
 	return &prometheusExporter{
 		config:       *config,
-		name:         config.ID().String(),
+		name:         set.ID.String(),
 		endpoint:     addr,
 		collector:    collector,
 		registry:     registry,
-		shutdownFunc: func() error { return nil },
+		shutdownFunc: func(_ context.Context) error { return nil },
 		handler: promhttp.HandlerFor(
 			registry,
 			promhttp.HandlerOpts{
@@ -63,22 +53,25 @@ func newPrometheusExporter(config *Config, set component.ExporterCreateSettings)
 				EnableOpenMetrics: config.EnableOpenMetrics,
 			},
 		),
+		settings: set.TelemetrySettings,
 	}, nil
 }
 
-func (pe *prometheusExporter) Start(_ context.Context, host component.Host) error {
-	ln, err := pe.config.ToListener()
+func (pe *prometheusExporter) Start(ctx context.Context, host component.Host) error {
+	ln, err := pe.config.ToListener(ctx)
 	if err != nil {
 		return err
 	}
 
-	pe.shutdownFunc = ln.Close
-
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", pe.handler)
-	srv, err := pe.config.ToServer(host, pe.settings, mux)
+	srv, err := pe.config.ToServer(ctx, host, pe.settings, mux)
 	if err != nil {
-		return err
+		lnerr := ln.Close()
+		return errors.Join(err, lnerr)
+	}
+	pe.shutdownFunc = func(ctx context.Context) error {
+		return srv.Shutdown(ctx)
 	}
 	go func() {
 		_ = srv.Serve(ln)
@@ -97,6 +90,6 @@ func (pe *prometheusExporter) ConsumeMetrics(_ context.Context, md pmetric.Metri
 	return nil
 }
 
-func (pe *prometheusExporter) Shutdown(context.Context) error {
-	return pe.shutdownFunc()
+func (pe *prometheusExporter) Shutdown(ctx context.Context) error {
+	return pe.shutdownFunc(ctx)
 }

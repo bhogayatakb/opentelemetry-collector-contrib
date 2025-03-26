@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package k8sclusterreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver"
 
@@ -18,14 +7,20 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync/atomic"
 	"time"
 
 	quotaclientset "github.com/openshift/client-go/quota/clientset/versioned"
 	quotainformersv1 "github.com/openshift/client-go/quota/informers/externalversions"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
-	"go.uber.org/atomic"
+	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/receiver"
 	"go.uber.org/zap"
+	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/informers"
@@ -33,9 +28,20 @@ import (
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
-	metadata "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/experimentalmetricmetadata"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/collection"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/experimentalmetricmetadata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/cronjob"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/daemonset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/deployment"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/gvk"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/hpa"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/jobs"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/metadata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/namespace"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/node"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/pod"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/replicaset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/replicationcontroller"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/statefulset"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8sclusterreceiver/internal/utils"
 )
 
@@ -48,28 +54,29 @@ type resourceWatcher struct {
 	client              kubernetes.Interface
 	osQuotaClient       quotaclientset.Interface
 	informerFactories   []sharedInformer
-	dataCollector       *collection.DataCollector
+	metadataStore       *metadata.Store
 	logger              *zap.Logger
 	metadataConsumers   []metadataConsumer
 	initialTimeout      time.Duration
 	initialSyncDone     *atomic.Bool
 	initialSyncTimedOut *atomic.Bool
 	config              *Config
+	entityLogConsumer   consumer.Logs
 
 	// For mocking.
 	makeClient               func(apiConf k8sconfig.APIConfig) (kubernetes.Interface, error)
 	makeOpenShiftQuotaClient func(apiConf k8sconfig.APIConfig) (quotaclientset.Interface, error)
 }
 
-type metadataConsumer func(metadata []*metadata.MetadataUpdate) error
+type metadataConsumer func(metadata []*experimentalmetricmetadata.MetadataUpdate) error
 
 // newResourceWatcher creates a Kubernetes resource watcher.
-func newResourceWatcher(logger *zap.Logger, cfg *Config) *resourceWatcher {
+func newResourceWatcher(set receiver.Settings, cfg *Config, metadataStore *metadata.Store) *resourceWatcher {
 	return &resourceWatcher{
-		logger:                   logger,
-		dataCollector:            collection.NewDataCollector(logger, cfg.NodeConditionTypesToReport, cfg.AllocatableTypesToReport),
-		initialSyncDone:          atomic.NewBool(false),
-		initialSyncTimedOut:      atomic.NewBool(false),
+		logger:                   set.Logger,
+		metadataStore:            metadataStore,
+		initialSyncDone:          &atomic.Bool{},
+		initialSyncTimedOut:      &atomic.Bool{},
 		initialTimeout:           defaultInitialSyncTimeout,
 		config:                   cfg,
 		makeClient:               k8sconfig.MakeClient,
@@ -80,11 +87,11 @@ func newResourceWatcher(logger *zap.Logger, cfg *Config) *resourceWatcher {
 func (rw *resourceWatcher) initialize() error {
 	client, err := rw.makeClient(rw.config.APIConfig)
 	if err != nil {
-		return fmt.Errorf("Failed to create Kubernnetes client: %w", err)
+		return fmt.Errorf("Failed to create Kubernetes client: %w", err)
 	}
 	rw.client = client
 
-	if rw.config.Distribution == distributionOpenShift {
+	if rw.config.Distribution == distributionOpenShift && rw.config.Namespace == "" {
 		rw.osQuotaClient, err = rw.makeOpenShiftQuotaClient(rw.config.APIConfig)
 		if err != nil {
 			return fmt.Errorf("Failed to create OpenShift quota API client: %w", err)
@@ -100,7 +107,7 @@ func (rw *resourceWatcher) initialize() error {
 }
 
 func (rw *resourceWatcher) prepareSharedInformerFactory() error {
-	factory := informers.NewSharedInformerFactoryWithOptions(rw.client, 0)
+	factory := rw.getInformerFactory()
 
 	// Map of supported group version kinds by name of a kind.
 	// If none of the group versions are supported by k8s server for a specific kind,
@@ -118,7 +125,7 @@ func (rw *resourceWatcher) prepareSharedInformerFactory() error {
 		"ReplicaSet":              {gvk.ReplicaSet},
 		"StatefulSet":             {gvk.StatefulSet},
 		"Job":                     {gvk.Job},
-		"CronJob":                 {gvk.CronJob, gvk.CronJobBeta},
+		"CronJob":                 {gvk.CronJob},
 		"HorizontalPodAutoscaler": {gvk.HorizontalPodAutoscaler},
 	}
 
@@ -150,6 +157,24 @@ func (rw *resourceWatcher) prepareSharedInformerFactory() error {
 	return nil
 }
 
+func (rw *resourceWatcher) getInformerFactory() informers.SharedInformerFactory {
+	var factory informers.SharedInformerFactory
+	if rw.config.Namespace != "" {
+		rw.logger.Info("Namespace filter has been enabled. Nodes and namespaces will not be observed.", zap.String("namespace", rw.config.Namespace))
+		factory = informers.NewSharedInformerFactoryWithOptions(
+			rw.client,
+			rw.config.MetadataCollectionInterval,
+			informers.WithNamespace(rw.config.Namespace),
+		)
+	} else {
+		factory = informers.NewSharedInformerFactoryWithOptions(
+			rw.client,
+			rw.config.MetadataCollectionInterval,
+		)
+	}
+	return factory
+}
+
 func (rw *resourceWatcher) isKindSupported(gvk schema.GroupVersionKind) (bool, error) {
 	resources, err := rw.client.Discovery().ServerResourcesForGroupVersion(gvk.GroupVersion().String())
 	if err != nil {
@@ -173,9 +198,13 @@ func (rw *resourceWatcher) setupInformerForKind(kind schema.GroupVersionKind, fa
 	case gvk.Pod:
 		rw.setupInformer(kind, factory.Core().V1().Pods().Informer())
 	case gvk.Node:
-		rw.setupInformer(kind, factory.Core().V1().Nodes().Informer())
+		if rw.config.Namespace == "" {
+			rw.setupInformer(kind, factory.Core().V1().Nodes().Informer())
+		}
 	case gvk.Namespace:
-		rw.setupInformer(kind, factory.Core().V1().Namespaces().Informer())
+		if rw.config.Namespace == "" {
+			rw.setupInformer(kind, factory.Core().V1().Namespaces().Informer())
+		}
 	case gvk.ReplicationController:
 		rw.setupInformer(kind, factory.Core().V1().ReplicationControllers().Informer())
 	case gvk.ResourceQuota:
@@ -194,10 +223,8 @@ func (rw *resourceWatcher) setupInformerForKind(kind schema.GroupVersionKind, fa
 		rw.setupInformer(kind, factory.Batch().V1().Jobs().Informer())
 	case gvk.CronJob:
 		rw.setupInformer(kind, factory.Batch().V1().CronJobs().Informer())
-	case gvk.CronJobBeta:
-		rw.setupInformer(kind, factory.Batch().V1beta1().CronJobs().Informer())
 	case gvk.HorizontalPodAutoscaler:
-		rw.setupInformer(kind, factory.Autoscaling().V2beta2().HorizontalPodAutoscalers().Informer())
+		rw.setupInformer(kind, factory.Autoscaling().V2().HorizontalPodAutoscalers().Informer())
 	default:
 		rw.logger.Error("Could not setup an informer for provided group version kind",
 			zap.String("group version kind", kind.String()))
@@ -225,46 +252,73 @@ func (rw *resourceWatcher) startWatchingResources(ctx context.Context, inf share
 
 // setupInformer adds event handlers to informers and setups a metadataStore.
 func (rw *resourceWatcher) setupInformer(gvk schema.GroupVersionKind, informer cache.SharedIndexInformer) {
-	informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	err := informer.SetTransform(transformObject)
+	if err != nil {
+		rw.logger.Error("error setting informer transform function", zap.Error(err))
+	}
+	_, err = informer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    rw.onAdd,
 		UpdateFunc: rw.onUpdate,
-		DeleteFunc: rw.onDelete,
 	})
-	rw.dataCollector.SetupMetadataStore(gvk, informer.GetStore())
+	if err != nil {
+		rw.logger.Error("error adding event handler to informer", zap.Error(err))
+	}
+	rw.metadataStore.Setup(gvk, informer.GetStore())
 }
 
-func (rw *resourceWatcher) onAdd(obj interface{}) {
+func (rw *resourceWatcher) onAdd(obj any) {
 	rw.waitForInitialInformerSync()
-	rw.dataCollector.SyncMetrics(obj)
 
 	// Sync metadata only if there's at least one destination for it to sent.
-	if len(rw.metadataConsumers) == 0 {
+	if !rw.hasDestination() {
 		return
 	}
 
-	newMetadata := rw.dataCollector.SyncMetadata(obj)
-	rw.syncMetadataUpdate(map[metadata.ResourceID]*collection.KubernetesMetadata{}, newMetadata)
+	rw.syncMetadataUpdate(map[experimentalmetricmetadata.ResourceID]*metadata.KubernetesMetadata{}, rw.objMetadata(obj))
 }
 
-func (rw *resourceWatcher) onDelete(obj interface{}) {
-	rw.waitForInitialInformerSync()
-	rw.dataCollector.RemoveFromMetricsStore(obj)
+func (rw *resourceWatcher) hasDestination() bool {
+	return len(rw.metadataConsumers) != 0 || rw.entityLogConsumer != nil
 }
 
-func (rw *resourceWatcher) onUpdate(oldObj, newObj interface{}) {
+func (rw *resourceWatcher) onUpdate(oldObj, newObj any) {
 	rw.waitForInitialInformerSync()
-	// Sync metrics from the new object
-	rw.dataCollector.SyncMetrics(newObj)
 
 	// Sync metadata only if there's at least one destination for it to sent.
-	if len(rw.metadataConsumers) == 0 {
+	if !rw.hasDestination() {
 		return
 	}
 
-	oldMetadata := rw.dataCollector.SyncMetadata(oldObj)
-	newMetadata := rw.dataCollector.SyncMetadata(newObj)
+	rw.syncMetadataUpdate(rw.objMetadata(oldObj), rw.objMetadata(newObj))
+}
 
-	rw.syncMetadataUpdate(oldMetadata, newMetadata)
+// objMetadata returns the metadata for the given object.
+func (rw *resourceWatcher) objMetadata(obj any) map[experimentalmetricmetadata.ResourceID]*metadata.KubernetesMetadata {
+	switch o := obj.(type) {
+	case *corev1.Pod:
+		return pod.GetMetadata(o, rw.metadataStore, rw.logger)
+	case *corev1.Node:
+		return node.GetMetadata(o)
+	case *corev1.ReplicationController:
+		return replicationcontroller.GetMetadata(o)
+	case *appsv1.Deployment:
+		return deployment.GetMetadata(o)
+	case *appsv1.ReplicaSet:
+		return replicaset.GetMetadata(o)
+	case *appsv1.DaemonSet:
+		return daemonset.GetMetadata(o)
+	case *appsv1.StatefulSet:
+		return statefulset.GetMetadata(o)
+	case *batchv1.Job:
+		return jobs.GetMetadata(o)
+	case *batchv1.CronJob:
+		return cronjob.GetMetadata(o)
+	case *autoscalingv2.HorizontalPodAutoscaler:
+		return hpa.GetMetadata(o)
+	case *corev1.Namespace:
+		return namespace.GetMetadata(o)
+	}
+	return nil
 }
 
 func (rw *resourceWatcher) waitForInitialInformerSync() {
@@ -282,7 +336,7 @@ func (rw *resourceWatcher) waitForInitialInformerSync() {
 }
 
 func (rw *resourceWatcher) setupMetadataExporters(
-	exporters map[config.ComponentID]component.Exporter,
+	exporters map[component.ID]component.Component,
 	metadataExportersFromConfig []string,
 ) error {
 	var out []metadataConsumer
@@ -296,7 +350,7 @@ func (rw *resourceWatcher) setupMetadataExporters(
 		if !metadataExportersSet[cfg.String()] {
 			continue
 		}
-		kme, ok := exp.(metadata.MetadataExporter)
+		kme, ok := exp.(experimentalmetricmetadata.MetadataExporter)
 		if !ok {
 			return fmt.Errorf("%s exporter does not implement MetadataExporter", cfg.Name())
 		}
@@ -310,9 +364,7 @@ func (rw *resourceWatcher) setupMetadataExporters(
 	return nil
 }
 
-func validateMetadataExporters(metadataExporters map[string]bool,
-	exporters map[config.ComponentID]component.Exporter,
-) error {
+func validateMetadataExporters(metadataExporters map[string]bool, exporters map[component.ID]component.Component) error {
 	configuredExporters := map[string]bool{}
 	for cfg := range exporters {
 		configuredExporters[cfg.String()] = true
@@ -327,15 +379,38 @@ func validateMetadataExporters(metadataExporters map[string]bool,
 	return nil
 }
 
-func (rw *resourceWatcher) syncMetadataUpdate(oldMetadata,
-	newMetadata map[metadata.ResourceID]*collection.KubernetesMetadata,
-) {
-	metadataUpdate := collection.GetMetadataUpdate(oldMetadata, newMetadata)
-	if len(metadataUpdate) == 0 {
-		return
+func (rw *resourceWatcher) syncMetadataUpdate(oldMetadata, newMetadata map[experimentalmetricmetadata.ResourceID]*metadata.KubernetesMetadata) {
+	timestamp := pcommon.NewTimestampFromTime(time.Now())
+
+	metadataUpdate := metadata.GetMetadataUpdate(oldMetadata, newMetadata)
+	if len(metadataUpdate) != 0 {
+		for _, consume := range rw.metadataConsumers {
+			_ = consume(metadataUpdate)
+		}
 	}
 
-	for _, consume := range rw.metadataConsumers {
-		_ = consume(metadataUpdate)
+	if rw.entityLogConsumer != nil {
+		// Represent metadata update as entity events.
+		entityEvents := metadata.GetEntityEvents(oldMetadata, newMetadata, timestamp, rw.config.MetadataCollectionInterval)
+
+		// Convert entity events to log representation.
+		logs := entityEvents.ConvertAndMoveToLogs()
+
+		if logs.LogRecordCount() != 0 {
+			err := rw.entityLogConsumer.ConsumeLogs(context.Background(), logs)
+			if err != nil {
+				rw.logger.Error("Error sending entity events to the consumer", zap.Error(err))
+
+				// Note: receiver contract says that we need to retry sending if the
+				// returned error is not Permanent. However, we are not doing it here.
+				// Instead, we rely on the fact the metadata is collected periodically
+				// and the entity events will be delivered on the next cycle. This is
+				// fine because we deliver cumulative entity state.
+				// This allows us to avoid stressing the Collector or its destination
+				// unnecessarily (typically non-Permanent errors happen in stressed conditions).
+				// The periodic collection will be implemented later, see
+				// https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/24413
+			}
+		}
 	}
 }

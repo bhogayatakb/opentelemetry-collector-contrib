@@ -1,31 +1,21 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package subprocess // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/jmxreceiver/internal/subprocess"
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
-	"go.uber.org/atomic"
 	"go.uber.org/zap"
 )
 
@@ -96,7 +86,7 @@ func NewSubprocess(conf *Config, logger *zap.Logger) *Subprocess {
 	}
 
 	return &Subprocess{
-		Stdout:         make(chan string),
+		Stdout:         make(chan string, 100),
 		pid:            pid{pid: noPid, pidLock: sync.Mutex{}},
 		config:         conf,
 		logger:         logger,
@@ -126,6 +116,7 @@ func (subprocess *Subprocess) Start(ctx context.Context) error {
 	go func() {
 		subprocess.run(cancelCtx) // will block for lifetime of process
 		close(subprocess.shutdownSignal)
+		close(subprocess.Stdout)
 	}()
 	return nil
 }
@@ -133,7 +124,7 @@ func (subprocess *Subprocess) Start(ctx context.Context) error {
 // Shutdown is invoked during service shutdown.
 func (subprocess *Subprocess) Shutdown(ctx context.Context) error {
 	if subprocess.cancel == nil {
-		return fmt.Errorf("no subprocess.cancel().  Has it been started properly?")
+		return errors.New("no subprocess.cancel().  Has it been started properly?")
 	}
 
 	timeout := defaultShutdownTimeout
@@ -141,6 +132,8 @@ func (subprocess *Subprocess) Shutdown(ctx context.Context) error {
 		timeout = *subprocess.config.ShutdownTimeout
 	}
 	t := time.NewTimer(timeout)
+
+	subprocess.cancel()
 
 	// Wait for the subprocess to exit or the timeout period to elapse
 	select {
@@ -163,9 +156,11 @@ type processReturned struct {
 }
 
 func newProcessReturned() *processReturned {
+	isOpen := &atomic.Bool{}
+	isOpen.Store(true)
 	pr := processReturned{
 		ReturnedChan: make(chan error),
-		isOpen:       atomic.NewBool(true),
+		isOpen:       isOpen,
 		lock:         &sync.Mutex{},
 	}
 	return &pr

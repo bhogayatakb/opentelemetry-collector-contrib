@@ -1,16 +1,5 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package sapmreceiver
 
@@ -19,29 +8,31 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config/configtest"
+	"go.opentelemetry.io/collector/pipeline"
+	"go.opentelemetry.io/collector/receiver/receivertest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/sapmreceiver/internal/metadata"
 )
 
 func TestCreateDefaultConfig(t *testing.T) {
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
 	assert.NotNil(t, cfg, "failed to create default config")
-	assert.NoError(t, configtest.CheckConfigStruct(cfg))
+	assert.NoError(t, componenttest.CheckConfigStruct(cfg))
 }
 
 func TestCreateReceiver(t *testing.T) {
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
 
-	params := componenttest.NewNopReceiverCreateSettings()
-	tReceiver, err := factory.CreateTracesReceiver(context.Background(), params, cfg, nil)
+	params := receivertest.NewNopSettings(metadata.Type)
+	tReceiver, err := factory.CreateTraces(context.Background(), params, cfg, nil)
 	assert.NoError(t, err, "receiver creation failed")
 	assert.NotNil(t, tReceiver, "receiver creation failed")
 
-	mReceiver, err := factory.CreateMetricsReceiver(context.Background(), params, cfg, nil)
-	assert.ErrorIs(t, err, component.ErrDataTypeIsNotSupported)
+	mReceiver, err := factory.CreateMetrics(context.Background(), params, cfg, nil)
+	assert.ErrorIs(t, err, pipeline.ErrSignalNotSupported)
 	assert.Nil(t, mReceiver)
 }
 
@@ -51,8 +42,8 @@ func TestCreateInvalidHTTPEndpoint(t *testing.T) {
 	rCfg := cfg.(*Config)
 
 	rCfg.Endpoint = ""
-	params := componenttest.NewNopReceiverCreateSettings()
-	_, err := factory.CreateTracesReceiver(context.Background(), params, cfg, nil)
+	params := receivertest.NewNopSettings(metadata.Type)
+	_, err := factory.CreateTraces(context.Background(), params, cfg, nil)
 	assert.Error(t, err, "receiver creation with no endpoints must fail")
 }
 
@@ -62,8 +53,8 @@ func TestCreateNoPort(t *testing.T) {
 	rCfg := cfg.(*Config)
 
 	rCfg.Endpoint = "localhost:"
-	params := componenttest.NewNopReceiverCreateSettings()
-	_, err := factory.CreateTracesReceiver(context.Background(), params, cfg, nil)
+	params := receivertest.NewNopSettings(metadata.Type)
+	_, err := factory.CreateTraces(context.Background(), params, cfg, nil)
 	assert.Error(t, err, "receiver creation with no port number must fail")
 }
 
@@ -73,7 +64,7 @@ func TestCreateLargePort(t *testing.T) {
 	rCfg := cfg.(*Config)
 
 	rCfg.Endpoint = "localhost:65536"
-	params := componenttest.NewNopReceiverCreateSettings()
-	_, err := factory.CreateTracesReceiver(context.Background(), params, cfg, nil)
+	params := receivertest.NewNopSettings(metadata.Type)
+	_, err := factory.CreateTraces(context.Background(), params, cfg, nil)
 	assert.Error(t, err, "receiver creation with too large port number must fail")
 }

@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package dockerobserver // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/dockerobserver"
 
@@ -18,60 +7,61 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	dtypes "github.com/docker/docker/api/types"
 	"github.com/docker/go-connections/nat"
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/extension"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/endpointswatcher"
 	dcommon "github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/docker"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/docker"
 )
 
-const (
-	defaultDockerAPIVersion         = 1.22
-	minimalRequiredDockerAPIVersion = 1.22
+var (
+	defaultDockerAPIVersion         = "1.24"
+	minimumRequiredDockerAPIVersion = docker.MustNewAPIVersion(defaultDockerAPIVersion)
 )
 
-var _ component.Extension = (*dockerObserver)(nil)
-var _ observer.EndpointsLister = (*dockerObserver)(nil)
-var _ observer.Observable = (*dockerObserver)(nil)
+var (
+	_ extension.Extension = (*dockerObserver)(nil)
+	_ observer.Observable = (*dockerObserver)(nil)
+)
 
 type dockerObserver struct {
-	*observer.EndpointsWatcher
+	*endpointswatcher.EndpointsWatcher
 	logger  *zap.Logger
 	config  *Config
-	cancel  func()
-	once    *sync.Once
-	ctx     context.Context
+	cancel  context.CancelFunc
+	wg      errgroup.Group
 	dClient *docker.Client
 }
 
 // newObserver creates a new docker observer extension.
-func newObserver(logger *zap.Logger, config *Config) (component.Extension, error) {
+func newObserver(logger *zap.Logger, config *Config) (extension.Extension, error) {
 	d := &dockerObserver{
 		logger: logger, config: config,
-		once: &sync.Once{},
+		cancel: func() {
+			// Safe value provided on initialisation
+		},
 	}
-	d.EndpointsWatcher = observer.NewEndpointsWatcher(d, time.Second, logger)
+	d.EndpointsWatcher = endpointswatcher.New(d, time.Second, logger)
 	return d, nil
 }
 
 // Start will instantiate required components needed by the Docker observer
-func (d *dockerObserver) Start(ctx context.Context, host component.Host) error {
+func (d *dockerObserver) Start(ctx context.Context, _ component.Host) error {
 	dCtx, cancel := context.WithCancel(context.Background())
 	d.cancel = cancel
-	d.ctx = dCtx
 
 	// Create new Docker client
-	dConfig, err := docker.NewConfig(d.config.Endpoint, d.config.Timeout, d.config.ExcludedImages, d.config.DockerAPIVersion)
-	if err != nil {
-		return err
-	}
+	dConfig := docker.NewConfig(d.config.Endpoint, d.config.Timeout, d.config.ExcludedImages, d.config.DockerAPIVersion)
 
+	var err error
 	d.dClient, err = docker.NewDockerClient(dConfig, d.logger)
 	if err != nil {
 		return fmt.Errorf("could not create docker client: %w", err)
@@ -81,38 +71,36 @@ func (d *dockerObserver) Start(ctx context.Context, host component.Host) error {
 		return err
 	}
 
-	d.once.Do(
-		func() {
-			go func() {
-				cacheRefreshTicker := time.NewTicker(d.config.CacheSyncInterval)
-				defer cacheRefreshTicker.Stop()
+	d.wg.Go(func() error {
+		cacheRefreshTicker := time.NewTicker(d.config.CacheSyncInterval)
+		defer cacheRefreshTicker.Stop()
 
-				clientCtx, clientCancel := context.WithCancel(d.ctx)
-
-				go d.dClient.ContainerEventLoop(clientCtx)
-
-				for {
-					select {
-					case <-d.ctx.Done():
-						clientCancel()
-						return
-					case <-cacheRefreshTicker.C:
-						err = d.dClient.LoadContainerList(clientCtx)
-						if err != nil {
-							d.logger.Error("Could not sync container cache", zap.Error(err))
-						}
-					}
+		for done := false; !done; {
+			select {
+			case <-dCtx.Done():
+				done = true
+			case <-cacheRefreshTicker.C:
+				err = d.dClient.LoadContainerList(dCtx)
+				if err != nil {
+					d.logger.Error("Could not sync container cache", zap.Error(err))
 				}
-			}()
-		},
-	)
+			}
+		}
+		return nil
+	})
+
+	d.wg.Go(func() error {
+		d.dClient.ContainerEventLoop(dCtx)
+		return nil
+	})
 
 	return nil
 }
 
-func (d *dockerObserver) Shutdown(ctx context.Context) error {
+func (d *dockerObserver) Shutdown(_ context.Context) error {
+	d.StopListAndWatch()
 	d.cancel()
-	return nil
+	return d.wg.Wait()
 }
 
 func (d *dockerObserver) ListEndpoints() []observer.Endpoint {
@@ -126,17 +114,15 @@ func (d *dockerObserver) ListEndpoints() []observer.Endpoint {
 // containerEndpoints generates a list of observer.Endpoint given a Docker ContainerJSON.
 // This function will only generate endpoints if a container is in the Running state and not Paused.
 func (d *dockerObserver) containerEndpoints(c *dtypes.ContainerJSON) []observer.Endpoint {
-	var endpoints []observer.Endpoint
-
 	if !c.State.Running || c.State.Running && c.State.Paused {
-		return endpoints
+		return nil
 	}
 
 	knownPorts := map[nat.Port]bool{}
 	for k := range c.Config.ExposedPorts {
 		knownPorts[k] = true
 	}
-
+	endpoints := make([]observer.Endpoint, 0, len(knownPorts))
 	// iterate over exposed ports and try to create endpoints
 	for portObj := range knownPorts {
 		endpoint := d.endpointForPort(portObj, c)

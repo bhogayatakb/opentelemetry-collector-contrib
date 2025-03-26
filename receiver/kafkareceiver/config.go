@@ -1,34 +1,36 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package kafkareceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kafkareceiver"
 
 import (
-	"time"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/config/configretry"
 
-	"go.opentelemetry.io/collector/config"
-
-	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/kafkaexporter"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/kafka/configkafka"
 )
 
-type AutoCommit struct {
-	// Whether or not to auto-commit updated offsets back to the broker.
-	// (default enabled).
-	Enable bool `mapstructure:"enable"`
-	// How frequently to commit updated offsets. Ineffective unless
-	// auto-commit is enabled (default 1s)
-	Interval time.Duration `mapstructure:"interval"`
+var _ component.Config = (*Config)(nil)
+
+// Config defines configuration for Kafka receiver.
+type Config struct {
+	configkafka.ClientConfig   `mapstructure:",squash"`
+	configkafka.ConsumerConfig `mapstructure:",squash"`
+
+	// The name of the kafka topic to consume from (default "otlp_spans" for traces, "otlp_metrics" for metrics, "otlp_logs" for logs)
+	Topic string `mapstructure:"topic"`
+
+	// Encoding of the messages (default "otlp_proto")
+	Encoding string `mapstructure:"encoding"`
+
+	// Controls the way the messages are marked as consumed
+	MessageMarking MessageMarking `mapstructure:"message_marking"`
+
+	// Extract headers from kafka records
+	HeaderExtraction HeaderExtraction `mapstructure:"header_extraction"`
+
+	// In case of some errors returned by the next consumer, the receiver will wait and retry the failed message
+	ErrorBackOff configretry.BackOffConfig `mapstructure:"error_backoff"`
 }
 
 type MessageMarking struct {
@@ -42,38 +44,7 @@ type MessageMarking struct {
 	OnError bool `mapstructure:"on_error"`
 }
 
-// Config defines configuration for Kafka receiver.
-type Config struct {
-	config.ReceiverSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct
-	// The list of kafka brokers (default localhost:9092)
-	Brokers []string `mapstructure:"brokers"`
-	// Kafka protocol version
-	ProtocolVersion string `mapstructure:"protocol_version"`
-	// The name of the kafka topic to consume from (default "otlp_spans")
-	Topic string `mapstructure:"topic"`
-	// Encoding of the messages (default "otlp_proto")
-	Encoding string `mapstructure:"encoding"`
-	// The consumer group that receiver will be consuming messages from (default "otel-collector")
-	GroupID string `mapstructure:"group_id"`
-	// The consumer client ID that receiver will use (default "otel-collector")
-	ClientID string `mapstructure:"client_id"`
-
-	// Metadata is the namespace for metadata management properties used by the
-	// Client, and shared by the Producer/Consumer.
-	Metadata kafkaexporter.Metadata `mapstructure:"metadata"`
-
-	Authentication kafkaexporter.Authentication `mapstructure:"auth"`
-
-	// Controls the auto-commit functionality
-	AutoCommit AutoCommit `mapstructure:"autocommit"`
-
-	// Controls the way the messages are marked as consumed
-	MessageMarking MessageMarking `mapstructure:"message_marking"`
-}
-
-var _ config.Receiver = (*Config)(nil)
-
-// Validate checks the receiver configuration is valid
-func (cfg *Config) Validate() error {
-	return nil
+type HeaderExtraction struct {
+	ExtractHeaders bool     `mapstructure:"extract_headers"`
+	Headers        []string `mapstructure:"headers"`
 }

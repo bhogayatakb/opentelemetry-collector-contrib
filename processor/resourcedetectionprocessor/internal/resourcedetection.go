@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 // Package internal contains an interface for detecting resource information,
 // and a provider to merge the resources returned by a slice of custom detectors.
@@ -18,14 +7,25 @@ package internal // import "github.com/open-telemetry/opentelemetry-collector-co
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
-	"go.opentelemetry.io/collector/component"
+	backoff "github.com/cenkalti/backoff/v5"
+	"go.opentelemetry.io/collector/featuregate"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/processor"
 	"go.uber.org/zap"
+)
+
+var allowErrorPropagationFeatureGate = featuregate.GlobalRegistry().MustRegister(
+	"processor.resourcedetection.propagateerrors",
+	featuregate.StageAlpha,
+	featuregate.WithRegisterDescription("When enabled, allows errors returned from resource detectors to propagate in the Start() method and stop the collector."),
+	featuregate.WithRegisterReferenceURL("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/37961"),
+	featuregate.WithRegisterFromVersion("v0.121.0"),
 )
 
 type DetectorType string
@@ -34,13 +34,13 @@ type Detector interface {
 	Detect(ctx context.Context) (resource pcommon.Resource, schemaURL string, err error)
 }
 
-type DetectorConfig interface{}
+type DetectorConfig any
 
 type ResourceDetectorConfig interface {
 	GetConfigFromType(DetectorType) DetectorConfig
 }
 
-type DetectorFactory func(component.ProcessorCreateSettings, DetectorConfig) (Detector, error)
+type DetectorFactory func(processor.Settings, DetectorConfig) (Detector, error)
 
 type ResourceProviderFactory struct {
 	// detectors holds all possible detector types.
@@ -52,11 +52,12 @@ func NewProviderFactory(detectors map[DetectorType]DetectorFactory) *ResourcePro
 }
 
 func (f *ResourceProviderFactory) CreateResourceProvider(
-	params component.ProcessorCreateSettings,
+	params processor.Settings,
 	timeout time.Duration,
 	attributes []string,
 	detectorConfigs ResourceDetectorConfig,
-	detectorTypes ...DetectorType) (*ResourceProvider, error) {
+	detectorTypes ...DetectorType,
+) (*ResourceProvider, error) {
 	detectors, err := f.getDetectors(params, detectorConfigs, detectorTypes)
 	if err != nil {
 		return nil, err
@@ -73,7 +74,7 @@ func (f *ResourceProviderFactory) CreateResourceProvider(
 	return provider, nil
 }
 
-func (f *ResourceProviderFactory) getDetectors(params component.ProcessorCreateSettings, detectorConfigs ResourceDetectorConfig, detectorTypes []DetectorType) ([]Detector, error) {
+func (f *ResourceProviderFactory) getDetectors(params processor.Settings, detectorConfigs ResourceDetectorConfig, detectorTypes []DetectorType) ([]Detector, error) {
 	detectors := make([]Detector, 0, len(detectorTypes))
 	for _, detectorType := range detectorTypes {
 		detectorFactory, ok := f.detectors[detectorType]
@@ -121,13 +122,13 @@ func (p *ResourceProvider) Get(ctx context.Context, client *http.Client) (resour
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, client.Timeout)
 		defer cancel()
-		p.detectResource(ctx)
+		p.detectResource(ctx, client.Timeout)
 	})
 
 	return p.detectedResource.resource, p.detectedResource.schemaURL, p.detectedResource.err
 }
 
-func (p *ResourceProvider) detectResource(ctx context.Context) {
+func (p *ResourceProvider) detectResource(ctx context.Context, timeout time.Duration) {
 	p.detectedResource = &resourceResult{}
 
 	res := pcommon.NewResource()
@@ -135,62 +136,62 @@ func (p *ResourceProvider) detectResource(ctx context.Context) {
 
 	p.logger.Info("began detecting resource information")
 
-	for _, detector := range p.detectors {
-		r, schemaURL, err := detector.Detect(ctx)
-		if err != nil {
-			p.logger.Warn("failed to detect resource", zap.Error(err))
+	resultsChan := make([]chan resourceResult, len(p.detectors))
+	for i, detector := range p.detectors {
+		resultsChan[i] = make(chan resourceResult)
+		go func(detector Detector) {
+			sleep := backoff.ExponentialBackOff{
+				InitialInterval:     1 * time.Second,
+				RandomizationFactor: 1.5,
+				Multiplier:          2,
+				MaxInterval:         timeout,
+			}
+			sleep.Reset()
+			var err error
+			var r pcommon.Resource
+			var schemaURL string
+			for {
+				r, schemaURL, err = detector.Detect(ctx)
+				if err == nil {
+					resultsChan[i] <- resourceResult{resource: r, schemaURL: schemaURL, err: nil}
+					return
+				}
+				p.logger.Warn("failed to detect resource", zap.Error(err))
+
+				timer := time.NewTimer(sleep.NextBackOff())
+				select {
+				case <-timer.C:
+					fmt.Println("Retrying fetching data...")
+				case <-ctx.Done():
+					p.logger.Warn("Context was cancelled: %w", zap.Error(ctx.Err()))
+					resultsChan[i] <- resourceResult{resource: r, schemaURL: schemaURL, err: err}
+					return
+				}
+			}
+		}(detector)
+	}
+
+	for _, ch := range resultsChan {
+		result := <-ch
+		if result.err != nil {
+			if allowErrorPropagationFeatureGate.IsEnabled() {
+				p.detectedResource.err = errors.Join(p.detectedResource.err, result.err)
+			}
 		} else {
-			mergedSchemaURL = MergeSchemaURL(mergedSchemaURL, schemaURL)
-			MergeResource(res, r, false)
+			mergedSchemaURL = MergeSchemaURL(mergedSchemaURL, result.schemaURL)
+			MergeResource(res, result.resource, false)
 		}
 	}
 
 	droppedAttributes := filterAttributes(res.Attributes(), p.attributesToKeep)
 
-	p.logger.Info("detected resource information", zap.Any("resource", AttributesToMap(res.Attributes())))
+	p.logger.Info("detected resource information", zap.Any("resource", res.Attributes().AsRaw()))
 	if len(droppedAttributes) > 0 {
 		p.logger.Info("dropped resource information", zap.Strings("resource keys", droppedAttributes))
 	}
 
 	p.detectedResource.resource = res
 	p.detectedResource.schemaURL = mergedSchemaURL
-}
-
-func AttributesToMap(am pcommon.Map) map[string]interface{} {
-	mp := make(map[string]interface{}, am.Len())
-	am.Range(func(k string, v pcommon.Value) bool {
-		mp[k] = UnwrapAttribute(v)
-		return true
-	})
-	return mp
-}
-
-func UnwrapAttribute(v pcommon.Value) interface{} {
-	switch v.Type() {
-	case pcommon.ValueTypeBool:
-		return v.BoolVal()
-	case pcommon.ValueTypeInt:
-		return v.IntVal()
-	case pcommon.ValueTypeDouble:
-		return v.DoubleVal()
-	case pcommon.ValueTypeString:
-		return v.StringVal()
-	case pcommon.ValueTypeSlice:
-		return getSerializableArray(v.SliceVal())
-	case pcommon.ValueTypeMap:
-		return AttributesToMap(v.MapVal())
-	default:
-		return nil
-	}
-}
-
-func getSerializableArray(inArr pcommon.Slice) []interface{} {
-	var outArr []interface{}
-	for i := 0; i < inArr.Len(); i++ {
-		outArr = append(outArr, UnwrapAttribute(inArr.At(i)))
-	}
-
-	return outArr
 }
 
 func MergeSchemaURL(currentSchemaURL string, newSchemaURL string) string {
@@ -211,7 +212,7 @@ func MergeSchemaURL(currentSchemaURL string, newSchemaURL string) string {
 func filterAttributes(am pcommon.Map, attributesToKeep map[string]struct{}) []string {
 	if len(attributesToKeep) > 0 {
 		var droppedAttributes []string
-		am.RemoveIf(func(k string, v pcommon.Value) bool {
+		am.RemoveIf(func(k string, _ pcommon.Value) bool {
 			_, keep := attributesToKeep[k]
 			if !keep {
 				droppedAttributes = append(droppedAttributes, k)
@@ -229,14 +230,15 @@ func MergeResource(to, from pcommon.Resource, overrideTo bool) {
 	}
 
 	toAttr := to.Attributes()
-	from.Attributes().Range(func(k string, v pcommon.Value) bool {
+	for k, v := range from.Attributes().All() {
 		if overrideTo {
-			v.CopyTo(toAttr.UpsertEmpty(k))
+			v.CopyTo(toAttr.PutEmpty(k))
 		} else {
-			toAttr.Insert(k, v)
+			if _, found := toAttr.Get(k); !found {
+				v.CopyTo(toAttr.PutEmpty(k))
+			}
 		}
-		return true
-	})
+	}
 }
 
 func IsEmptyResource(res pcommon.Resource) bool {

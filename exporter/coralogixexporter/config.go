@@ -1,61 +1,69 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package coralogixexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/coralogixexporter"
 
 import (
+	"errors"
 	"fmt"
 
-	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/configopaque"
+	"go.opentelemetry.io/collector/config/configretry"
+	"go.opentelemetry.io/collector/exporter/exporterbatcher"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 )
 
 const (
-	typeStr = "coralogix"
-	// The stability level of the exporter.
-	stability = component.StabilityLevelBeta
+	cxAppNameAttrName       = "cx.application.name"
+	cxSubsystemNameAttrName = "cx.subsystem.name"
 )
 
 // Config defines by Coralogix.
 type Config struct {
-	config.ExporterSettings        `mapstructure:",squash"`
-	exporterhelper.QueueSettings   `mapstructure:"sending_queue"`
-	exporterhelper.RetrySettings   `mapstructure:"retry_on_failure"`
-	exporterhelper.TimeoutSettings `mapstructure:",squash"`
+	QueueSettings             exporterhelper.QueueConfig `mapstructure:"sending_queue"`
+	configretry.BackOffConfig `mapstructure:"retry_on_failure"`
+	TimeoutSettings           exporterhelper.TimeoutConfig `mapstructure:",squash"`
 
-	// The Coralogix trace ingress endpoint
-	configgrpc.GRPCClientSettings `mapstructure:",squash"`
+	// Coralogix domain
+	Domain string `mapstructure:"domain"`
+	// GRPC Settings used with Domain
+	DomainSettings configgrpc.ClientConfig `mapstructure:"domain_settings"`
+
+	// Deprecated: [v0.60.0] Coralogix jaeger based trace endpoint
+	// will be removed in the next version
+	// Please use OTLP endpoint using traces.endpoint
+	configgrpc.ClientConfig `mapstructure:",squash"`
+
+	// Coralogix traces ingress endpoint
+	Traces configgrpc.ClientConfig `mapstructure:"traces"`
 
 	// The Coralogix metrics ingress endpoint
-	Metrics configgrpc.GRPCClientSettings `mapstructure:"metrics"`
+	Metrics configgrpc.ClientConfig `mapstructure:"metrics"`
 
 	// The Coralogix logs ingress endpoint
-	Logs configgrpc.GRPCClientSettings `mapstructure:"logs"`
+	Logs configgrpc.ClientConfig `mapstructure:"logs"`
+
+	// The Coralogix profiles ingress endpoint
+	Profiles configgrpc.ClientConfig `mapstructure:"profiles"`
 
 	// Your Coralogix private key (sensitive) for authentication
-	PrivateKey string `mapstructure:"private_key"`
+	PrivateKey configopaque.String `mapstructure:"private_key"`
 
-	// Traces emitted by this OpenTelemetry exporter should be tagged
-	// in Coralogix with the following application and subsystem names
-	AppName string `mapstructure:"application_name"`
-
-	// Deprecated: [v0.47.0] SubSystem will remove in the next version
-	// You can remove 'subsystem_name' from your config file or leave it in this version.
-	// The subsystem will generate automatically according to the "service_name" of the trace batch.
+	// Ordered list of Resource attributes that are used for Coralogix
+	// AppName and SubSystem values. The first non-empty Resource attribute is used.
+	// Example: AppNameAttributes: ["k8s.namespace.name", "service.namespace"]
+	// Example: SubSystemAttributes: ["k8s.deployment.name", "k8s.daemonset.name", "service.name"]
+	AppNameAttributes   []string `mapstructure:"application_name_attributes"`
+	SubSystemAttributes []string `mapstructure:"subsystem_name_attributes"`
+	// Default Coralogix application and subsystem name values.
+	AppName   string `mapstructure:"application_name"`
 	SubSystem string `mapstructure:"subsystem_name"`
+
+	// Reference:
+	// 	https://github.com/open-telemetry/opentelemetry-collector/issues/8122
+	BatcherConfig exporterbatcher.Config `mapstructure:"batcher"`
 }
 
 func isEmpty(endpoint string) bool {
@@ -64,26 +72,75 @@ func isEmpty(endpoint string) bool {
 	}
 	return false
 }
+
 func (c *Config) Validate() error {
-	// validate that atleast one endpoint is set up correctly
-	if isEmpty(c.GRPCClientSettings.Endpoint) &&
+	// validate that at least one endpoint is set up correctly
+	if isEmpty(c.Domain) &&
+		isEmpty(c.Traces.Endpoint) &&
 		isEmpty(c.Metrics.Endpoint) &&
-		isEmpty(c.Logs.Endpoint) {
-		return fmt.Errorf("`endpoint` or `metrics.endpoint` or `logs.endpoint` not specified, please fix the configuration file")
+		isEmpty(c.Logs.Endpoint) &&
+		isEmpty(c.Profiles.Endpoint) {
+		return errors.New("`domain` or `traces.endpoint` or `metrics.endpoint` or `logs.endpoint` or `profiles.endpoint` not specified, please fix the configuration")
 	}
 	if c.PrivateKey == "" {
-		return fmt.Errorf("`privateKey` not specified, please fix the configuration file")
+		return errors.New("`private_key` not specified, please fix the configuration")
 	}
 	if c.AppName == "" {
-		return fmt.Errorf("`appName` not specified, please fix the configuration file")
+		return errors.New("`application_name` not specified, please fix the configuration")
 	}
 
 	// check if headers exists
-	if len(c.GRPCClientSettings.Headers) == 0 {
-		c.GRPCClientSettings.Headers = map[string]string{}
+	if len(c.ClientConfig.Headers) == 0 {
+		c.ClientConfig.Headers = make(map[string]configopaque.String)
 	}
-	c.GRPCClientSettings.Headers["ACCESS_TOKEN"] = c.PrivateKey
-	c.GRPCClientSettings.Headers["appName"] = c.AppName
-
+	c.ClientConfig.Headers["ACCESS_TOKEN"] = c.PrivateKey
+	c.ClientConfig.Headers["appName"] = configopaque.String(c.AppName)
 	return nil
+}
+
+func (c *Config) getMetadataFromResource(res pcommon.Resource) (appName, subsystem string) {
+	// Example application name attributes: service.namespace, k8s.namespace.name
+	for _, appNameAttribute := range c.AppNameAttributes {
+		attr, ok := res.Attributes().Get(appNameAttribute)
+		if ok && attr.AsString() != "" {
+			appName = attr.AsString()
+			break
+		}
+	}
+
+	// Example subsystem name attributes: service.name, k8s.deployment.name, k8s.statefulset.name
+	for _, subSystemNameAttribute := range c.SubSystemAttributes {
+		attr, ok := res.Attributes().Get(subSystemNameAttribute)
+		if ok && attr.AsString() != "" {
+			subsystem = attr.AsString()
+			break
+		}
+	}
+
+	if appName == "" {
+		appName = c.AppName
+	}
+	if subsystem == "" {
+		subsystem = c.SubSystem
+	}
+
+	if appName == "" {
+		attr, ok := res.Attributes().Get(cxAppNameAttrName)
+		if ok && attr.AsString() != "" {
+			appName = attr.AsString()
+		}
+	}
+	if subsystem == "" {
+		attr, ok := res.Attributes().Get(cxSubsystemNameAttrName)
+		if ok && attr.AsString() != "" {
+			subsystem = attr.AsString()
+		}
+	}
+	return appName, subsystem
+}
+
+func (c *Config) getDomainGrpcSettings() *configgrpc.ClientConfig {
+	settings := c.DomainSettings
+	settings.Endpoint = fmt.Sprintf("ingress.%s:443", c.Domain)
+	return &settings
 }

@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package splunk
 
@@ -19,126 +8,126 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/pdata/pcommon"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.27.0"
 )
 
 var (
 	ec2Resource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attr := res.Attributes()
-		attr.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAWS)
-		attr.UpsertString(conventions.AttributeCloudAccountID, "1234")
-		attr.UpsertString(conventions.AttributeCloudRegion, "us-west-2")
-		attr.UpsertString(conventions.AttributeHostID, "i-abcd")
+		attr.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAWS)
+		attr.PutStr(conventions.AttributeCloudAccountID, "1234")
+		attr.PutStr(conventions.AttributeCloudRegion, "us-west-2")
+		attr.PutStr(conventions.AttributeHostID, "i-abcd")
 		return res
 	}()
 	ec2WithHost = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attr := res.Attributes()
-		attr.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAWS)
-		attr.UpsertString(conventions.AttributeCloudAccountID, "1234")
-		attr.UpsertString(conventions.AttributeCloudRegion, "us-west-2")
-		attr.UpsertString(conventions.AttributeHostID, "i-abcd")
-		attr.UpsertString(conventions.AttributeHostName, "localhost")
+		attr.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAWS)
+		attr.PutStr(conventions.AttributeCloudAccountID, "1234")
+		attr.PutStr(conventions.AttributeCloudRegion, "us-west-2")
+		attr.PutStr(conventions.AttributeHostID, "i-abcd")
+		attr.PutStr(conventions.AttributeHostName, "localhost")
 		return res
 	}()
 	ec2PartialResource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attr := res.Attributes()
-		attr.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAWS)
-		attr.UpsertString(conventions.AttributeHostID, "i-abcd")
+		attr.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAWS)
+		attr.PutStr(conventions.AttributeHostID, "i-abcd")
 		return res
 	}()
 	gcpResource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attr := res.Attributes()
-		attr.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderGCP)
-		attr.UpsertString(conventions.AttributeCloudAccountID, "1234")
-		attr.UpsertString(conventions.AttributeHostID, "i-abcd")
+		attr.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderGCP)
+		attr.PutStr(conventions.AttributeCloudAccountID, "1234")
+		attr.PutStr(conventions.AttributeHostID, "i-abcd")
 		return res
 	}()
 	gcpPartialResource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attr := res.Attributes()
-		attr.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderGCP)
-		attr.UpsertString(conventions.AttributeCloudAccountID, "1234")
+		attr.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderGCP)
+		attr.PutStr(conventions.AttributeCloudAccountID, "1234")
 		return res
 	}()
 	azureResource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attrs := res.Attributes()
-		attrs.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
-		attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
-		attrs.UpsertString(conventions.AttributeHostName, "myHostName")
-		attrs.UpsertString(conventions.AttributeCloudRegion, "myCloudRegion")
-		attrs.UpsertString(conventions.AttributeHostID, "myHostID")
-		attrs.UpsertString(conventions.AttributeCloudAccountID, "myCloudAccount")
-		attrs.UpsertString("azure.vm.name", "myVMName")
-		attrs.UpsertString("azure.vm.size", "42")
-		attrs.UpsertString("azure.resourcegroup.name", "myResourcegroupName")
+		attrs.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
+		attrs.PutStr(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
+		attrs.PutStr(conventions.AttributeHostName, "myHostName")
+		attrs.PutStr(conventions.AttributeCloudRegion, "myCloudRegion")
+		attrs.PutStr(conventions.AttributeHostID, "myHostID")
+		attrs.PutStr(conventions.AttributeCloudAccountID, "myCloudAccount")
+		attrs.PutStr("azure.vm.name", "myVMName")
+		attrs.PutStr("azure.vm.size", "42")
+		attrs.PutStr("azure.resourcegroup.name", "myResourcegroupName")
 		return res
 	}()
 	azureScalesetResource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attrs := res.Attributes()
-		attrs.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
-		attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
-		attrs.UpsertString(conventions.AttributeHostName, "my.fq.host.name")
-		attrs.UpsertString(conventions.AttributeCloudRegion, "myCloudRegion")
-		attrs.UpsertString(conventions.AttributeHostID, "myHostID")
-		attrs.UpsertString(conventions.AttributeCloudAccountID, "myCloudAccount")
-		attrs.UpsertString("azure.vm.name", "myVMScalesetName_1")
-		attrs.UpsertString("azure.vm.size", "42")
-		attrs.UpsertString("azure.vm.scaleset.name", "myVMScalesetName")
-		attrs.UpsertString("azure.resourcegroup.name", "myResourcegroupName")
+		attrs.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
+		attrs.PutStr(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
+		attrs.PutStr(conventions.AttributeHostName, "my.fq.host.name")
+		attrs.PutStr(conventions.AttributeCloudRegion, "myCloudRegion")
+		attrs.PutStr(conventions.AttributeHostID, "myHostID")
+		attrs.PutStr(conventions.AttributeCloudAccountID, "myCloudAccount")
+		attrs.PutStr("azure.vm.name", "myVMScalesetName_1")
+		attrs.PutStr("azure.vm.size", "42")
+		attrs.PutStr("azure.vm.scaleset.name", "myVMScalesetName")
+		attrs.PutStr("azure.resourcegroup.name", "myResourcegroupName")
 		return res
 	}()
 	azureMissingCloudAcct = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attrs := res.Attributes()
-		attrs.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
-		attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
-		attrs.UpsertString(conventions.AttributeCloudRegion, "myCloudRegion")
-		attrs.UpsertString(conventions.AttributeHostID, "myHostID")
-		attrs.UpsertString("azure.vm.size", "42")
-		attrs.UpsertString("azure.resourcegroup.name", "myResourcegroupName")
+		attrs.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
+		attrs.PutStr(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
+		attrs.PutStr(conventions.AttributeCloudRegion, "myCloudRegion")
+		attrs.PutStr(conventions.AttributeHostID, "myHostID")
+		attrs.PutStr("azure.vm.size", "42")
+		attrs.PutStr("azure.resourcegroup.name", "myResourcegroupName")
 		return res
 	}()
 	azureMissingResourceGroup = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attrs := res.Attributes()
-		attrs.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
-		attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
-		attrs.UpsertString(conventions.AttributeCloudRegion, "myCloudRegion")
-		attrs.UpsertString(conventions.AttributeHostID, "myHostID")
-		attrs.UpsertString(conventions.AttributeCloudAccountID, "myCloudAccount")
-		attrs.UpsertString("azure.vm.size", "42")
+		attrs.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
+		attrs.PutStr(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
+		attrs.PutStr(conventions.AttributeCloudRegion, "myCloudRegion")
+		attrs.PutStr(conventions.AttributeHostID, "myHostID")
+		attrs.PutStr(conventions.AttributeCloudAccountID, "myCloudAccount")
+		attrs.PutStr("azure.vm.size", "42")
 		return res
 	}()
 	azureMissingHostName = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attrs := res.Attributes()
-		attrs.UpsertString(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
-		attrs.UpsertString(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
-		attrs.UpsertString(conventions.AttributeCloudRegion, "myCloudRegion")
-		attrs.UpsertString(conventions.AttributeHostID, "myHostID")
-		attrs.UpsertString(conventions.AttributeCloudAccountID, "myCloudAccount")
-		attrs.UpsertString("azure.resourcegroup.name", "myResourcegroupName")
-		attrs.UpsertString("azure.vm.size", "42")
+		attrs.PutStr(conventions.AttributeCloudProvider, conventions.AttributeCloudProviderAzure)
+		attrs.PutStr(conventions.AttributeCloudPlatform, conventions.AttributeCloudPlatformAzureVM)
+		attrs.PutStr(conventions.AttributeCloudRegion, "myCloudRegion")
+		attrs.PutStr(conventions.AttributeHostID, "myHostID")
+		attrs.PutStr(conventions.AttributeCloudAccountID, "myCloudAccount")
+		attrs.PutStr("azure.resourcegroup.name", "myResourcegroupName")
+		attrs.PutStr("azure.vm.size", "42")
 		return res
 	}()
 	hostResource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attr := res.Attributes()
-		attr.UpsertString(conventions.AttributeHostName, "localhost")
+		attr.PutStr(conventions.AttributeHostName, "localhost")
 		return res
 	}()
 	unknownResource = func() pcommon.Resource {
 		res := pcommon.NewResource()
 		attr := res.Attributes()
-		attr.UpsertString(conventions.AttributeCloudProvider, "unknown")
-		attr.UpsertString(conventions.AttributeCloudAccountID, "1234")
-		attr.UpsertString(conventions.AttributeHostID, "i-abcd")
+		attr.PutStr(conventions.AttributeCloudProvider, "unknown")
+		attr.PutStr(conventions.AttributeCloudAccountID, "1234")
+		attr.PutStr(conventions.AttributeHostID, "i-abcd")
 		return res
 	}()
 )

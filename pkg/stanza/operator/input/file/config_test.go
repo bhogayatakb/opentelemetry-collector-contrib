@@ -1,32 +1,19 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package file
 
 import (
 	"path/filepath"
-	"reflect"
-	"runtime"
 	"testing"
 	"time"
 
-	"github.com/mitchellh/mapstructure"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component/componenttest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper/operatortest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/operatortest"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/testutil"
 )
 
@@ -328,9 +315,7 @@ func TestUnmarshal(t *testing.T) {
 				ExpectErr: false,
 				Expect: func() *Config {
 					cfg := NewConfig()
-					newSplit := helper.NewSplitterConfig()
-					newSplit.Multiline.LineStartPattern = "Start"
-					cfg.Splitter = newSplit
+					cfg.SplitConfig.LineStartPattern = "Start"
 					return cfg
 				}(),
 			},
@@ -339,9 +324,7 @@ func TestUnmarshal(t *testing.T) {
 				ExpectErr: false,
 				Expect: func() *Config {
 					cfg := NewConfig()
-					newSplit := helper.NewSplitterConfig()
-					newSplit.Multiline.LineStartPattern = "%"
-					cfg.Splitter = newSplit
+					cfg.SplitConfig.LineStartPattern = "%"
 					return cfg
 				}(),
 			},
@@ -350,9 +333,7 @@ func TestUnmarshal(t *testing.T) {
 				ExpectErr: false,
 				Expect: func() *Config {
 					cfg := NewConfig()
-					newSplit := helper.NewSplitterConfig()
-					newSplit.Multiline.LineEndPattern = "Start"
-					cfg.Splitter = newSplit
+					cfg.SplitConfig.LineEndPattern = "Start"
 					return cfg
 				}(),
 			},
@@ -361,9 +342,7 @@ func TestUnmarshal(t *testing.T) {
 				ExpectErr: false,
 				Expect: func() *Config {
 					cfg := NewConfig()
-					newSplit := helper.NewSplitterConfig()
-					newSplit.Multiline.LineEndPattern = "%"
-					cfg.Splitter = newSplit
+					cfg.SplitConfig.LineEndPattern = "%"
 					return cfg
 				}(),
 			},
@@ -426,7 +405,7 @@ func TestUnmarshal(t *testing.T) {
 				ExpectErr: false,
 				Expect: func() *Config {
 					cfg := NewConfig()
-					cfg.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "utf-16le"}
+					cfg.Encoding = "utf-16le"
 					return cfg
 				}(),
 			},
@@ -435,7 +414,7 @@ func TestUnmarshal(t *testing.T) {
 				ExpectErr: false,
 				Expect: func() *Config {
 					cfg := NewConfig()
-					cfg.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "UTF-16lE"}
+					cfg.Encoding = "UTF-16lE"
 					return cfg
 				}(),
 			},
@@ -464,177 +443,88 @@ func TestBuild(t *testing.T) {
 	}{
 		{
 			"Default",
-			func(f *Config) {},
+			func(_ *Config) {},
 			require.NoError,
 			func(t *testing.T, f *Input) {
 				require.Equal(t, f.OutputOperators[0], fakeOutput)
-				expectOptions := []preEmitOption{setFileName}
-				requireSamePreEmitOptions(t, expectOptions, f.preEmitOptions)
-			},
-		},
-		{
-			"IncludeFilePath",
-			func(f *Config) {
-				f.IncludeFilePath = true
-			},
-			require.NoError,
-			func(t *testing.T, f *Input) {
-				require.Equal(t, f.OutputOperators[0], fakeOutput)
-				expectOptions := []preEmitOption{setFileName, setFilePath}
-				requireSamePreEmitOptions(t, expectOptions, f.preEmitOptions)
-			},
-		},
-		{
-			"IncludeFileNameResolved",
-			func(f *Config) {
-				f.IncludeFileNameResolved = true
-			},
-			require.NoError,
-			func(t *testing.T, f *Input) {
-				require.Equal(t, f.OutputOperators[0], fakeOutput)
-				expectOptions := []preEmitOption{setFileName, setFileNameResolved}
-				requireSamePreEmitOptions(t, expectOptions, f.preEmitOptions)
-			},
-		},
-		{
-			"IncludeFilePathResolved",
-			func(f *Config) {
-				f.IncludeFilePathResolved = true
-			},
-			require.NoError,
-			func(t *testing.T, f *Input) {
-				require.Equal(t, f.OutputOperators[0], fakeOutput)
-				expectOptions := []preEmitOption{setFileName, setFilePathResolved}
-				requireSamePreEmitOptions(t, expectOptions, f.preEmitOptions)
-			},
-		},
-		{
-			"IncludeResolvedAttrs",
-			func(f *Config) {
-				f.IncludeFileName = false
-				f.IncludeFilePath = false
-				f.IncludeFilePathResolved = true
-				f.IncludeFileNameResolved = true
-			},
-			require.NoError,
-			func(t *testing.T, f *Input) {
-				require.Equal(t, f.OutputOperators[0], fakeOutput)
-				expectOptions := []preEmitOption{setFileNameResolved, setFilePathResolved}
-				requireSamePreEmitOptions(t, expectOptions, f.preEmitOptions)
-			},
-		},
-		{
-			"IncludeAllFileAttrs",
-			func(f *Config) {
-				f.IncludeFileName = true
-				f.IncludeFilePath = true
-				f.IncludeFilePathResolved = true
-				f.IncludeFileNameResolved = true
-			},
-			require.NoError,
-			func(t *testing.T, f *Input) {
-				require.Equal(t, f.OutputOperators[0], fakeOutput)
-				expectOptions := []preEmitOption{setFileName, setFilePath, setFileNameResolved, setFilePathResolved}
-				requireSamePreEmitOptions(t, expectOptions, f.preEmitOptions)
 			},
 		},
 		{
 			"BadIncludeGlob",
-			func(f *Config) {
-				f.Include = []string{"["}
+			func(cfg *Config) {
+				cfg.Include = []string{"["}
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"BadExcludeGlob",
-			func(f *Config) {
-				f.Include = []string{"["}
+			func(cfg *Config) {
+				cfg.Include = []string{"["}
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"MultilineConfiguredStartAndEndPatterns",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineEndPattern:   "Exists",
-					LineStartPattern: "Exists",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineEndPattern = "Exists"
+				cfg.SplitConfig.LineStartPattern = "Exists"
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"MultilineConfiguredStartPattern",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineStartPattern: "START.*",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineStartPattern = "START.*"
 			},
 			require.NoError,
-			func(t *testing.T, f *Input) {},
+			func(_ *testing.T, _ *Input) {},
 		},
 		{
 			"MultilineConfiguredEndPattern",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineEndPattern: "END.*",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineEndPattern = "END.*"
 			},
 			require.NoError,
-			func(t *testing.T, f *Input) {},
+			func(_ *testing.T, _ *Input) {},
 		},
 		{
 			"InvalidEncoding",
-			func(f *Config) {
-				f.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "UTF-3233"}
+			func(cfg *Config) {
+				cfg.Encoding = "UTF-3233"
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"LineStartAndEnd",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineStartPattern: ".*",
-					LineEndPattern:   ".*",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineStartPattern = ".*"
+				cfg.SplitConfig.LineEndPattern = ".*"
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"NoLineStartOrEnd",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{}
-			},
+			func(_ *Config) {},
 			require.NoError,
-			func(t *testing.T, f *Input) {},
+			func(_ *testing.T, _ *Input) {},
 		},
 		{
 			"InvalidLineStartRegex",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineStartPattern: "(",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineStartPattern = "("
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"InvalidLineEndRegex",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineEndPattern: "(",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineEndPattern = "("
 			},
 			require.Error,
 			nil,
@@ -643,12 +533,12 @@ func TestBuild(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc := tc
 			t.Parallel()
 			cfg := basicConfig()
 			tc.modifyBaseConfig(cfg)
 
-			op, err := cfg.Build(testutil.Logger(t))
+			set := componenttest.NewNopTelemetrySettings()
+			op, err := cfg.Build(set)
 			tc.errorRequirement(t, err)
 			if err != nil {
 				return
@@ -661,94 +551,4 @@ func TestBuild(t *testing.T) {
 			tc.validate(t, fileInput)
 		})
 	}
-}
-
-func requireSamePreEmitOptions(t *testing.T, expect, actual []preEmitOption) {
-	// Comparing functions is not directly possible
-	require.Equal(t, len(expect), len(actual))
-	for i := range expect {
-		// Credit https://github.com/stretchr/testify/issues/182#issuecomment-495359313
-		expectFuncName := runtime.FuncForPC(reflect.ValueOf(expect[i]).Pointer()).Name()
-		actualFuncName := runtime.FuncForPC(reflect.ValueOf(actual[i]).Pointer()).Name()
-		require.Equal(t, expectFuncName, actualFuncName)
-	}
-}
-
-func NewTestConfig() *Config {
-	cfg := NewConfigWithID("config_test")
-	cfg.Include = []string{"i1", "i2"}
-	cfg.Exclude = []string{"e1", "e2"}
-	cfg.Splitter = helper.NewSplitterConfig()
-	cfg.Splitter.Multiline = helper.MultilineConfig{
-		LineStartPattern: "start",
-		LineEndPattern:   "end",
-	}
-	cfg.FingerprintSize = 1024
-	cfg.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "utf16"}
-	return cfg
-}
-
-func TestMapStructureDecodeConfigWithHook(t *testing.T) {
-	expect := NewTestConfig()
-	input := map[string]interface{}{
-		// Config
-		"id":            "config_test",
-		"type":          "file_input",
-		"attributes":    map[string]interface{}{},
-		"resource":      map[string]interface{}{},
-		"include":       expect.Include,
-		"exclude":       expect.Exclude,
-		"poll_interval": 200 * time.Millisecond,
-		"multiline": map[string]interface{}{
-			"line_start_pattern": expect.Splitter.Multiline.LineStartPattern,
-			"line_end_pattern":   expect.Splitter.Multiline.LineEndPattern,
-		},
-		"force_flush_period":   500 * time.Millisecond,
-		"include_file_name":    true,
-		"include_file_path":    false,
-		"start_at":             "end",
-		"fingerprint_size":     "1024",
-		"max_log_size":         "1mib",
-		"max_concurrent_files": 1024,
-		"encoding":             "utf16",
-	}
-
-	var actual Config
-	dc := &mapstructure.DecoderConfig{Result: &actual, DecodeHook: helper.JSONUnmarshalerHook()}
-	ms, err := mapstructure.NewDecoder(dc)
-	require.NoError(t, err)
-	err = ms.Decode(input)
-	require.NoError(t, err)
-	require.Equal(t, expect, &actual)
-}
-
-func TestMapStructureDecodeConfig(t *testing.T) {
-	expect := NewTestConfig()
-	input := map[string]interface{}{
-		// Config
-		"id":            "config_test",
-		"type":          "file_input",
-		"attributes":    map[string]interface{}{},
-		"resource":      map[string]interface{}{},
-		"include":       expect.Include,
-		"exclude":       expect.Exclude,
-		"poll_interval": 200 * time.Millisecond,
-		"multiline": map[string]interface{}{
-			"line_start_pattern": expect.Splitter.Multiline.LineStartPattern,
-			"line_end_pattern":   expect.Splitter.Multiline.LineEndPattern,
-		},
-		"include_file_name":    true,
-		"include_file_path":    false,
-		"start_at":             "end",
-		"fingerprint_size":     1024,
-		"max_log_size":         1024 * 1024,
-		"max_concurrent_files": 1024,
-		"encoding":             "utf16",
-		"force_flush_period":   500 * time.Millisecond,
-	}
-
-	var actual Config
-	err := mapstructure.Decode(input, &actual)
-	require.NoError(t, err)
-	require.Equal(t, expect, &actual)
 }

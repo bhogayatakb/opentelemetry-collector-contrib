@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package fluentforwardreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/fluentforwardreceiver"
 
@@ -40,7 +29,7 @@ type Event interface {
 	Compressed() string
 }
 
-type OptionsMap map[string]interface{}
+type OptionsMap map[string]any
 
 // Chunk returns the `chunk` option or blank string if it was not set.
 func (om OptionsMap) Chunk() string {
@@ -84,59 +73,54 @@ func (em EventMode) String() string {
 
 // parseInterfaceToMap takes map of interface objects and returns
 // AttributeValueMap
-func parseInterfaceToMap(msi map[string]interface{}) pcommon.Value {
-	rv := pcommon.NewValueMap()
-	am := rv.MapVal()
+func parseInterfaceToMap(msi map[string]any, dest pcommon.Value) {
+	am := dest.SetEmptyMap()
 	am.EnsureCapacity(len(msi))
 	for k, value := range msi {
-		am.Insert(k, parseToAttributeValue(value))
+		parseToAttributeValue(value, am.PutEmpty(k))
 	}
-	return rv
 }
 
 // parseInterfaceToArray takes array of interface objects and returns
 // AttributeValueArray
-func parseInterfaceToArray(ai []interface{}) pcommon.Value {
-	iv := pcommon.NewValueSlice()
-	av := iv.SliceVal()
+func parseInterfaceToArray(ai []any, dest pcommon.Value) {
+	av := dest.SetEmptySlice()
 	av.EnsureCapacity(len(ai))
 	for _, value := range ai {
-		parseToAttributeValue(value).CopyTo(av.AppendEmpty())
+		parseToAttributeValue(value, av.AppendEmpty())
 	}
-	return iv
 }
 
 // parseToAttributeValue converts interface object to AttributeValue
-func parseToAttributeValue(val interface{}) pcommon.Value {
+func parseToAttributeValue(val any, dest pcommon.Value) {
 	// See https://github.com/tinylib/msgp/wiki/Type-Mapping-Rules
 	switch r := val.(type) {
 	case bool:
-		return pcommon.NewValueBool(r)
+		dest.SetBool(r)
 	case string:
-		return pcommon.NewValueString(r)
+		dest.SetStr(r)
 	case uint64:
-		return pcommon.NewValueInt(int64(r))
+		dest.SetInt(int64(r))
 	case int64:
-		return pcommon.NewValueInt(r)
+		dest.SetInt(r)
 	// Sometimes strings come in as bytes array
 	case []byte:
-		return pcommon.NewValueString(string(r))
-	case map[string]interface{}:
-		return parseInterfaceToMap(r)
-	case []interface{}:
-		return parseInterfaceToArray(r)
+		dest.SetStr(string(r))
+	case map[string]any:
+		parseInterfaceToMap(r, dest)
+	case []any:
+		parseInterfaceToArray(r, dest)
 	case float32:
-		return pcommon.NewValueDouble(float64(r))
+		dest.SetDouble(float64(r))
 	case float64:
-		return pcommon.NewValueDouble(r)
+		dest.SetDouble(r)
 	case nil:
-		return pcommon.NewValueEmpty()
 	default:
-		return pcommon.NewValueString(fmt.Sprintf("%v", val))
+		dest.SetStr(fmt.Sprintf("%v", val))
 	}
 }
 
-func timeFromTimestamp(ts interface{}) (time.Time, error) {
+func timeFromTimestamp(ts any) (time.Time, error) {
 	switch v := ts.(type) {
 	case uint64:
 		return time.Unix(int64(v), 0), nil
@@ -149,7 +133,7 @@ func timeFromTimestamp(ts interface{}) (time.Time, error) {
 	}
 }
 
-func decodeTimestampToLogRecord(dc *msgp.Reader, lr plog.LogRecord) error {
+func parseRecordToLogRecord(dc *msgp.Reader, lr plog.LogRecord) error {
 	tsIntf, err := dc.ReadIntf()
 	if err != nil {
 		return msgp.WrapError(err, "Time")
@@ -161,11 +145,6 @@ func decodeTimestampToLogRecord(dc *msgp.Reader, lr plog.LogRecord) error {
 	}
 
 	lr.SetTimestamp(pcommon.NewTimestampFromTime(ts))
-	return nil
-}
-
-func parseRecordToLogRecord(dc *msgp.Reader, lr plog.LogRecord) error {
-	attrs := lr.Attributes()
 
 	recordLen, err := dc.ReadMapHeader()
 	if err != nil {
@@ -189,13 +168,11 @@ func parseRecordToLogRecord(dc *msgp.Reader, lr plog.LogRecord) error {
 			return msgp.WrapError(err, "Record", key)
 		}
 
-		av := parseToAttributeValue(val)
-
 		// fluentd uses message, fluentbit log.
 		if key == "message" || key == "log" {
-			av.CopyTo(lr.Body())
+			parseToAttributeValue(val, lr.Body())
 		} else {
-			attrs.Insert(key, av)
+			parseToAttributeValue(val, lr.Attributes().PutEmpty(key))
 		}
 	}
 
@@ -213,14 +190,12 @@ func (melr *MessageEventLogRecord) LogRecords() plog.LogRecordSlice {
 
 func (melr *MessageEventLogRecord) DecodeMsg(dc *msgp.Reader) error {
 	melr.LogRecordSlice = plog.NewLogRecordSlice()
-	log := melr.LogRecordSlice.AppendEmpty()
-
 	var arrLen uint32
 	var err error
 
 	arrLen, err = dc.ReadArrayHeader()
 	if err != nil {
-		return msgp.WrapError(err)
+		return err
 	}
 	if arrLen > 4 || arrLen < 3 {
 		return msgp.ArrayError{Wanted: 3, Got: arrLen}
@@ -231,14 +206,9 @@ func (melr *MessageEventLogRecord) DecodeMsg(dc *msgp.Reader) error {
 		return msgp.WrapError(err, "Tag")
 	}
 
+	log := melr.LogRecordSlice.AppendEmpty()
 	attrs := log.Attributes()
-	attrs.UpsertString(tagAttributeKey, tag)
-
-	err = decodeTimestampToLogRecord(dc, log)
-	if err != nil {
-		return msgp.WrapError(err, "Time")
-	}
-
+	attrs.PutStr(tagAttributeKey, tag)
 	err = parseRecordToLogRecord(dc, log)
 	if err != nil {
 		return err
@@ -246,9 +216,7 @@ func (melr *MessageEventLogRecord) DecodeMsg(dc *msgp.Reader) error {
 
 	if arrLen == 4 {
 		melr.OptionsMap, err = parseOptions(dc)
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	return nil
 }
@@ -285,18 +253,15 @@ func (fe *ForwardEventLogRecords) LogRecords() plog.LogRecordSlice {
 	return fe.LogRecordSlice
 }
 
-func (fe *ForwardEventLogRecords) DecodeMsg(dc *msgp.Reader) (err error) {
+func (fe *ForwardEventLogRecords) DecodeMsg(dc *msgp.Reader) error {
 	fe.LogRecordSlice = plog.NewLogRecordSlice()
 
-	var arrLen uint32
-	arrLen, err = dc.ReadArrayHeader()
+	arrLen, err := dc.ReadArrayHeader()
 	if err != nil {
-		err = msgp.WrapError(err)
-		return
+		return err
 	}
 	if arrLen < 2 || arrLen > 3 {
-		err = msgp.ArrayError{Wanted: 2, Got: arrLen}
-		return
+		return msgp.ArrayError{Wanted: 2, Got: arrLen}
 	}
 
 	tag, err := dc.ReadString()
@@ -306,8 +271,7 @@ func (fe *ForwardEventLogRecords) DecodeMsg(dc *msgp.Reader) (err error) {
 
 	entryLen, err := dc.ReadArrayHeader()
 	if err != nil {
-		err = msgp.WrapError(err, "Record")
-		return
+		return msgp.WrapError(err, "Record")
 	}
 
 	fe.LogRecordSlice.EnsureCapacity(int(entryLen))
@@ -318,33 +282,25 @@ func (fe *ForwardEventLogRecords) DecodeMsg(dc *msgp.Reader) (err error) {
 		if err != nil {
 			return msgp.WrapError(err, "Entries", i)
 		}
-		fe.LogRecordSlice.At(i).Attributes().UpsertString(tagAttributeKey, tag)
+		lr.Attributes().PutStr(tagAttributeKey, tag)
 	}
 
 	if arrLen == 3 {
 		fe.OptionsMap, err = parseOptions(dc)
-		if err != nil {
-			return err
-		}
+		return err
 	}
 
-	return
+	return nil
 }
 
 func parseEntryToLogRecord(dc *msgp.Reader, lr plog.LogRecord) error {
 	arrLen, err := dc.ReadArrayHeader()
 	if err != nil {
-		return msgp.WrapError(err)
+		return err
 	}
 	if arrLen != 2 {
 		return msgp.ArrayError{Wanted: 2, Got: arrLen}
 	}
-
-	err = decodeTimestampToLogRecord(dc, lr)
-	if err != nil {
-		return msgp.WrapError(err, "Time")
-	}
-
 	return parseRecordToLogRecord(dc, lr)
 }
 
@@ -364,7 +320,7 @@ func (pfe *PackedForwardEventLogRecords) DecodeMsg(dc *msgp.Reader) error {
 
 	arrLen, err := dc.ReadArrayHeader()
 	if err != nil {
-		return msgp.WrapError(err)
+		return err
 	}
 	if arrLen < 2 || arrLen > 3 {
 		return msgp.ArrayError{Wanted: 2, Got: arrLen}
@@ -433,8 +389,9 @@ func (pfe *PackedForwardEventLogRecords) parseEntries(entriesRaw []byte, isGzipp
 	}
 
 	msgpReader := msgp.NewReader(reader)
+	// Allocate only once, since the MoveTo cleans the lr, so we can reuse.
+	lr := plog.NewLogRecord()
 	for {
-		lr := plog.NewLogRecord()
 		err := parseEntryToLogRecord(msgpReader, lr)
 		if err != nil {
 			if errors.Is(msgp.Cause(err), io.EOF) {
@@ -442,10 +399,7 @@ func (pfe *PackedForwardEventLogRecords) parseEntries(entriesRaw []byte, isGzipp
 			}
 			return err
 		}
-
-		lr.Attributes().UpsertString(tagAttributeKey, tag)
-
-		tgt := pfe.LogRecordSlice.AppendEmpty()
-		lr.CopyTo(tgt)
+		lr.Attributes().PutStr(tagAttributeKey, tag)
+		lr.MoveTo(pfe.LogRecordSlice.AppendEmpty())
 	}
 }

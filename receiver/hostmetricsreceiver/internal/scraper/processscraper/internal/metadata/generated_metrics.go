@@ -6,54 +6,40 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/filter"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/scraper"
 	conventions "go.opentelemetry.io/collector/semconv/v1.9.0"
 )
 
-// MetricSettings provides common settings for a particular metric.
-type MetricSettings struct {
-	Enabled bool `mapstructure:"enabled"`
-}
+// AttributeContextSwitchType specifies the value context_switch_type attribute.
+type AttributeContextSwitchType int
 
-// MetricsSettings provides settings for hostmetricsreceiver/process metrics.
-type MetricsSettings struct {
-	ProcessCPUTime             MetricSettings `mapstructure:"process.cpu.time"`
-	ProcessDiskIo              MetricSettings `mapstructure:"process.disk.io"`
-	ProcessDiskIoRead          MetricSettings `mapstructure:"process.disk.io.read"`
-	ProcessDiskIoWrite         MetricSettings `mapstructure:"process.disk.io.write"`
-	ProcessMemoryPhysicalUsage MetricSettings `mapstructure:"process.memory.physical_usage"`
-	ProcessMemoryVirtualUsage  MetricSettings `mapstructure:"process.memory.virtual_usage"`
-	ProcessThreads             MetricSettings `mapstructure:"process.threads"`
-}
+const (
+	_ AttributeContextSwitchType = iota
+	AttributeContextSwitchTypeInvoluntary
+	AttributeContextSwitchTypeVoluntary
+)
 
-func DefaultMetricsSettings() MetricsSettings {
-	return MetricsSettings{
-		ProcessCPUTime: MetricSettings{
-			Enabled: true,
-		},
-		ProcessDiskIo: MetricSettings{
-			Enabled: true,
-		},
-		ProcessDiskIoRead: MetricSettings{
-			Enabled: true,
-		},
-		ProcessDiskIoWrite: MetricSettings{
-			Enabled: true,
-		},
-		ProcessMemoryPhysicalUsage: MetricSettings{
-			Enabled: true,
-		},
-		ProcessMemoryVirtualUsage: MetricSettings{
-			Enabled: true,
-		},
-		ProcessThreads: MetricSettings{
-			Enabled: false,
-		},
+// String returns the string representation of the AttributeContextSwitchType.
+func (av AttributeContextSwitchType) String() string {
+	switch av {
+	case AttributeContextSwitchTypeInvoluntary:
+		return "involuntary"
+	case AttributeContextSwitchTypeVoluntary:
+		return "voluntary"
 	}
+	return ""
 }
 
-// AttributeDirection specifies the a value direction attribute.
+// MapAttributeContextSwitchType is a helper map of string to AttributeContextSwitchType attribute value.
+var MapAttributeContextSwitchType = map[string]AttributeContextSwitchType{
+	"involuntary": AttributeContextSwitchTypeInvoluntary,
+	"voluntary":   AttributeContextSwitchTypeVoluntary,
+}
+
+// AttributeDirection specifies the value direction attribute.
 type AttributeDirection int
 
 const (
@@ -79,7 +65,33 @@ var MapAttributeDirection = map[string]AttributeDirection{
 	"write": AttributeDirectionWrite,
 }
 
-// AttributeState specifies the a value state attribute.
+// AttributePagingFaultType specifies the value paging_fault_type attribute.
+type AttributePagingFaultType int
+
+const (
+	_ AttributePagingFaultType = iota
+	AttributePagingFaultTypeMajor
+	AttributePagingFaultTypeMinor
+)
+
+// String returns the string representation of the AttributePagingFaultType.
+func (av AttributePagingFaultType) String() string {
+	switch av {
+	case AttributePagingFaultTypeMajor:
+		return "major"
+	case AttributePagingFaultTypeMinor:
+		return "minor"
+	}
+	return ""
+}
+
+// MapAttributePagingFaultType is a helper map of string to AttributePagingFaultType attribute value.
+var MapAttributePagingFaultType = map[string]AttributePagingFaultType{
+	"major": AttributePagingFaultTypeMajor,
+	"minor": AttributePagingFaultTypeMinor,
+}
+
+// AttributeState specifies the value state attribute.
 type AttributeState int
 
 const (
@@ -109,9 +121,62 @@ var MapAttributeState = map[string]AttributeState{
 	"wait":   AttributeStateWait,
 }
 
+type metricProcessContextSwitches struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills process.context_switches metric with initial data.
+func (m *metricProcessContextSwitches) init() {
+	m.data.SetName("process.context_switches")
+	m.data.SetDescription("Number of times the process has been context switched.")
+	m.data.SetUnit("{count}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(true)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
+}
+
+func (m *metricProcessContextSwitches) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, contextSwitchTypeAttributeValue string) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("type", contextSwitchTypeAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricProcessContextSwitches) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricProcessContextSwitches) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricProcessContextSwitches(cfg MetricConfig) metricProcessContextSwitches {
+	m := metricProcessContextSwitches{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
 type metricProcessCPUTime struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -120,21 +185,21 @@ func (m *metricProcessCPUTime) init() {
 	m.data.SetName("process.cpu.time")
 	m.data.SetDescription("Total CPU seconds broken down by different states.")
 	m.data.SetUnit("s")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricProcessCPUTime) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64, stateAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetDoubleVal(val)
-	dp.Attributes().UpsertString("state", stateAttributeValue)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("state", stateAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -146,16 +211,67 @@ func (m *metricProcessCPUTime) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricProcessCPUTime) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricProcessCPUTime(settings MetricSettings) metricProcessCPUTime {
-	m := metricProcessCPUTime{settings: settings}
-	if settings.Enabled {
+func newMetricProcessCPUTime(cfg MetricConfig) metricProcessCPUTime {
+	m := metricProcessCPUTime{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricProcessCPUUtilization struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills process.cpu.utilization metric with initial data.
+func (m *metricProcessCPUUtilization) init() {
+	m.data.SetName("process.cpu.utilization")
+	m.data.SetDescription("Percentage of total CPU time used by the process since last scrape, expressed as a value between 0 and 1. On the first scrape, no data point is emitted for this metric.")
+	m.data.SetUnit("1")
+	m.data.SetEmptyGauge()
+	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
+}
+
+func (m *metricProcessCPUUtilization) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64, stateAttributeValue string) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("state", stateAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricProcessCPUUtilization) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricProcessCPUUtilization) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricProcessCPUUtilization(cfg MetricConfig) metricProcessCPUUtilization {
+	m := metricProcessCPUUtilization{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -164,7 +280,7 @@ func newMetricProcessCPUTime(settings MetricSettings) metricProcessCPUTime {
 
 type metricProcessDiskIo struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -173,21 +289,21 @@ func (m *metricProcessDiskIo) init() {
 	m.data.SetName("process.disk.io")
 	m.data.SetDescription("Disk bytes transferred.")
 	m.data.SetUnit("By")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricProcessDiskIo) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, directionAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("direction", directionAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("direction", directionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -199,220 +315,426 @@ func (m *metricProcessDiskIo) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricProcessDiskIo) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricProcessDiskIo(settings MetricSettings) metricProcessDiskIo {
-	m := metricProcessDiskIo{settings: settings}
-	if settings.Enabled {
+func newMetricProcessDiskIo(cfg MetricConfig) metricProcessDiskIo {
+	m := metricProcessDiskIo{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
 	return m
 }
 
-type metricProcessDiskIoRead struct {
+type metricProcessDiskOperations struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
-// init fills process.disk.io.read metric with initial data.
-func (m *metricProcessDiskIoRead) init() {
-	m.data.SetName("process.disk.io.read")
-	m.data.SetDescription("Disk bytes read.")
-	m.data.SetUnit("By")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+// init fills process.disk.operations metric with initial data.
+func (m *metricProcessDiskOperations) init() {
+	m.data.SetName("process.disk.operations")
+	m.data.SetDescription("Number of disk operations performed by the process.")
+	m.data.SetUnit("{operations}")
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
-func (m *metricProcessDiskIoRead) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+func (m *metricProcessDiskOperations) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, directionAttributeValue string) {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("direction", directionAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
-func (m *metricProcessDiskIoRead) updateCapacity() {
+func (m *metricProcessDiskOperations) updateCapacity() {
 	if m.data.Sum().DataPoints().Len() > m.capacity {
 		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
-func (m *metricProcessDiskIoRead) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+func (m *metricProcessDiskOperations) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricProcessDiskIoRead(settings MetricSettings) metricProcessDiskIoRead {
-	m := metricProcessDiskIoRead{settings: settings}
-	if settings.Enabled {
+func newMetricProcessDiskOperations(cfg MetricConfig) metricProcessDiskOperations {
+	m := metricProcessDiskOperations{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
 	return m
 }
 
-type metricProcessDiskIoWrite struct {
+type metricProcessHandles struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
-// init fills process.disk.io.write metric with initial data.
-func (m *metricProcessDiskIoWrite) init() {
-	m.data.SetName("process.disk.io.write")
-	m.data.SetDescription("Disk bytes written.")
-	m.data.SetUnit("By")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
-	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+// init fills process.handles metric with initial data.
+func (m *metricProcessHandles) init() {
+	m.data.SetName("process.handles")
+	m.data.SetDescription("Number of open handles held by the process.")
+	m.data.SetUnit("{count}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
-func (m *metricProcessDiskIoWrite) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+func (m *metricProcessHandles) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
-func (m *metricProcessDiskIoWrite) updateCapacity() {
+func (m *metricProcessHandles) updateCapacity() {
 	if m.data.Sum().DataPoints().Len() > m.capacity {
 		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
-func (m *metricProcessDiskIoWrite) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+func (m *metricProcessHandles) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricProcessDiskIoWrite(settings MetricSettings) metricProcessDiskIoWrite {
-	m := metricProcessDiskIoWrite{settings: settings}
-	if settings.Enabled {
+func newMetricProcessHandles(cfg MetricConfig) metricProcessHandles {
+	m := metricProcessHandles{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
 	return m
 }
 
-type metricProcessMemoryPhysicalUsage struct {
+type metricProcessMemoryUsage struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
-// init fills process.memory.physical_usage metric with initial data.
-func (m *metricProcessMemoryPhysicalUsage) init() {
-	m.data.SetName("process.memory.physical_usage")
+// init fills process.memory.usage metric with initial data.
+func (m *metricProcessMemoryUsage) init() {
+	m.data.SetName("process.memory.usage")
 	m.data.SetDescription("The amount of physical memory in use.")
 	m.data.SetUnit("By")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(false)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
-func (m *metricProcessMemoryPhysicalUsage) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+func (m *metricProcessMemoryUsage) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
-func (m *metricProcessMemoryPhysicalUsage) updateCapacity() {
+func (m *metricProcessMemoryUsage) updateCapacity() {
 	if m.data.Sum().DataPoints().Len() > m.capacity {
 		m.capacity = m.data.Sum().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
-func (m *metricProcessMemoryPhysicalUsage) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+func (m *metricProcessMemoryUsage) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricProcessMemoryPhysicalUsage(settings MetricSettings) metricProcessMemoryPhysicalUsage {
-	m := metricProcessMemoryPhysicalUsage{settings: settings}
-	if settings.Enabled {
+func newMetricProcessMemoryUsage(cfg MetricConfig) metricProcessMemoryUsage {
+	m := metricProcessMemoryUsage{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
 	return m
 }
 
-type metricProcessMemoryVirtualUsage struct {
+type metricProcessMemoryUtilization struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
-// init fills process.memory.virtual_usage metric with initial data.
-func (m *metricProcessMemoryVirtualUsage) init() {
-	m.data.SetName("process.memory.virtual_usage")
-	m.data.SetDescription("Virtual memory size.")
-	m.data.SetUnit("By")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
-	m.data.Sum().SetIsMonotonic(false)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+// init fills process.memory.utilization metric with initial data.
+func (m *metricProcessMemoryUtilization) init() {
+	m.data.SetName("process.memory.utilization")
+	m.data.SetDescription("Percentage of total physical memory that is used by the process.")
+	m.data.SetUnit("1")
+	m.data.SetEmptyGauge()
 }
 
-func (m *metricProcessMemoryVirtualUsage) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+func (m *metricProcessMemoryUtilization) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64) {
+	if !m.config.Enabled {
 		return
 	}
-	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetDoubleValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
-func (m *metricProcessMemoryVirtualUsage) updateCapacity() {
-	if m.data.Sum().DataPoints().Len() > m.capacity {
-		m.capacity = m.data.Sum().DataPoints().Len()
+func (m *metricProcessMemoryUtilization) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
 	}
 }
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
-func (m *metricProcessMemoryVirtualUsage) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+func (m *metricProcessMemoryUtilization) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricProcessMemoryVirtualUsage(settings MetricSettings) metricProcessMemoryVirtualUsage {
-	m := metricProcessMemoryVirtualUsage{settings: settings}
-	if settings.Enabled {
+func newMetricProcessMemoryUtilization(cfg MetricConfig) metricProcessMemoryUtilization {
+	m := metricProcessMemoryUtilization{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricProcessMemoryVirtual struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills process.memory.virtual metric with initial data.
+func (m *metricProcessMemoryVirtual) init() {
+	m.data.SetName("process.memory.virtual")
+	m.data.SetDescription("Virtual memory size.")
+	m.data.SetUnit("By")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricProcessMemoryVirtual) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricProcessMemoryVirtual) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricProcessMemoryVirtual) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricProcessMemoryVirtual(cfg MetricConfig) metricProcessMemoryVirtual {
+	m := metricProcessMemoryVirtual{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricProcessOpenFileDescriptors struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills process.open_file_descriptors metric with initial data.
+func (m *metricProcessOpenFileDescriptors) init() {
+	m.data.SetName("process.open_file_descriptors")
+	m.data.SetDescription("Number of file descriptors in use by the process.")
+	m.data.SetUnit("{count}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricProcessOpenFileDescriptors) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricProcessOpenFileDescriptors) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricProcessOpenFileDescriptors) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricProcessOpenFileDescriptors(cfg MetricConfig) metricProcessOpenFileDescriptors {
+	m := metricProcessOpenFileDescriptors{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricProcessPagingFaults struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills process.paging.faults metric with initial data.
+func (m *metricProcessPagingFaults) init() {
+	m.data.SetName("process.paging.faults")
+	m.data.SetDescription("Number of page faults the process has made.")
+	m.data.SetUnit("{faults}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(true)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
+}
+
+func (m *metricProcessPagingFaults) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, pagingFaultTypeAttributeValue string) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("type", pagingFaultTypeAttributeValue)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricProcessPagingFaults) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricProcessPagingFaults) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricProcessPagingFaults(cfg MetricConfig) metricProcessPagingFaults {
+	m := metricProcessPagingFaults{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricProcessSignalsPending struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills process.signals_pending metric with initial data.
+func (m *metricProcessSignalsPending) init() {
+	m.data.SetName("process.signals_pending")
+	m.data.SetDescription("Number of pending signals for the process.")
+	m.data.SetUnit("{signals}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricProcessSignalsPending) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricProcessSignalsPending) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricProcessSignalsPending) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricProcessSignalsPending(cfg MetricConfig) metricProcessSignalsPending {
+	m := metricProcessSignalsPending{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -421,7 +743,7 @@ func newMetricProcessMemoryVirtualUsage(settings MetricSettings) metricProcessMe
 
 type metricProcessThreads struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -430,19 +752,19 @@ func (m *metricProcessThreads) init() {
 	m.data.SetName("process.threads")
 	m.data.SetDescription("Process threads count.")
 	m.data.SetUnit("{threads}")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(false)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
 func (m *metricProcessThreads) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -454,16 +776,65 @@ func (m *metricProcessThreads) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricProcessThreads) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricProcessThreads(settings MetricSettings) metricProcessThreads {
-	m := metricProcessThreads{settings: settings}
-	if settings.Enabled {
+func newMetricProcessThreads(cfg MetricConfig) metricProcessThreads {
+	m := metricProcessThreads{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricProcessUptime struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills process.uptime metric with initial data.
+func (m *metricProcessUptime) init() {
+	m.data.SetName("process.uptime")
+	m.data.SetDescription("The time the process has been running.")
+	m.data.SetUnit("s")
+	m.data.SetEmptyGauge()
+}
+
+func (m *metricProcessUptime) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Gauge().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetDoubleValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricProcessUptime) updateCapacity() {
+	if m.data.Gauge().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Gauge().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricProcessUptime) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricProcessUptime(cfg MetricConfig) metricProcessUptime {
+	m := metricProcessUptime{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -471,49 +842,129 @@ func newMetricProcessThreads(settings MetricSettings) metricProcessThreads {
 }
 
 // MetricsBuilder provides an interface for scrapers to report metrics while taking care of all the transformations
-// required to produce metric representation defined in metadata and user settings.
+// required to produce metric representation defined in metadata and user config.
 type MetricsBuilder struct {
-	startTime                        pcommon.Timestamp   // start time that will be applied to all recorded data points.
-	metricsCapacity                  int                 // maximum observed number of metrics per resource.
-	resourceCapacity                 int                 // maximum observed number of resource attributes.
-	metricsBuffer                    pmetric.Metrics     // accumulates metrics data before emitting.
-	buildInfo                        component.BuildInfo // contains version information
+	config                           MetricsBuilderConfig // config of the metrics builder.
+	startTime                        pcommon.Timestamp    // start time that will be applied to all recorded data points.
+	metricsCapacity                  int                  // maximum observed number of metrics per resource.
+	metricsBuffer                    pmetric.Metrics      // accumulates metrics data before emitting.
+	buildInfo                        component.BuildInfo  // contains version information.
+	resourceAttributeIncludeFilter   map[string]filter.Filter
+	resourceAttributeExcludeFilter   map[string]filter.Filter
+	metricProcessContextSwitches     metricProcessContextSwitches
 	metricProcessCPUTime             metricProcessCPUTime
+	metricProcessCPUUtilization      metricProcessCPUUtilization
 	metricProcessDiskIo              metricProcessDiskIo
-	metricProcessDiskIoRead          metricProcessDiskIoRead
-	metricProcessDiskIoWrite         metricProcessDiskIoWrite
-	metricProcessMemoryPhysicalUsage metricProcessMemoryPhysicalUsage
-	metricProcessMemoryVirtualUsage  metricProcessMemoryVirtualUsage
+	metricProcessDiskOperations      metricProcessDiskOperations
+	metricProcessHandles             metricProcessHandles
+	metricProcessMemoryUsage         metricProcessMemoryUsage
+	metricProcessMemoryUtilization   metricProcessMemoryUtilization
+	metricProcessMemoryVirtual       metricProcessMemoryVirtual
+	metricProcessOpenFileDescriptors metricProcessOpenFileDescriptors
+	metricProcessPagingFaults        metricProcessPagingFaults
+	metricProcessSignalsPending      metricProcessSignalsPending
 	metricProcessThreads             metricProcessThreads
+	metricProcessUptime              metricProcessUptime
 }
 
-// metricBuilderOption applies changes to default metrics builder.
-type metricBuilderOption func(*MetricsBuilder)
+// MetricBuilderOption applies changes to default metrics builder.
+type MetricBuilderOption interface {
+	apply(*MetricsBuilder)
+}
+
+type metricBuilderOptionFunc func(mb *MetricsBuilder)
+
+func (mbof metricBuilderOptionFunc) apply(mb *MetricsBuilder) {
+	mbof(mb)
+}
 
 // WithStartTime sets startTime on the metrics builder.
-func WithStartTime(startTime pcommon.Timestamp) metricBuilderOption {
-	return func(mb *MetricsBuilder) {
+func WithStartTime(startTime pcommon.Timestamp) MetricBuilderOption {
+	return metricBuilderOptionFunc(func(mb *MetricsBuilder) {
 		mb.startTime = startTime
-	}
+	})
 }
-
-func NewMetricsBuilder(settings MetricsSettings, buildInfo component.BuildInfo, options ...metricBuilderOption) *MetricsBuilder {
+func NewMetricsBuilder(mbc MetricsBuilderConfig, settings scraper.Settings, options ...MetricBuilderOption) *MetricsBuilder {
 	mb := &MetricsBuilder{
+		config:                           mbc,
 		startTime:                        pcommon.NewTimestampFromTime(time.Now()),
 		metricsBuffer:                    pmetric.NewMetrics(),
-		buildInfo:                        buildInfo,
-		metricProcessCPUTime:             newMetricProcessCPUTime(settings.ProcessCPUTime),
-		metricProcessDiskIo:              newMetricProcessDiskIo(settings.ProcessDiskIo),
-		metricProcessDiskIoRead:          newMetricProcessDiskIoRead(settings.ProcessDiskIoRead),
-		metricProcessDiskIoWrite:         newMetricProcessDiskIoWrite(settings.ProcessDiskIoWrite),
-		metricProcessMemoryPhysicalUsage: newMetricProcessMemoryPhysicalUsage(settings.ProcessMemoryPhysicalUsage),
-		metricProcessMemoryVirtualUsage:  newMetricProcessMemoryVirtualUsage(settings.ProcessMemoryVirtualUsage),
-		metricProcessThreads:             newMetricProcessThreads(settings.ProcessThreads),
+		buildInfo:                        settings.BuildInfo,
+		metricProcessContextSwitches:     newMetricProcessContextSwitches(mbc.Metrics.ProcessContextSwitches),
+		metricProcessCPUTime:             newMetricProcessCPUTime(mbc.Metrics.ProcessCPUTime),
+		metricProcessCPUUtilization:      newMetricProcessCPUUtilization(mbc.Metrics.ProcessCPUUtilization),
+		metricProcessDiskIo:              newMetricProcessDiskIo(mbc.Metrics.ProcessDiskIo),
+		metricProcessDiskOperations:      newMetricProcessDiskOperations(mbc.Metrics.ProcessDiskOperations),
+		metricProcessHandles:             newMetricProcessHandles(mbc.Metrics.ProcessHandles),
+		metricProcessMemoryUsage:         newMetricProcessMemoryUsage(mbc.Metrics.ProcessMemoryUsage),
+		metricProcessMemoryUtilization:   newMetricProcessMemoryUtilization(mbc.Metrics.ProcessMemoryUtilization),
+		metricProcessMemoryVirtual:       newMetricProcessMemoryVirtual(mbc.Metrics.ProcessMemoryVirtual),
+		metricProcessOpenFileDescriptors: newMetricProcessOpenFileDescriptors(mbc.Metrics.ProcessOpenFileDescriptors),
+		metricProcessPagingFaults:        newMetricProcessPagingFaults(mbc.Metrics.ProcessPagingFaults),
+		metricProcessSignalsPending:      newMetricProcessSignalsPending(mbc.Metrics.ProcessSignalsPending),
+		metricProcessThreads:             newMetricProcessThreads(mbc.Metrics.ProcessThreads),
+		metricProcessUptime:              newMetricProcessUptime(mbc.Metrics.ProcessUptime),
+		resourceAttributeIncludeFilter:   make(map[string]filter.Filter),
+		resourceAttributeExcludeFilter:   make(map[string]filter.Filter),
 	}
+	if mbc.ResourceAttributes.ProcessCgroup.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.cgroup"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessCgroup.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessCgroup.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.cgroup"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessCgroup.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.ProcessCommand.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.command"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessCommand.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessCommand.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.command"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessCommand.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.ProcessCommandLine.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.command_line"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessCommandLine.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessCommandLine.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.command_line"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessCommandLine.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.ProcessExecutableName.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.executable.name"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessExecutableName.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessExecutableName.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.executable.name"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessExecutableName.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.ProcessExecutablePath.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.executable.path"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessExecutablePath.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessExecutablePath.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.executable.path"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessExecutablePath.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.ProcessOwner.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.owner"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessOwner.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessOwner.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.owner"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessOwner.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.ProcessParentPid.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.parent_pid"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessParentPid.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessParentPid.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.parent_pid"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessParentPid.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.ProcessPid.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["process.pid"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessPid.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.ProcessPid.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["process.pid"] = filter.CreateFilter(mbc.ResourceAttributes.ProcessPid.MetricsExclude)
+	}
+
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 	return mb
+}
+
+// NewResourceBuilder returns a new resource builder that should be used to build a resource associated with for the emitted metrics.
+func (mb *MetricsBuilder) NewResourceBuilder() *ResourceBuilder {
+	return NewResourceBuilder(mb.config.ResourceAttributes)
 }
 
 // updateCapacity updates max length of metrics and resource attributes that will be used for the slice capacity.
@@ -521,81 +972,45 @@ func (mb *MetricsBuilder) updateCapacity(rm pmetric.ResourceMetrics) {
 	if mb.metricsCapacity < rm.ScopeMetrics().At(0).Metrics().Len() {
 		mb.metricsCapacity = rm.ScopeMetrics().At(0).Metrics().Len()
 	}
-	if mb.resourceCapacity < rm.Resource().Attributes().Len() {
-		mb.resourceCapacity = rm.Resource().Attributes().Len()
-	}
 }
 
 // ResourceMetricsOption applies changes to provided resource metrics.
-type ResourceMetricsOption func(pmetric.ResourceMetrics)
-
-// WithProcessCommand sets provided value as "process.command" attribute for current resource.
-func WithProcessCommand(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("process.command", val)
-	}
+type ResourceMetricsOption interface {
+	apply(pmetric.ResourceMetrics)
 }
 
-// WithProcessCommandLine sets provided value as "process.command_line" attribute for current resource.
-func WithProcessCommandLine(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("process.command_line", val)
-	}
+type resourceMetricsOptionFunc func(pmetric.ResourceMetrics)
+
+func (rmof resourceMetricsOptionFunc) apply(rm pmetric.ResourceMetrics) {
+	rmof(rm)
 }
 
-// WithProcessExecutableName sets provided value as "process.executable.name" attribute for current resource.
-func WithProcessExecutableName(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("process.executable.name", val)
-	}
-}
-
-// WithProcessExecutablePath sets provided value as "process.executable.path" attribute for current resource.
-func WithProcessExecutablePath(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("process.executable.path", val)
-	}
-}
-
-// WithProcessOwner sets provided value as "process.owner" attribute for current resource.
-func WithProcessOwner(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("process.owner", val)
-	}
-}
-
-// WithProcessParentPid sets provided value as "process.parent_pid" attribute for current resource.
-func WithProcessParentPid(val int64) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertInt("process.parent_pid", val)
-	}
-}
-
-// WithProcessPid sets provided value as "process.pid" attribute for current resource.
-func WithProcessPid(val int64) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertInt("process.pid", val)
-	}
+// WithResource sets the provided resource on the emitted ResourceMetrics.
+// It's recommended to use ResourceBuilder to create the resource.
+func WithResource(res pcommon.Resource) ResourceMetricsOption {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
+		res.CopyTo(rm.Resource())
+	})
 }
 
 // WithStartTimeOverride overrides start time for all the resource metrics data points.
 // This option should be only used if different start time has to be set on metrics coming from different resources.
 func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
 		var dps pmetric.NumberDataPointSlice
 		metrics := rm.ScopeMetrics().At(0).Metrics()
 		for i := 0; i < metrics.Len(); i++ {
-			switch metrics.At(i).DataType() {
-			case pmetric.MetricDataTypeGauge:
+			switch metrics.At(i).Type() {
+			case pmetric.MetricTypeGauge:
 				dps = metrics.At(i).Gauge().DataPoints()
-			case pmetric.MetricDataTypeSum:
+			case pmetric.MetricTypeSum:
 				dps = metrics.At(i).Sum().DataPoints()
 			}
 			for j := 0; j < dps.Len(); j++ {
 				dps.At(j).SetStartTimestamp(start)
 			}
 		}
-	}
+	})
 }
 
 // EmitForResource saves all the generated metrics under a new resource and updates the internal state to be ready for
@@ -603,24 +1018,42 @@ func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
 // needs to emit metrics from several resources. Otherwise calling this function is not required,
 // just `Emit` function can be called instead.
 // Resource attributes should be provided as ResourceMetricsOption arguments.
-func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
+func (mb *MetricsBuilder) EmitForResource(options ...ResourceMetricsOption) {
 	rm := pmetric.NewResourceMetrics()
 	rm.SetSchemaUrl(conventions.SchemaURL)
-	rm.Resource().Attributes().EnsureCapacity(mb.resourceCapacity)
 	ils := rm.ScopeMetrics().AppendEmpty()
-	ils.Scope().SetName("otelcol/hostmetricsreceiver/process")
+	ils.Scope().SetName(ScopeName)
 	ils.Scope().SetVersion(mb.buildInfo.Version)
 	ils.Metrics().EnsureCapacity(mb.metricsCapacity)
+	mb.metricProcessContextSwitches.emit(ils.Metrics())
 	mb.metricProcessCPUTime.emit(ils.Metrics())
+	mb.metricProcessCPUUtilization.emit(ils.Metrics())
 	mb.metricProcessDiskIo.emit(ils.Metrics())
-	mb.metricProcessDiskIoRead.emit(ils.Metrics())
-	mb.metricProcessDiskIoWrite.emit(ils.Metrics())
-	mb.metricProcessMemoryPhysicalUsage.emit(ils.Metrics())
-	mb.metricProcessMemoryVirtualUsage.emit(ils.Metrics())
+	mb.metricProcessDiskOperations.emit(ils.Metrics())
+	mb.metricProcessHandles.emit(ils.Metrics())
+	mb.metricProcessMemoryUsage.emit(ils.Metrics())
+	mb.metricProcessMemoryUtilization.emit(ils.Metrics())
+	mb.metricProcessMemoryVirtual.emit(ils.Metrics())
+	mb.metricProcessOpenFileDescriptors.emit(ils.Metrics())
+	mb.metricProcessPagingFaults.emit(ils.Metrics())
+	mb.metricProcessSignalsPending.emit(ils.Metrics())
 	mb.metricProcessThreads.emit(ils.Metrics())
-	for _, op := range rmo {
-		op(rm)
+	mb.metricProcessUptime.emit(ils.Metrics())
+
+	for _, op := range options {
+		op.apply(rm)
 	}
+	for attr, filter := range mb.resourceAttributeIncludeFilter {
+		if val, ok := rm.Resource().Attributes().Get(attr); ok && !filter.Matches(val.AsString()) {
+			return
+		}
+	}
+	for attr, filter := range mb.resourceAttributeExcludeFilter {
+		if val, ok := rm.Resource().Attributes().Get(attr); ok && filter.Matches(val.AsString()) {
+			return
+		}
+	}
+
 	if ils.Metrics().Len() > 0 {
 		mb.updateCapacity(rm)
 		rm.MoveTo(mb.metricsBuffer.ResourceMetrics().AppendEmpty())
@@ -629,12 +1062,17 @@ func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
 
 // Emit returns all the metrics accumulated by the metrics builder and updates the internal state to be ready for
 // recording another set of metrics. This function will be responsible for applying all the transformations required to
-// produce metric representation defined in metadata and user settings, e.g. delta or cumulative.
-func (mb *MetricsBuilder) Emit(rmo ...ResourceMetricsOption) pmetric.Metrics {
-	mb.EmitForResource(rmo...)
-	metrics := pmetric.NewMetrics()
-	mb.metricsBuffer.MoveTo(metrics)
+// produce metric representation defined in metadata and user config, e.g. delta or cumulative.
+func (mb *MetricsBuilder) Emit(options ...ResourceMetricsOption) pmetric.Metrics {
+	mb.EmitForResource(options...)
+	metrics := mb.metricsBuffer
+	mb.metricsBuffer = pmetric.NewMetrics()
 	return metrics
+}
+
+// RecordProcessContextSwitchesDataPoint adds a data point to process.context_switches metric.
+func (mb *MetricsBuilder) RecordProcessContextSwitchesDataPoint(ts pcommon.Timestamp, val int64, contextSwitchTypeAttributeValue AttributeContextSwitchType) {
+	mb.metricProcessContextSwitches.recordDataPoint(mb.startTime, ts, val, contextSwitchTypeAttributeValue.String())
 }
 
 // RecordProcessCPUTimeDataPoint adds a data point to process.cpu.time metric.
@@ -642,29 +1080,54 @@ func (mb *MetricsBuilder) RecordProcessCPUTimeDataPoint(ts pcommon.Timestamp, va
 	mb.metricProcessCPUTime.recordDataPoint(mb.startTime, ts, val, stateAttributeValue.String())
 }
 
+// RecordProcessCPUUtilizationDataPoint adds a data point to process.cpu.utilization metric.
+func (mb *MetricsBuilder) RecordProcessCPUUtilizationDataPoint(ts pcommon.Timestamp, val float64, stateAttributeValue AttributeState) {
+	mb.metricProcessCPUUtilization.recordDataPoint(mb.startTime, ts, val, stateAttributeValue.String())
+}
+
 // RecordProcessDiskIoDataPoint adds a data point to process.disk.io metric.
 func (mb *MetricsBuilder) RecordProcessDiskIoDataPoint(ts pcommon.Timestamp, val int64, directionAttributeValue AttributeDirection) {
 	mb.metricProcessDiskIo.recordDataPoint(mb.startTime, ts, val, directionAttributeValue.String())
 }
 
-// RecordProcessDiskIoReadDataPoint adds a data point to process.disk.io.read metric.
-func (mb *MetricsBuilder) RecordProcessDiskIoReadDataPoint(ts pcommon.Timestamp, val int64) {
-	mb.metricProcessDiskIoRead.recordDataPoint(mb.startTime, ts, val)
+// RecordProcessDiskOperationsDataPoint adds a data point to process.disk.operations metric.
+func (mb *MetricsBuilder) RecordProcessDiskOperationsDataPoint(ts pcommon.Timestamp, val int64, directionAttributeValue AttributeDirection) {
+	mb.metricProcessDiskOperations.recordDataPoint(mb.startTime, ts, val, directionAttributeValue.String())
 }
 
-// RecordProcessDiskIoWriteDataPoint adds a data point to process.disk.io.write metric.
-func (mb *MetricsBuilder) RecordProcessDiskIoWriteDataPoint(ts pcommon.Timestamp, val int64) {
-	mb.metricProcessDiskIoWrite.recordDataPoint(mb.startTime, ts, val)
+// RecordProcessHandlesDataPoint adds a data point to process.handles metric.
+func (mb *MetricsBuilder) RecordProcessHandlesDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricProcessHandles.recordDataPoint(mb.startTime, ts, val)
 }
 
-// RecordProcessMemoryPhysicalUsageDataPoint adds a data point to process.memory.physical_usage metric.
-func (mb *MetricsBuilder) RecordProcessMemoryPhysicalUsageDataPoint(ts pcommon.Timestamp, val int64) {
-	mb.metricProcessMemoryPhysicalUsage.recordDataPoint(mb.startTime, ts, val)
+// RecordProcessMemoryUsageDataPoint adds a data point to process.memory.usage metric.
+func (mb *MetricsBuilder) RecordProcessMemoryUsageDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricProcessMemoryUsage.recordDataPoint(mb.startTime, ts, val)
 }
 
-// RecordProcessMemoryVirtualUsageDataPoint adds a data point to process.memory.virtual_usage metric.
-func (mb *MetricsBuilder) RecordProcessMemoryVirtualUsageDataPoint(ts pcommon.Timestamp, val int64) {
-	mb.metricProcessMemoryVirtualUsage.recordDataPoint(mb.startTime, ts, val)
+// RecordProcessMemoryUtilizationDataPoint adds a data point to process.memory.utilization metric.
+func (mb *MetricsBuilder) RecordProcessMemoryUtilizationDataPoint(ts pcommon.Timestamp, val float64) {
+	mb.metricProcessMemoryUtilization.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordProcessMemoryVirtualDataPoint adds a data point to process.memory.virtual metric.
+func (mb *MetricsBuilder) RecordProcessMemoryVirtualDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricProcessMemoryVirtual.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordProcessOpenFileDescriptorsDataPoint adds a data point to process.open_file_descriptors metric.
+func (mb *MetricsBuilder) RecordProcessOpenFileDescriptorsDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricProcessOpenFileDescriptors.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordProcessPagingFaultsDataPoint adds a data point to process.paging.faults metric.
+func (mb *MetricsBuilder) RecordProcessPagingFaultsDataPoint(ts pcommon.Timestamp, val int64, pagingFaultTypeAttributeValue AttributePagingFaultType) {
+	mb.metricProcessPagingFaults.recordDataPoint(mb.startTime, ts, val, pagingFaultTypeAttributeValue.String())
+}
+
+// RecordProcessSignalsPendingDataPoint adds a data point to process.signals_pending metric.
+func (mb *MetricsBuilder) RecordProcessSignalsPendingDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricProcessSignalsPending.recordDataPoint(mb.startTime, ts, val)
 }
 
 // RecordProcessThreadsDataPoint adds a data point to process.threads metric.
@@ -672,11 +1135,16 @@ func (mb *MetricsBuilder) RecordProcessThreadsDataPoint(ts pcommon.Timestamp, va
 	mb.metricProcessThreads.recordDataPoint(mb.startTime, ts, val)
 }
 
+// RecordProcessUptimeDataPoint adds a data point to process.uptime metric.
+func (mb *MetricsBuilder) RecordProcessUptimeDataPoint(ts pcommon.Timestamp, val float64) {
+	mb.metricProcessUptime.recordDataPoint(mb.startTime, ts, val)
+}
+
 // Reset resets metrics builder to its initial state. It should be used when external metrics source is restarted,
 // and metrics builder should update its startTime and reset it's internal state accordingly.
-func (mb *MetricsBuilder) Reset(options ...metricBuilderOption) {
+func (mb *MetricsBuilder) Reset(options ...MetricBuilderOption) {
 	mb.startTime = pcommon.NewTimestampFromTime(time.Now())
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 }

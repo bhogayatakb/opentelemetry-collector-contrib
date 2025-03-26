@@ -131,6 +131,8 @@ used_cpu_sys:185.649184
 used_cpu_user:46.396430
 used_cpu_sys_children:0.002354
 used_cpu_user_children:0.001619
+used_cpu_sys_main_thread:180.0
+used_cpu_user_main_thread:42.39
 
 # Cluster
 cluster_enabled:0
@@ -138,6 +140,7 @@ cluster_enabled:0
 # Keyspace
 db0:keys=1,expires=2,avg_ttl=3
 db1:keys=4,expires=5,avg_ttl=6
+db3:keys=5,expires=10,avg_ttl=85
 
 # Commandstats
 cmdstat_ssubscribe:calls=0,usec=0,usec_per_call=0.00,rejected_calls=3,failed_calls=0

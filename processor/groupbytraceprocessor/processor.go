@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package groupbytraceprocessor // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/groupbytraceprocessor"
 
@@ -19,15 +8,16 @@ import (
 	"fmt"
 	"time"
 
-	"go.opencensus.io/stats"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/processor"
 	"go.uber.org/multierr"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/batchpersignal"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/groupbytraceprocessor/internal/metadata"
 )
 
 // groupByTraceProcessor is a processor that keeps traces in memory for a given duration, with the expectation
@@ -43,10 +33,10 @@ import (
 // Each worker in the eventMachine also uses a ring buffer to hold the in-flight trace IDs, so that we don't hold more than the given maximum number
 // of traces in memory/storage. Items that are evicted from the buffer are discarded without warning.
 type groupByTraceProcessor struct {
-	nextConsumer consumer.Traces
-	config       Config
-	logger       *zap.Logger
-
+	nextConsumer     consumer.Traces
+	config           Config
+	logger           *zap.Logger
+	telemetryBuilder *metadata.TelemetryBuilder
 	// the event machine handling all operations for this processor
 	eventMachine *eventMachine
 
@@ -54,21 +44,26 @@ type groupByTraceProcessor struct {
 	st storage
 }
 
-var _ component.TracesProcessor = (*groupByTraceProcessor)(nil)
+var _ processor.Traces = (*groupByTraceProcessor)(nil)
 
 const bufferSize = 10_000
 
 // newGroupByTraceProcessor returns a new processor.
-func newGroupByTraceProcessor(logger *zap.Logger, st storage, nextConsumer consumer.Traces, config Config) *groupByTraceProcessor {
+func newGroupByTraceProcessor(set processor.Settings, nextConsumer consumer.Traces, config Config) *groupByTraceProcessor {
+	telemetryBuilder, err := metadata.NewTelemetryBuilder(set.TelemetrySettings)
+	if err != nil {
+		return nil
+	}
+
 	// the event machine will buffer up to N concurrent events before blocking
-	eventMachine := newEventMachine(logger, 10000, config.NumWorkers, config.NumTraces)
+	eventMachine := newEventMachine(set.Logger, 10000, config.NumWorkers, config.NumTraces, telemetryBuilder)
 
 	sp := &groupByTraceProcessor{
-		logger:       logger,
-		nextConsumer: nextConsumer,
-		config:       config,
-		eventMachine: eventMachine,
-		st:           st,
+		logger:           set.Logger,
+		nextConsumer:     nextConsumer,
+		config:           config,
+		telemetryBuilder: telemetryBuilder,
+		eventMachine:     eventMachine,
 	}
 
 	// register the callbacks
@@ -95,10 +90,9 @@ func (sp *groupByTraceProcessor) Capabilities() consumer.Capabilities {
 // Start is invoked during service startup.
 func (sp *groupByTraceProcessor) Start(context.Context, component.Host) error {
 	// start these metrics, as it might take a while for them to receive their first event
-	stats.Record(context.Background(), mTracesEvicted.M(0))
-	stats.Record(context.Background(), mIncompleteReleases.M(0))
-	stats.Record(context.Background(), mNumTracesConf.M(int64(sp.config.NumTraces)))
-
+	sp.telemetryBuilder.ProcessorGroupbytraceTracesEvicted.Add(context.Background(), 0)
+	sp.telemetryBuilder.ProcessorGroupbytraceIncompleteReleases.Add(context.Background(), 0)
+	sp.telemetryBuilder.ProcessorGroupbytraceConfNumTraces.Record(context.Background(), (int64(sp.config.NumTraces)))
 	sp.eventMachine.startInBackground()
 	return sp.st.start()
 }
@@ -134,11 +128,10 @@ func (sp *groupByTraceProcessor) onTraceReceived(trace tracesWithID, worker *eve
 			typ:     traceRemoved,
 			payload: evicted,
 		})
-
-		stats.Record(context.Background(), mTracesEvicted.M(1))
+		sp.telemetryBuilder.ProcessorGroupbytraceTracesEvicted.Add(context.Background(), 1)
 
 		sp.logger.Info("trace evicted: in order to avoid this in the future, adjust the wait duration and/or number of traces to keep in memory",
-			zap.String("traceID", evicted.HexString()))
+			zap.Stringer("traceID", evicted))
 	}
 
 	// we have the traceID in the memory, place the spans in the storage too
@@ -159,16 +152,13 @@ func (sp *groupByTraceProcessor) onTraceReceived(trace tracesWithID, worker *eve
 }
 
 func (sp *groupByTraceProcessor) onTraceExpired(traceID pcommon.TraceID, worker *eventMachineWorker) error {
-	sp.logger.Debug("processing expired", zap.String("traceID",
-		traceID.HexString()))
+	sp.logger.Debug("processing expired", zap.Stringer("traceID", traceID))
 
 	if !worker.buffer.contains(traceID) {
 		// we likely received multiple batches with spans for the same trace
 		// and released this trace already
-		sp.logger.Debug("skipping the processing of expired trace",
-			zap.String("traceID", traceID.HexString()))
-
-		stats.Record(context.Background(), mIncompleteReleases.M(1))
+		sp.logger.Debug("skipping the processing of expired trace", zap.Stringer("traceID", traceID))
+		sp.telemetryBuilder.ProcessorGroupbytraceIncompleteReleases.Add(context.Background(), 1)
 		return nil
 	}
 
@@ -176,8 +166,7 @@ func (sp *groupByTraceProcessor) onTraceExpired(traceID pcommon.TraceID, worker 
 	worker.buffer.delete(traceID)
 
 	// this might block, but we don't need to wait
-	sp.logger.Debug("marking the trace as released",
-		zap.String("traceID", traceID.HexString()))
+	sp.logger.Debug("marking the trace as released", zap.Stringer("traceID", traceID))
 	go func() {
 		_ = sp.markAsReleased(traceID, worker.fire)
 	}()
@@ -197,7 +186,7 @@ func (sp *groupByTraceProcessor) markAsReleased(traceID pcommon.TraceID, fire fu
 	}
 
 	// signal that the trace is ready to be released
-	sp.logger.Debug("trace marked as released", zap.String("traceID", traceID.HexString()))
+	sp.logger.Debug("trace marked as released", zap.Stringer("traceID", traceID))
 
 	// atomically fire the two events, so that a concurrent shutdown won't leave
 	// an orphaned trace in the storage
@@ -217,10 +206,9 @@ func (sp *groupByTraceProcessor) onTraceReleased(rss []ptrace.ResourceSpans) err
 		trs := trace.ResourceSpans().AppendEmpty()
 		rs.CopyTo(trs)
 	}
-	stats.Record(context.Background(),
-		mReleasedSpans.M(int64(trace.SpanCount())),
-		mReleasedTraces.M(1),
-	)
+
+	sp.telemetryBuilder.ProcessorGroupbytraceSpansReleased.Add(context.Background(), int64(trace.SpanCount()))
+	sp.telemetryBuilder.ProcessorGroupbytraceTracesReleased.Add(context.Background(), 1)
 
 	// Do async consuming not to block event worker
 	go func() {
@@ -234,17 +222,17 @@ func (sp *groupByTraceProcessor) onTraceReleased(rss []ptrace.ResourceSpans) err
 func (sp *groupByTraceProcessor) onTraceRemoved(traceID pcommon.TraceID) error {
 	trace, err := sp.st.delete(traceID)
 	if err != nil {
-		return fmt.Errorf("couldn't delete trace %q from the storage: %w", traceID.HexString(), err)
+		return fmt.Errorf("couldn't delete trace %q from the storage: %w", traceID, err)
 	}
 
 	if trace == nil {
-		return fmt.Errorf("trace %q not found at the storage", traceID.HexString())
+		return fmt.Errorf("trace %q not found at the storage", traceID)
 	}
 
 	return nil
 }
 
 func (sp *groupByTraceProcessor) addSpans(traceID pcommon.TraceID, trace ptrace.Traces) error {
-	sp.logger.Debug("creating trace at the storage", zap.String("traceID", traceID.HexString()))
+	sp.logger.Debug("creating trace at the storage", zap.Stringer("traceID", traceID))
 	return sp.st.createOrAppend(traceID, trace)
 }

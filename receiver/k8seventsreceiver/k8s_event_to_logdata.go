@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package k8seventsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/k8seventsreceiver"
 
@@ -19,7 +8,7 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
-	semconv "go.opentelemetry.io/collector/semconv/v1.6.1"
+	semconv "go.opentelemetry.io/collector/semconv/v1.27.0"
 	"go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -49,21 +38,21 @@ func k8sEventToLogData(logger *zap.Logger, ev *corev1.Event) plog.Logs {
 	resourceAttrs := rl.Resource().Attributes()
 	resourceAttrs.EnsureCapacity(totalResourceAttributes)
 
-	resourceAttrs.UpsertString(semconv.AttributeK8SNodeName, ev.Source.Host)
+	resourceAttrs.PutStr(semconv.AttributeK8SNodeName, ev.Source.Host)
 
 	// Attributes related to the object causing the event.
-	resourceAttrs.UpsertString("k8s.object.kind", ev.InvolvedObject.Kind)
-	resourceAttrs.UpsertString("k8s.object.name", ev.InvolvedObject.Name)
-	resourceAttrs.UpsertString("k8s.object.uid", string(ev.InvolvedObject.UID))
-	resourceAttrs.UpsertString("k8s.object.fieldpath", ev.InvolvedObject.FieldPath)
-	resourceAttrs.UpsertString("k8s.object.api_version", ev.InvolvedObject.APIVersion)
-	resourceAttrs.UpsertString("k8s.object.resource_version", ev.InvolvedObject.ResourceVersion)
+	resourceAttrs.PutStr("k8s.object.kind", ev.InvolvedObject.Kind)
+	resourceAttrs.PutStr("k8s.object.name", ev.InvolvedObject.Name)
+	resourceAttrs.PutStr("k8s.object.uid", string(ev.InvolvedObject.UID))
+	resourceAttrs.PutStr("k8s.object.fieldpath", ev.InvolvedObject.FieldPath)
+	resourceAttrs.PutStr("k8s.object.api_version", ev.InvolvedObject.APIVersion)
+	resourceAttrs.PutStr("k8s.object.resource_version", ev.InvolvedObject.ResourceVersion)
 
 	lr.SetTimestamp(pcommon.NewTimestampFromTime(getEventTimestamp(ev)))
 
 	// The Message field contains description about the event,
 	// which is best suited for the "Body" of the LogRecordSlice.
-	lr.Body().SetStringVal(ev.Message)
+	lr.Body().SetStr(ev.Message)
 
 	// Set the "SeverityNumber" and "SeverityText" if a known type of
 	// severity is found.
@@ -77,17 +66,17 @@ func k8sEventToLogData(logger *zap.Logger, ev *corev1.Event) plog.Logs {
 	attrs := lr.Attributes()
 	attrs.EnsureCapacity(totalLogAttributes)
 
-	attrs.UpsertString("k8s.event.reason", ev.Reason)
-	attrs.UpsertString("k8s.event.action", ev.Action)
-	attrs.UpsertString("k8s.event.start_time", ev.ObjectMeta.CreationTimestamp.String())
-	attrs.UpsertString("k8s.event.name", ev.ObjectMeta.Name)
-	attrs.UpsertString("k8s.event.uid", string(ev.ObjectMeta.UID))
-	attrs.UpsertString(semconv.AttributeK8SNamespaceName, ev.InvolvedObject.Namespace)
+	attrs.PutStr("k8s.event.reason", ev.Reason)
+	attrs.PutStr("k8s.event.action", ev.Action)
+	attrs.PutStr("k8s.event.start_time", ev.ObjectMeta.CreationTimestamp.String())
+	attrs.PutStr("k8s.event.name", ev.ObjectMeta.Name)
+	attrs.PutStr("k8s.event.uid", string(ev.ObjectMeta.UID))
+	attrs.PutStr(semconv.AttributeK8SNamespaceName, ev.InvolvedObject.Namespace)
 
 	// "Count" field of k8s event will be '0' in case it is
 	// not present in the collected event from k8s.
 	if ev.Count != 0 {
-		attrs.UpsertInt("k8s.event.count", int64(ev.Count))
+		attrs.PutInt("k8s.event.count", int64(ev.Count))
 	}
 
 	return ld

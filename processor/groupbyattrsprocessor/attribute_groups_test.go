@@ -1,22 +1,11 @@
-// Copyright 2020 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package groupbyattrsprocessor
 
 import (
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -28,12 +17,12 @@ import (
 
 func simpleResource() pcommon.Resource {
 	rs := pcommon.NewResource()
-	rs.Attributes().UpsertString("somekey1", "some-string-value")
-	rs.Attributes().UpsertInt("somekey2", 123)
+	rs.Attributes().PutStr("somekey1", "some-string-value")
+	rs.Attributes().PutInt("somekey2", 123)
 	for i := 0; i < 10; i++ {
 		k := fmt.Sprint("random-", i)
-		v := fmt.Sprint("value-", rand.Intn(100))
-		rs.Attributes().UpsertString(k, v)
+		v := fmt.Sprint("value-", rand.IntN(100))
+		rs.Attributes().PutStr(k, v)
 	}
 	return rs
 }
@@ -42,8 +31,8 @@ func randomAttributeMap() pcommon.Map {
 	attrs := pcommon.NewMap()
 	for i := 0; i < 10; i++ {
 		k := fmt.Sprint("key-", i)
-		v := fmt.Sprint("value-", rand.Intn(500000))
-		attrs.UpsertString(k, v)
+		v := fmt.Sprint("value-", rand.IntN(500000))
+		attrs.PutStr(k, v)
 	}
 	return attrs
 }
@@ -57,10 +46,9 @@ func randomGroups(count int) []pcommon.Map {
 }
 
 var (
-	count    = 1000
-	groups   = randomGroups(count)
-	res      = simpleResource()
-	lagAttrs = newLogsGroupedByAttrs()
+	count  = 1000
+	groups = randomGroups(count)
+	res    = simpleResource()
 )
 
 func TestResourceAttributeScenarios(t *testing.T) {
@@ -74,11 +62,11 @@ func TestResourceAttributeScenarios(t *testing.T) {
 			name:         "When the same key is present at Resource and Record level, the latter value should be used",
 			baseResource: simpleResource(),
 			fillRecordAttributesFun: func(attributeMap pcommon.Map) {
-				attributeMap.UpsertString("somekey1", "replaced-value")
+				attributeMap.PutStr("somekey1", "replaced-value")
 			},
 			fillExpectedResourceFun: func(baseResource pcommon.Resource, expectedResource pcommon.Resource) {
 				baseResource.CopyTo(expectedResource)
-				expectedResource.Attributes().UpsertString("somekey1", "replaced-value")
+				expectedResource.Attributes().PutStr("somekey1", "replaced-value")
 			},
 		},
 		{
@@ -91,10 +79,10 @@ func TestResourceAttributeScenarios(t *testing.T) {
 			name:         "Empty Resource",
 			baseResource: pcommon.NewResource(),
 			fillRecordAttributesFun: func(attributeMap pcommon.Map) {
-				attributeMap.UpsertString("somekey1", "some-value")
+				attributeMap.PutStr("somekey1", "some-value")
 			},
 			fillExpectedResourceFun: func(_ pcommon.Resource, expectedResource pcommon.Resource) {
-				expectedResource.Attributes().UpsertString("somekey1", "some-value")
+				expectedResource.Attributes().PutStr("somekey1", "some-value")
 			},
 		},
 		{
@@ -107,6 +95,7 @@ func TestResourceAttributeScenarios(t *testing.T) {
 		},
 	}
 
+	lg := newLogsGroup()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			recordAttributeMap := pcommon.NewMap()
@@ -119,8 +108,8 @@ func TestResourceAttributeScenarios(t *testing.T) {
 				tt.fillExpectedResourceFun(tt.baseResource, expectedResource)
 			}
 
-			rl := lagAttrs.findResourceOrElseCreate(tt.baseResource, recordAttributeMap)
-			assert.EqualValues(t, expectedResource.Attributes(), rl.Resource().Attributes())
+			rl := lg.findOrCreateResourceLogs(tt.baseResource, recordAttributeMap)
+			assert.Equal(t, expectedResource.Attributes().AsRaw(), rl.Resource().Attributes().AsRaw())
 		})
 	}
 }
@@ -158,5 +147,9 @@ func TestInstrumentationLibraryMatching(t *testing.T) {
 }
 
 func BenchmarkAttrGrouping(b *testing.B) {
-	lagAttrs.findResourceOrElseCreate(res, groups[rand.Intn(count)])
+	lg := newLogsGroup()
+	b.ReportAllocs()
+	for n := 0; n < b.N; n++ {
+		lg.findOrCreateResourceLogs(res, groups[rand.IntN(count)])
+	}
 }

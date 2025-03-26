@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package riakreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/riakreceiver"
 
@@ -27,16 +16,28 @@ import (
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configtls"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/receiver/receivertest"
 	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/riakreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/riakreceiver/internal/mocks"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/riakreceiver/internal/model"
 )
 
 func TestScraperStart(t *testing.T) {
+	clientConfigNonexistentCA := confighttp.NewDefaultClientConfig()
+	clientConfigNonexistentCA.Endpoint = defaultEndpoint
+	clientConfigNonexistentCA.TLSSetting = configtls.ClientConfig{
+		Config: configtls.Config{
+			CAFile: "/non/existent",
+		},
+	}
+
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = defaultEndpoint
+
 	testcases := []struct {
 		desc        string
 		scraper     *riakScraper
@@ -46,14 +47,7 @@ func TestScraperStart(t *testing.T) {
 			desc: "Bad Config",
 			scraper: &riakScraper{
 				cfg: &Config{
-					HTTPClientSettings: confighttp.HTTPClientSettings{
-						Endpoint: defaultEndpoint,
-						TLSSetting: configtls.TLSClientSetting{
-							TLSSetting: configtls.TLSSetting{
-								CAFile: "/non/existent",
-							},
-						},
-					},
+					ClientConfig: clientConfigNonexistentCA,
 				},
 				settings: componenttest.NewNopTelemetrySettings(),
 			},
@@ -64,10 +58,7 @@ func TestScraperStart(t *testing.T) {
 			desc: "Valid Config",
 			scraper: &riakScraper{
 				cfg: &Config{
-					HTTPClientSettings: confighttp.HTTPClientSettings{
-						TLSSetting: configtls.TLSClientSetting{},
-						Endpoint:   defaultEndpoint,
-					},
+					ClientConfig: clientConfig,
 				},
 				settings: componenttest.NewNopTelemetrySettings(),
 			},
@@ -87,7 +78,7 @@ func TestScraperStart(t *testing.T) {
 	}
 }
 
-func TestScaperScrape(t *testing.T) {
+func TestScraperScrape(t *testing.T) {
 	testCases := []struct {
 		desc              string
 		setupMockClient   func(t *testing.T) client
@@ -97,10 +88,10 @@ func TestScaperScrape(t *testing.T) {
 	}{
 		{
 			desc: "Nil client",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				return nil
 			},
-			expectedMetricGen: func(t *testing.T) pmetric.Metrics {
+			expectedMetricGen: func(*testing.T) pmetric.Metrics {
 				return pmetric.NewMetrics()
 			},
 			setupCfg: func() *Config {
@@ -110,12 +101,12 @@ func TestScaperScrape(t *testing.T) {
 		},
 		{
 			desc: "API Call Failure",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				mockClient := mocks.MockClient{}
 				mockClient.On("GetStats", mock.Anything).Return(nil, errors.New("some api error"))
 				return &mockClient
 			},
-			expectedMetricGen: func(t *testing.T) pmetric.Metrics {
+			expectedMetricGen: func(*testing.T) pmetric.Metrics {
 				return pmetric.NewMetrics()
 			},
 			setupCfg: func() *Config {
@@ -137,30 +128,30 @@ func TestScaperScrape(t *testing.T) {
 				return &mockClient
 			},
 			expectedMetricGen: func(t *testing.T) pmetric.Metrics {
-				goldenPath := filepath.Join("testdata", "scraper", "expected_disabled.json")
+				goldenPath := filepath.Join("testdata", "scraper", "expected_disabled.yaml")
 				expectedMetrics, err := golden.ReadMetrics(goldenPath)
 				require.NoError(t, err)
 				return expectedMetrics
 			},
 			setupCfg: func() *Config {
 				cfg := createDefaultConfig().(*Config)
-				cfg.Metrics = metadata.MetricsSettings{
-					RiakMemoryLimit: metadata.MetricSettings{
+				cfg.MetricsBuilderConfig.Metrics = metadata.MetricsConfig{
+					RiakMemoryLimit: metadata.MetricConfig{
 						Enabled: false,
 					},
-					RiakNodeOperationCount: metadata.MetricSettings{
+					RiakNodeOperationCount: metadata.MetricConfig{
 						Enabled: false,
 					},
-					RiakNodeOperationTimeMean: metadata.MetricSettings{
+					RiakNodeOperationTimeMean: metadata.MetricConfig{
 						Enabled: true,
 					},
-					RiakNodeReadRepairCount: metadata.MetricSettings{
+					RiakNodeReadRepairCount: metadata.MetricConfig{
 						Enabled: true,
 					},
-					RiakVnodeIndexOperationCount: metadata.MetricSettings{
+					RiakVnodeIndexOperationCount: metadata.MetricConfig{
 						Enabled: true,
 					},
-					RiakVnodeOperationCount: metadata.MetricSettings{
+					RiakVnodeOperationCount: metadata.MetricConfig{
 						Enabled: true,
 					},
 				}
@@ -182,7 +173,7 @@ func TestScaperScrape(t *testing.T) {
 				return &mockClient
 			},
 			expectedMetricGen: func(t *testing.T) pmetric.Metrics {
-				goldenPath := filepath.Join("testdata", "scraper", "expected.json")
+				goldenPath := filepath.Join("testdata", "scraper", "expected.yaml")
 				expectedMetrics, err := golden.ReadMetrics(goldenPath)
 				require.NoError(t, err)
 				return expectedMetrics
@@ -196,7 +187,7 @@ func TestScaperScrape(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			scraper := newScraper(zap.NewNop(), tc.setupCfg(), componenttest.NewNopReceiverCreateSettings())
+			scraper := newScraper(zap.NewNop(), tc.setupCfg(), receivertest.NewNopSettings(metadata.Type))
 			scraper.client = tc.setupMockClient(t)
 			actualMetrics, err := scraper.scrape(context.Background())
 			if tc.expectedErr == nil {
@@ -207,7 +198,11 @@ func TestScaperScrape(t *testing.T) {
 
 			expectedMetrics := tc.expectedMetricGen(t)
 
-			err = scrapertest.CompareMetrics(expectedMetrics, actualMetrics)
+			err = pmetrictest.CompareMetrics(expectedMetrics, actualMetrics, pmetrictest.IgnoreStartTimestamp(),
+				pmetrictest.IgnoreTimestamp(),
+				pmetrictest.IgnoreResourceMetricsOrder(),
+				pmetrictest.IgnoreMetricDataPointsOrder(),
+			)
 			require.NoError(t, err)
 		})
 	}

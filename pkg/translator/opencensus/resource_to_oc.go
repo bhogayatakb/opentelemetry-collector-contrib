@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package opencensus // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/opencensus"
 
@@ -87,7 +76,7 @@ func internalResourceToOC(resource pcommon.Resource) (*occommon.Node, *ocresourc
 	ocNode := &occommon.Node{}
 	ocResource := &ocresource.Resource{}
 	labels := make(map[string]string, attrs.Len())
-	attrs.Range(func(k string, v pcommon.Value) bool {
+	for k, v := range attrs.All() {
 		val := v.AsString()
 
 		switch k {
@@ -100,7 +89,7 @@ func internalResourceToOC(resource pcommon.Resource) (*occommon.Node, *ocresourc
 		case occonventions.AttributeProcessStartTime:
 			t, err := time.Parse(time.RFC3339Nano, val)
 			if err != nil {
-				return true
+				continue
 			}
 			ts := timestamppb.New(t)
 			getProcessIdentifier(ocNode).StartTimestamp = ts
@@ -123,8 +112,7 @@ func internalResourceToOC(resource pcommon.Resource) (*occommon.Node, *ocresourc
 			// Not a special attribute, put it into resource labels
 			labels[k] = val
 		}
-		return true
-	})
+	}
 	ocResource.Labels = labels
 
 	// If resource type is missing, try to infer it

@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package receivercreator
 
@@ -37,6 +26,25 @@ var podEndpoint = observer.Endpoint{
 	Details: &pod,
 }
 
+var service = observer.K8sService{
+	UID:       "uid-1",
+	Namespace: "default",
+	Name:      "service-1",
+	Labels: map[string]string{
+		"app":    "redis2",
+		"region": "west-1",
+	},
+	Annotations: map[string]string{
+		"scrape": "true",
+	},
+}
+
+var serviceEndpoint = observer.Endpoint{
+	ID:      "service-1",
+	Target:  "localhost",
+	Details: &service,
+}
+
 var portEndpoint = observer.Endpoint{
 	ID:     "port-1",
 	Target: "localhost:1234",
@@ -45,6 +53,45 @@ var portEndpoint = observer.Endpoint{
 		Pod:       pod,
 		Port:      1234,
 		Transport: observer.ProtocolTCP,
+	},
+}
+
+var config = `
+int_field: 20`
+
+var portEndpointWithHints = observer.Endpoint{
+	ID:     "namespace/pod-2-UID/redis(6379)",
+	Target: "1.2.3.4:6379",
+	Details: &observer.Port{
+		Name: "redis", Pod: observer.Pod{
+			Name:      "pod-2",
+			Namespace: "default",
+			UID:       "pod-2-UID",
+			Labels:    map[string]string{"env": "prod"},
+			Annotations: map[string]string{
+				otelMetricsHints + "/enabled": "true",
+				otelMetricsHints + "/scraper": "with_endpoint",
+				otelMetricsHints + "/config":  config,
+			},
+		},
+		Port: 6379,
+	},
+}
+
+var podContainerEndpointWithHints = observer.Endpoint{
+	ID:     "namespace/pod-2-UID/redis(6379)",
+	Target: "1.2.3.4:6379",
+	Details: &observer.PodContainer{
+		Image: "redis",
+		Name:  "redis", Pod: observer.Pod{
+			Name:      "pod-2",
+			Namespace: "default",
+			UID:       "pod-2-UID",
+			Labels:    map[string]string{"env": "prod"},
+			Annotations: map[string]string{
+				otelLogsHints + "/enabled": "true",
+			},
+		},
 	},
 }
 
@@ -95,8 +142,8 @@ var k8sNodeEndpoint = observer.Endpoint{
 		InternalIP:          "2.3.4.5",
 		KubeletEndpointPort: 10250,
 		Labels: map[string]string{
-			"beta.kubernetes.io/arch": "amd64",
-			"beta.kubernetes.io/os":   "linux",
+			"kubernetes.io/arch": "amd64",
+			"kubernetes.io/os":   "linux",
 		},
 		Name: "a.name",
 		UID:  "b344f2a7-1ec1-40f0-8557-8a9bfd8b6f99",

@@ -1,24 +1,11 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package metricsgenerationprocessor // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/metricsgenerationprocessor"
 
 import (
 	"fmt"
 	"sort"
-
-	"go.opentelemetry.io/collector/config"
 )
 
 const (
@@ -43,8 +30,6 @@ const (
 
 // Config defines the configuration for the processor.
 type Config struct {
-	config.ProcessorSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct
-
 	// Set of rules for generating new metrics
 	Rules []Rule `mapstructure:"rules"`
 }
@@ -76,7 +61,7 @@ type GenerationType string
 
 const (
 
-	// Generates a new metric applying an arithmatic operation with two operands
+	// Generates a new metric applying an arithmetic operation with two operands
 	calculate GenerationType = "calculate"
 
 	// Generates a new metric scaling the value of s given metric with a provided constant
@@ -175,6 +160,12 @@ func (config *Config) Validate() error {
 
 		if rule.Operation != "" && !rule.Operation.isValid() {
 			return fmt.Errorf("%q must be in %q", operationFieldName, operationTypeKeys())
+		}
+
+		if rule.Name == rule.Metric1 {
+			return fmt.Errorf("value of field %q may not match value of field %q", nameFieldName, metric1FieldName)
+		} else if rule.Name == rule.Metric2 {
+			return fmt.Errorf("value of field %q may not match value of field %q", nameFieldName, metric2FieldName)
 		}
 	}
 	return nil

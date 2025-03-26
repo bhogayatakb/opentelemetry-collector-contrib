@@ -1,23 +1,11 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package batch // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awskinesisexporter/internal/batch"
 
 import (
 	"github.com/gogo/protobuf/proto"
-	"github.com/jaegertracing/jaeger/model"
-	"go.opentelemetry.io/collector/consumer/consumererror"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -27,7 +15,7 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/jaeger"
 )
 
-func partitionByTraceID(v interface{}) string {
+func partitionByTraceID(v any) string {
 	if s, ok := v.(*model.Span); ok && s != nil {
 		return s.TraceID.String()
 	}
@@ -41,10 +29,7 @@ type jaegerEncoder struct {
 var _ Encoder = (*jaegerEncoder)(nil)
 
 func (je jaegerEncoder) Traces(td ptrace.Traces) (*Batch, error) {
-	traces, err := jaeger.ProtoFromTraces(td)
-	if err != nil {
-		return nil, consumererror.NewTraces(err, td)
-	}
+	traces := jaeger.ProtoFromTraces(td)
 
 	bt := New(je.batchOptions...)
 

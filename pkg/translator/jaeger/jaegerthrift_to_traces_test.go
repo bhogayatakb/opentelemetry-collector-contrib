@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package jaeger
 
@@ -18,12 +7,12 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/jaegertracing/jaeger/thrift-gen/jaeger"
+	"github.com/jaegertracing/jaeger-idl/thrift-gen/jaeger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.9.0"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/testdata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/tracetranslator"
@@ -63,11 +52,11 @@ func TestJThriftTagsToInternalAttributes(t *testing.T) {
 	}
 
 	expected := pcommon.NewMap()
-	expected.UpsertBool("bool-val", true)
-	expected.UpsertInt("int-val", 123)
-	expected.UpsertString("string-val", "abc")
-	expected.UpsertDouble("double-val", 1.23)
-	expected.UpsertString("binary-val", "AAAAAABkfZg=")
+	expected.PutBool("bool-val", true)
+	expected.PutInt("int-val", 123)
+	expected.PutStr("string-val", "abc")
+	expected.PutDouble("double-val", 1.23)
+	expected.PutEmptyBytes("binary-val").FromRaw([]byte{0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x7D, 0x98})
 
 	got := pcommon.NewMap()
 	jThriftTagsToInternalAttributes(tags, got)
@@ -76,7 +65,6 @@ func TestJThriftTagsToInternalAttributes(t *testing.T) {
 }
 
 func TestThriftBatchToInternalTraces(t *testing.T) {
-
 	tests := []struct {
 		name string
 		jb   *jaeger.Batch
@@ -116,6 +104,17 @@ func TestThriftBatchToInternalTraces(t *testing.T) {
 			td: generateTracesTwoSpansChildParent(),
 		},
 
+		{
+			name: "a-spans-with-two-parent",
+			jb: &jaeger.Batch{
+				Spans: []*jaeger.Span{
+					generateThriftSpan(),
+					generateThriftFollowerSpan(),
+					generateThriftTwoParentsSpan(),
+				},
+			},
+			td: generateTracesSpanWithTwoParents(),
+		},
 		{
 			name: "two-spans-with-follower",
 			jb: &jaeger.Batch{
@@ -279,6 +278,49 @@ func generateThriftFollowerSpan() *jaeger.Span {
 				TraceIdLow:  int64(binary.BigEndian.Uint64([]byte{0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x80})),
 				SpanId:      int64(binary.BigEndian.Uint64([]byte{0xAF, 0xAE, 0xAD, 0xAC, 0xAB, 0xAA, 0xA9, 0xA8})),
 				RefType:     jaeger.SpanRefType_FOLLOWS_FROM,
+			},
+		},
+	}
+}
+
+func generateThriftTwoParentsSpan() *jaeger.Span {
+	spanStartTs := unixNanoToMicroseconds(testSpanStartTimestamp)
+	spanEndTs := unixNanoToMicroseconds(testSpanEndTimestamp)
+	statusCode := statusOk
+	statusMsg := "status-ok"
+	kind := string(tracetranslator.OpenTracingSpanKindConsumer)
+
+	return &jaeger.Span{
+		TraceIdHigh:   int64(binary.BigEndian.Uint64([]byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8})),
+		TraceIdLow:    int64(binary.BigEndian.Uint64([]byte{0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x80})),
+		SpanId:        int64(binary.BigEndian.Uint64([]byte{0x1F, 0x1E, 0x1D, 0x1C, 0x1B, 0x1A, 0x19, 0x20})),
+		OperationName: "operationD",
+		StartTime:     spanStartTs,
+		Duration:      spanEndTs - spanStartTs,
+		ParentSpanId:  int64(binary.BigEndian.Uint64([]byte{0xAF, 0xAE, 0xAD, 0xAC, 0xAB, 0xAA, 0xA9, 0xA8})),
+		Tags: []*jaeger.Tag{
+			{
+				Key:   conventions.OtelStatusCode,
+				VType: jaeger.TagType_STRING,
+				VStr:  &statusCode,
+			},
+			{
+				Key:   conventions.OtelStatusDescription,
+				VType: jaeger.TagType_STRING,
+				VStr:  &statusMsg,
+			},
+			{
+				Key:   tracetranslator.TagSpanKind,
+				VType: jaeger.TagType_STRING,
+				VStr:  &kind,
+			},
+		},
+		References: []*jaeger.SpanRef{
+			{
+				TraceIdHigh: int64(binary.BigEndian.Uint64([]byte{0xF1, 0xF2, 0xF3, 0xF4, 0xF5, 0xF6, 0xF7, 0xF8})),
+				TraceIdLow:  int64(binary.BigEndian.Uint64([]byte{0xF9, 0xFA, 0xFB, 0xFC, 0xFD, 0xFE, 0xFF, 0x80})),
+				SpanId:      int64(binary.BigEndian.Uint64([]byte{0x1F, 0x1E, 0x1D, 0x1C, 0x1B, 0x1A, 0x19, 0x18})),
+				RefType:     jaeger.SpanRefType_CHILD_OF,
 			},
 		},
 	}

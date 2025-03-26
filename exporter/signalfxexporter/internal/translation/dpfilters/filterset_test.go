@@ -1,16 +1,5 @@
-// Copyright 2021, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package dpfilters
 
@@ -110,9 +99,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Match based on dimension name as string",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
+				Dimensions: map[string]any{
 					"container_name": "PO",
-				}}},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric:     "cpu.utilization",
@@ -129,9 +119,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Match based on dimension name",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{"PO"},
-				}}},
+				Dimensions: map[string]any{
+					"container_name": []any{"PO"},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric:     "cpu.utilization",
@@ -148,9 +139,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Match based on dimension name regex",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{`/^[A-Z][A-Z]$/`},
-				}}},
+				Dimensions: map[string]any{
+					"container_name": []any{`/^[A-Z][A-Z]$/`},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric:     "cpu.utilization",
@@ -167,9 +159,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Match based on dimension presence",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{`/.+/`},
-				}}},
+				Dimensions: map[string]any{
+					"container_name": []any{`/.+/`},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric:     "cpu.utilization",
@@ -186,9 +179,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Match based on dimension name glob",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{`*O*`},
-				}}},
+				Dimensions: map[string]any{
+					"container_name": []any{`*O*`},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric:     "cpu.utilization",
@@ -210,8 +204,8 @@ func TestFilterSet(t *testing.T) {
 			name: "Match based on conjunction of both dimensions and metric name",
 			excludes: []MetricFilter{{
 				MetricNames: []string{"*.utilization"},
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{"test"},
+				Dimensions: map[string]any{
+					"container_name": []any{"test"},
 				},
 			}},
 			expectedMatches: []*sfxpb.DataPoint{
@@ -243,9 +237,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Doesn't match if no metric name filter specified",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{"mycontainer"},
-				}}},
+				Dimensions: map[string]any{
+					"container_name": []any{"mycontainer"},
+				},
+			}},
 			expectedNonMatches: []*sfxpb.DataPoint{
 				{
 					Metric: "cpu.utilization",
@@ -255,10 +250,11 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Doesn't match metric when no (matching) dimensions exist",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"host":   []interface{}{"localhost"},
-					"system": []interface{}{"r4"},
-				}}},
+				Dimensions: map[string]any{
+					"host":   []any{"localhost"},
+					"system": []any{"r4"},
+				},
+			}},
 			expectedNonMatches: []*sfxpb.DataPoint{
 				{
 					Metric: "cpu.utilization",
@@ -274,10 +270,11 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Matches on at least one dimension",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"host":   []interface{}{"localhost"},
-					"system": []interface{}{"r4"},
-				}}},
+				Dimensions: map[string]any{
+					"host":   []any{"localhost"},
+					"system": []any{"r4"},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric: "cpu.utilization",
@@ -290,10 +287,11 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Matches against all dimension pairs",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"host":   []interface{}{"localhost"},
-					"system": []interface{}{"r4"},
-				}}},
+				Dimensions: map[string]any{
+					"host":   []any{"localhost"},
+					"system": []any{"r4"},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric: "cpu.utilization",
@@ -316,9 +314,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Negated dim values take precedent",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{"*", "!pause", "!/.*idle/"},
-				}}},
+				Dimensions: map[string]any{
+					"container_name": []any{"*", "!pause", "!/.*idle/"},
+				},
+			}},
 			expectedMatches: []*sfxpb.DataPoint{
 				{
 					Metric:     "cpu.utilization",
@@ -354,9 +353,10 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Error creating filter with empty dimension list",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"dim": []interface{}{},
-				}}},
+				Dimensions: map[string]any{
+					"dim": []any{},
+				},
+			}},
 			wantErr:    true,
 			wantErrMsg: "string map value in filter cannot be empty",
 		},
@@ -369,18 +369,20 @@ func TestFilterSet(t *testing.T) {
 		{
 			name: "Error creating filter with invalid glob in dimensions",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
-					"container_name": []interface{}{"cpu.*["},
-				}}},
+				Dimensions: map[string]any{
+					"container_name": []any{"cpu.*["},
+				},
+			}},
 			wantErr:    true,
 			wantErrMsg: "unexpected end of input",
 		},
 		{
 			name: "Error on invalid dimensions input",
 			excludes: []MetricFilter{{
-				Dimensions: map[string]interface{}{
+				Dimensions: map[string]any{
 					"host": 1,
-				}}},
+				},
+			}},
 			wantErr:    true,
 			wantErrMsg: "1 should be either a string or string list",
 		},

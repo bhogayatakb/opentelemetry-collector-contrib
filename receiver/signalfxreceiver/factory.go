@@ -1,57 +1,44 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package signalfxreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/signalfxreceiver"
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
 	"sync"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/receiver"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/signalfxreceiver/internal/metadata"
 )
 
 // This file implements factory for SignalFx receiver.
 
 const (
-	// The value of "type" key in configuration.
-	typeStr = "signalfx"
-	// The stability level of the receiver.
-	stability = component.StabilityLevelStable
 
-	// Default endpoints to bind to.
-	defaultEndpoint = ":9943"
+	// Default endpoint to bind to.
+	defaultEndpoint = "localhost:9943"
 )
 
 // NewFactory creates a factory for SignalFx receiver.
-func NewFactory() component.ReceiverFactory {
-	return component.NewReceiverFactory(
-		typeStr,
+func NewFactory() receiver.Factory {
+	return receiver.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		component.WithMetricsReceiver(createMetricsReceiver, stability),
-		component.WithLogsReceiver(createLogsReceiver, stability))
+		receiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability),
+		receiver.WithLogs(createLogsReceiver, metadata.LogsStability))
 }
 
-func createDefaultConfig() config.Receiver {
+func createDefaultConfig() component.Config {
 	return &Config{
-		ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
-		HTTPServerSettings: confighttp.HTTPServerSettings{
+		ServerConfig: confighttp.ServerConfig{
 			Endpoint: defaultEndpoint,
 		},
 	}
@@ -69,42 +56,36 @@ func extractPortFromEndpoint(endpoint string) (int, error) {
 		return 0, fmt.Errorf("endpoint port is not a number: %w", err)
 	}
 	if port < 1 || port > 65535 {
-		return 0, fmt.Errorf("port number must be between 1 and 65535")
+		return 0, errors.New("port number must be between 1 and 65535")
 	}
 	return int(port), nil
-}
-
-// verify that the configured port is not 0
-func (rCfg *Config) validate() error {
-	if rCfg.Endpoint == "" {
-		return errEmptyEndpoint
-	}
-
-	_, err := extractPortFromEndpoint(rCfg.Endpoint)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 // createMetricsReceiver creates a metrics receiver based on provided config.
 func createMetricsReceiver(
 	_ context.Context,
-	params component.ReceiverCreateSettings,
-	cfg config.Receiver,
+	params receiver.Settings,
+	cfg component.Config,
 	consumer consumer.Metrics,
-) (component.MetricsReceiver, error) {
+) (receiver.Metrics, error) {
 	rCfg := cfg.(*Config)
 
-	err := rCfg.validate()
-	if err != nil {
-		return nil, err
+	if rCfg.AccessTokenPassthrough {
+		params.Logger.Warn(
+			"access_token_passthrough is deprecated. " +
+				"Please enable include_metadata in the receiver and add " +
+				"`metadata_keys: [X-Sf-Token]` to the batch processor",
+		)
 	}
 
 	receiverLock.Lock()
 	r := receivers[rCfg]
 	if r == nil {
-		r = newReceiver(params, *rCfg)
+		var err error
+		r, err = newReceiver(params, *rCfg)
+		if err != nil {
+			return nil, err
+		}
 		receivers[rCfg] = r
 	}
 	receiverLock.Unlock()
@@ -117,21 +98,28 @@ func createMetricsReceiver(
 // createLogsReceiver creates a logs receiver based on provided config.
 func createLogsReceiver(
 	_ context.Context,
-	params component.ReceiverCreateSettings,
-	cfg config.Receiver,
+	params receiver.Settings,
+	cfg component.Config,
 	consumer consumer.Logs,
-) (component.LogsReceiver, error) {
+) (receiver.Logs, error) {
 	rCfg := cfg.(*Config)
 
-	err := rCfg.validate()
-	if err != nil {
-		return nil, err
+	if rCfg.AccessTokenPassthrough {
+		params.Logger.Warn(
+			"access_token_passthrough is deprecated. " +
+				"Please enable include_metadata in the receiver and add " +
+				"`metadata_keys: [X-Sf-Token]` to the batch processor",
+		)
 	}
 
 	receiverLock.Lock()
 	r := receivers[rCfg]
 	if r == nil {
-		r = newReceiver(params, *rCfg)
+		var err error
+		r, err = newReceiver(params, *rCfg)
+		if err != nil {
+			return nil, err
+		}
 		receivers[rCfg] = r
 	}
 	receiverLock.Unlock()
@@ -141,5 +129,7 @@ func createLogsReceiver(
 	return r, nil
 }
 
-var receiverLock sync.Mutex
-var receivers = map[*Config]*sfxReceiver{}
+var (
+	receiverLock sync.Mutex
+	receivers    = map[*Config]*sfxReceiver{}
+)

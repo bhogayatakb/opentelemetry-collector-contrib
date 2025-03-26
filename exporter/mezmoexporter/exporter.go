@@ -1,22 +1,11 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package mezmoexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/mezmoexporter"
 
 import (
-	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,7 +15,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.uber.org/zap"
 )
@@ -40,7 +28,7 @@ type mezmoExporter struct {
 	wg              sync.WaitGroup
 }
 
-type MezmoLogLine struct {
+type mezmoLogLine struct {
 	Timestamp int64             `json:"timestamp"`
 	Line      string            `json:"line"`
 	App       string            `json:"app"`
@@ -48,12 +36,12 @@ type MezmoLogLine struct {
 	Meta      map[string]string `json:"meta"`
 }
 
-type MezmoLogBody struct {
-	Lines []MezmoLogLine `json:"lines"`
+type mezmoLogBody struct {
+	Lines []mezmoLogLine `json:"lines"`
 }
 
 func newLogsExporter(config *Config, settings component.TelemetrySettings, buildInfo component.BuildInfo, logger *zap.Logger) *mezmoExporter {
-	var e = &mezmoExporter{
+	e := &mezmoExporter{
 		config:          config,
 		settings:        settings,
 		userAgentString: fmt.Sprintf("mezmo-otel-exporter/%s", buildInfo.Version),
@@ -62,27 +50,32 @@ func newLogsExporter(config *Config, settings component.TelemetrySettings, build
 	return e
 }
 
-func (m *mezmoExporter) pushLogData(ctx context.Context, ld plog.Logs) error {
+func (m *mezmoExporter) pushLogData(_ context.Context, ld plog.Logs) error {
 	m.wg.Add(1)
 	defer m.wg.Done()
 
 	return m.logDataToMezmo(ld)
 }
 
-func (m *mezmoExporter) start(_ context.Context, host component.Host) (err error) {
-	m.client, err = m.config.HTTPClientSettings.ToClient(host, m.settings)
+func (m *mezmoExporter) start(ctx context.Context, host component.Host) (err error) {
+	m.client, err = m.config.ClientConfig.ToClient(ctx, host, m.settings)
 	return err
 }
 
 func (m *mezmoExporter) stop(context.Context) (err error) {
+	if m.client == nil {
+		return nil
+	}
 	m.wg.Wait()
+	m.client.CloseIdleConnections()
+	m.client = nil
 	return nil
 }
 
 func (m *mezmoExporter) logDataToMezmo(ld plog.Logs) error {
 	var errs error
 
-	var lines []MezmoLogLine
+	var lines []mezmoLogLine
 
 	// Convert the log resources to mezmo lines...
 	resourceLogs := ld.ResourceLogs()
@@ -103,23 +96,20 @@ func (m *mezmoExporter) logDataToMezmo(ld plog.Logs) error {
 					attrs["hostname"] = resourceHostName.AsString()
 				}
 
-				traceID := log.TraceID().HexString()
-				if traceID != "" {
-					attrs["trace.id"] = traceID
+				if traceID := log.TraceID(); !traceID.IsEmpty() {
+					attrs["trace.id"] = hex.EncodeToString(traceID[:])
 				}
 
-				spanID := log.SpanID().HexString()
-				if spanID != "" {
-					attrs["span.id"] = spanID
+				if spanID := log.SpanID(); !spanID.IsEmpty() {
+					attrs["span.id"] = hex.EncodeToString(spanID[:])
 				}
 
-				log.Attributes().Range(func(k string, v pcommon.Value) bool {
-					attrs[k] = truncateString(v.StringVal(), maxMetaDataSize)
-					return true
-				})
+				for k, v := range log.Attributes().All() {
+					attrs[k] = truncateString(v.Str(), maxMetaDataSize)
+				}
 
 				s, _ := log.Attributes().Get("appname")
-				app := s.StringVal()
+				app := s.Str()
 
 				tstamp := log.Timestamp().AsTime().UTC().UnixMilli()
 				if tstamp == 0 {
@@ -131,9 +121,9 @@ func (m *mezmoExporter) logDataToMezmo(ld plog.Logs) error {
 					logLevel = "info"
 				}
 
-				line := MezmoLogLine{
+				line := mezmoLogLine{
 					Timestamp: tstamp,
-					Line:      truncateString(log.Body().StringVal(), maxMessageSize),
+					Line:      truncateString(log.Body().Str(), maxMessageSize),
 					App:       truncateString(app, maxAppnameLen),
 					Level:     logLevel,
 					Meta:      attrs,
@@ -153,7 +143,7 @@ func (m *mezmoExporter) logDataToMezmo(ld plog.Logs) error {
 			return fmt.Errorf("error Creating JSON payload: %w", errs)
 		}
 
-		var newBufSize = b.Len() + len(lineBytes)
+		newBufSize := b.Len() + len(lineBytes)
 		if newBufSize >= maxBodySize-2 {
 			str := b.String()
 			str = str[:len(str)-1] + "]}"
@@ -171,23 +161,18 @@ func (m *mezmoExporter) logDataToMezmo(ld plog.Logs) error {
 		}
 	}
 
-	str := b.String() + "]}"
-	if errs = m.sendLinesToMezmo(str); errs != nil {
-		return errs
-	}
-
-	return nil
+	return m.sendLinesToMezmo(b.String() + "]}")
 }
 
 func (m *mezmoExporter) sendLinesToMezmo(post string) (errs error) {
-	req, _ := http.NewRequest("POST", m.config.IngestURL, bytes.NewBuffer([]byte(post)))
+	req, _ := http.NewRequest(http.MethodPost, m.config.IngestURL, strings.NewReader(post))
 	req.Header.Add("Accept", "application/json")
 	req.Header.Add("Content-Type", "application/json")
 	req.Header.Add("User-Agent", m.userAgentString)
-	req.Header.Add("apikey", m.config.IngestKey)
+	req.Header.Add("apikey", string(m.config.IngestKey))
 
 	var res *http.Response
-	if res, errs = http.DefaultClient.Do(req); errs != nil {
+	if res, errs = m.client.Do(req); errs != nil {
 		return fmt.Errorf("failed to POST log to Mezmo: %w", errs)
 	}
 	if res.StatusCode >= 400 {

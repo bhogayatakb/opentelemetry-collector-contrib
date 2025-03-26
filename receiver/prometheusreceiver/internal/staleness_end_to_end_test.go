@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package internal_test
 
@@ -23,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,9 +25,11 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
 	"go.opentelemetry.io/collector/confmap/provider/fileprovider"
+	"go.opentelemetry.io/collector/exporter"
+	"go.opentelemetry.io/collector/otelcol"
+	"go.opentelemetry.io/collector/processor"
 	"go.opentelemetry.io/collector/processor/batchprocessor"
-	"go.opentelemetry.io/collector/service"
-	"go.uber.org/atomic"
+	"go.opentelemetry.io/collector/receiver"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 
@@ -57,8 +49,8 @@ func TestStalenessMarkersEndToEnd(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// 1. Setup the server that sends series that intermittently appear and disappear.
-	n := atomic.NewUint64(0)
-	scrapeServer := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	n := &atomic.Uint64{}
+	scrapeServer := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 		// Increment the scrape count atomically per scrape.
 		i := n.Add(1)
 
@@ -85,26 +77,21 @@ jvm_memory_pool_bytes_used{pool="CodeHeap 'non-nmethods'"} %.1f`, float64(i))
 	defer scrapeServer.Close()
 
 	serverURL, err := url.Parse(scrapeServer.URL)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	// 2. Set up the Prometheus RemoteWrite endpoint.
 	prweUploads := make(chan *prompb.WriteRequest)
-	prweServer := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+	prweServer := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
 		// Snappy decode the uploads.
 		payload, rerr := io.ReadAll(req.Body)
-		if err != nil {
-			panic(rerr)
-		}
+		assert.NoError(t, rerr)
+
 		recv := make([]byte, len(payload))
 		decoded, derr := snappy.Decode(recv, payload)
-		if err != nil {
-			panic(derr)
-		}
+		assert.NoError(t, derr)
 
 		writeReq := new(prompb.WriteRequest)
-		if uerr := proto.Unmarshal(decoded, writeReq); uerr != nil {
-			panic(uerr)
-		}
+		assert.NoError(t, proto.Unmarshal(decoded, writeReq))
 
 		select {
 		case <-ctx.Done():
@@ -121,7 +108,7 @@ receivers:
     config:
       scrape_configs:
         - job_name: 'test'
-          scrape_interval: 2ms
+          scrape_interval: 100ms
           static_configs:
             - targets: [%q]
 
@@ -141,37 +128,32 @@ service:
       exporters: [prometheusremotewrite]`, serverURL.Host, prweServer.URL)
 
 	confFile, err := os.CreateTemp(os.TempDir(), "conf-")
-	require.Nil(t, err)
+	require.NoError(t, err)
 	defer os.Remove(confFile.Name())
 	_, err = confFile.Write([]byte(cfg))
-	require.Nil(t, err)
+	require.NoError(t, err)
 	// 4. Run the OpenTelemetry Collector.
-	receivers, err := component.MakeReceiverFactoryMap(prometheusreceiver.NewFactory())
-	require.Nil(t, err)
-	exporters, err := component.MakeExporterFactoryMap(prometheusremotewriteexporter.NewFactory())
-	require.Nil(t, err)
-	processors, err := component.MakeProcessorFactoryMap(batchprocessor.NewFactory())
-	require.Nil(t, err)
+	receivers, err := otelcol.MakeFactoryMap[receiver.Factory](prometheusreceiver.NewFactory())
+	require.NoError(t, err)
+	exporters, err := otelcol.MakeFactoryMap[exporter.Factory](prometheusremotewriteexporter.NewFactory())
+	require.NoError(t, err)
+	processors, err := otelcol.MakeFactoryMap[processor.Factory](batchprocessor.NewFactory())
+	require.NoError(t, err)
 
-	factories := component.Factories{
+	factories := otelcol.Factories{
 		Receivers:  receivers,
 		Exporters:  exporters,
 		Processors: processors,
 	}
 
-	fmp := fileprovider.New()
-	configProvider, err := service.NewConfigProvider(
-		service.ConfigProviderSettings{
+	appSettings := otelcol.CollectorSettings{
+		Factories: func() (otelcol.Factories, error) { return factories, nil },
+		ConfigProviderSettings: otelcol.ConfigProviderSettings{
 			ResolverSettings: confmap.ResolverSettings{
-				URIs:      []string{confFile.Name()},
-				Providers: map[string]confmap.Provider{fmp.Scheme(): fmp},
+				URIs:              []string{confFile.Name()},
+				ProviderFactories: []confmap.ProviderFactory{fileprovider.NewFactory()},
 			},
-		})
-	require.NoError(t, err)
-
-	appSettings := service.CollectorSettings{
-		Factories:      factories,
-		ConfigProvider: configProvider,
+		},
 		BuildInfo: component.BuildInfo{
 			Command:     "otelcol",
 			Description: "OpenTelemetry Collector",
@@ -185,13 +167,11 @@ service:
 		},
 	}
 
-	app, err := service.New(appSettings)
-	require.Nil(t, err)
+	app, err := otelcol.NewCollector(appSettings)
+	require.NoError(t, err)
 
 	go func() {
-		if err = app.Run(context.Background()); err != nil {
-			t.Error(err)
-		}
+		assert.NoError(t, app.Run(context.Background()))
 	}()
 	defer app.Shutdown()
 
@@ -199,8 +179,9 @@ service:
 	for notYetStarted := true; notYetStarted; {
 		state := app.GetState()
 		switch state {
-		case service.Running, service.Closed, service.Closing:
+		case otelcol.StateRunning, otelcol.StateClosed, otelcol.StateClosing:
 			notYetStarted = false
+		case otelcol.StateStarting:
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -215,13 +196,13 @@ service:
 	// 6. Assert that we encounter the stale markers aka special NaNs for the various time series.
 	staleMarkerCount := 0
 	totalSamples := 0
-	require.True(t, len(wReqL) > 0, "Expecting at least one WriteRequest")
+	require.NotEmpty(t, wReqL, "Expecting at least one WriteRequest")
 	for i, wReq := range wReqL {
 		name := fmt.Sprintf("WriteRequest#%d", i)
-		require.True(t, len(wReq.Timeseries) > 0, "Expecting at least 1 timeSeries for:: "+name)
+		require.NotEmpty(t, wReq.Timeseries, "Expecting at least 1 timeSeries for:: "+name)
 		for j, ts := range wReq.Timeseries {
 			fullName := fmt.Sprintf("%s/TimeSeries#%d", name, j)
-			assert.True(t, len(ts.Samples) > 0, "Expected at least 1 Sample in:: "+fullName)
+			assert.NotEmpty(t, ts.Samples, "Expected at least 1 Sample in:: "+fullName)
 
 			// We are strictly counting series directly included in the scrapes, and no
 			// internal timeseries like "up" nor "scrape_seconds" etc.
@@ -244,11 +225,11 @@ service:
 		}
 	}
 
-	require.True(t, totalSamples > 0, "Expected at least 1 sample")
+	require.Positive(t, totalSamples, "Expected at least 1 sample")
 	// On every alternative scrape the prior scrape will be reported as sale.
 	// Expect at least:
 	//    * The first scrape will NOT return stale markers
 	//    * (N-1 / alternatives) = ((10-1) / 2) = ~40% chance of stale markers being emitted.
 	chance := float64(staleMarkerCount) / float64(totalSamples)
-	require.True(t, chance >= 0.4, fmt.Sprintf("Expected at least one stale marker: %.3f", chance))
+	require.GreaterOrEqualf(t, chance, 0.4, "Expected at least one stale marker: %.3f", chance)
 }

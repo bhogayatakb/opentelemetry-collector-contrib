@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package opencensus // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/opencensus"
 
@@ -24,7 +13,7 @@ import (
 	"go.opencensus.io/trace"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.12.0"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/occonventions"
@@ -81,7 +70,7 @@ func spanToOC(span ptrace.Span) *octrace.Span {
 	return &octrace.Span{
 		TraceId:                 traceIDToOC(span.TraceID()),
 		SpanId:                  spanIDToOC(span.SpanID()),
-		Tracestate:              traceStateToOC(span.TraceState()),
+		Tracestate:              traceStateToOC(span.TraceState().AsRaw()),
 		ParentSpanId:            spanIDToOC(span.ParentSpanID()),
 		Name:                    stringToTruncatableString(span.Name()),
 		Kind:                    spanKindToOC(span.Kind()),
@@ -113,10 +102,9 @@ func attributesMapToOCAttributeMap(attributes pcommon.Map) map[string]*octrace.A
 	}
 
 	ocAttributes := make(map[string]*octrace.AttributeValue, attributes.Len())
-	attributes.Range(func(k string, v pcommon.Value) bool {
+	for k, v := range attributes.All() {
 		ocAttributes[k] = attributeValueToOC(v)
-		return true
-	})
+	}
 	return ocAttributes
 }
 
@@ -124,21 +112,21 @@ func attributeValueToOC(attr pcommon.Value) *octrace.AttributeValue {
 	a := &octrace.AttributeValue{}
 
 	switch attr.Type() {
-	case pcommon.ValueTypeString:
+	case pcommon.ValueTypeStr:
 		a.Value = &octrace.AttributeValue_StringValue{
-			StringValue: stringToTruncatableString(attr.StringVal()),
+			StringValue: stringToTruncatableString(attr.Str()),
 		}
 	case pcommon.ValueTypeBool:
 		a.Value = &octrace.AttributeValue_BoolValue{
-			BoolValue: attr.BoolVal(),
+			BoolValue: attr.Bool(),
 		}
 	case pcommon.ValueTypeDouble:
 		a.Value = &octrace.AttributeValue_DoubleValue{
-			DoubleValue: attr.DoubleVal(),
+			DoubleValue: attr.Double(),
 		}
 	case pcommon.ValueTypeInt:
 		a.Value = &octrace.AttributeValue_IntValue{
-			IntValue: attr.IntVal(),
+			IntValue: attr.Int(),
 		}
 	case pcommon.ValueTypeMap:
 		a.Value = &octrace.AttributeValue_StringValue{
@@ -170,7 +158,6 @@ func spanKindToOCAttribute(kind ptrace.SpanKind) *octrace.AttributeValue {
 	case ptrace.SpanKindServer: // explicitly handled as SpanKind
 	case ptrace.SpanKindClient: // explicitly handled as SpanKind
 	default:
-
 	}
 
 	if string(ocKind) == "" {
@@ -194,17 +181,17 @@ func attributesMapToOCSameProcessAsParentSpan(attr pcommon.Map) *wrapperspb.Bool
 	if !ok || val.Type() != pcommon.ValueTypeBool {
 		return nil
 	}
-	return wrapperspb.Bool(val.BoolVal())
+	return wrapperspb.Bool(val.Bool())
 }
 
 // OTLP follows the W3C format, e.g. "vendorname1=opaqueValue1,vendorname2=opaqueValue2"
-func traceStateToOC(traceState ptrace.TraceState) *octrace.Span_Tracestate {
+func traceStateToOC(traceState string) *octrace.Span_Tracestate {
 	if traceState == "" {
 		return nil
 	}
 
 	// key-value pairs in the "key1=value1" format
-	pairs := strings.Split(string(traceState), ",")
+	pairs := strings.Split(traceState, ",")
 
 	entries := make([]*octrace.Span_Tracestate_Entry, 0, len(pairs))
 	for _, pair := range pairs {
@@ -292,15 +279,15 @@ func eventToOC(event ptrace.SpanEvent) *octrace.Span_TimeEvent {
 		}
 		if ocMessageEventAttrFound {
 			ocMessageEventType := ocMessageEventAttrValues["message.type"]
-			ocMessageEventTypeVal := octrace.Span_TimeEvent_MessageEvent_Type_value[ocMessageEventType.StringVal()]
+			ocMessageEventTypeVal := octrace.Span_TimeEvent_MessageEvent_Type_value[ocMessageEventType.Str()]
 			return &octrace.Span_TimeEvent{
 				Time: timestampAsTimestampPb(event.Timestamp()),
 				Value: &octrace.Span_TimeEvent_MessageEvent_{
 					MessageEvent: &octrace.Span_TimeEvent_MessageEvent{
 						Type:             octrace.Span_TimeEvent_MessageEvent_Type(ocMessageEventTypeVal),
-						Id:               uint64(ocMessageEventAttrValues[conventions.AttributeMessagingMessageID].IntVal()),
-						UncompressedSize: uint64(ocMessageEventAttrValues[conventions.AttributeMessagingMessagePayloadSizeBytes].IntVal()),
-						CompressedSize:   uint64(ocMessageEventAttrValues[conventions.AttributeMessagingMessagePayloadCompressedSizeBytes].IntVal()),
+						Id:               uint64(ocMessageEventAttrValues[conventions.AttributeMessagingMessageID].Int()),
+						UncompressedSize: uint64(ocMessageEventAttrValues[conventions.AttributeMessagingMessagePayloadSizeBytes].Int()),
+						CompressedSize:   uint64(ocMessageEventAttrValues[conventions.AttributeMessagingMessagePayloadCompressedSizeBytes].Int()),
 					},
 				},
 			}
@@ -336,7 +323,7 @@ func linksToOC(links ptrace.SpanLinkSlice, droppedCount uint32) *octrace.Span_Li
 		ocLink := &octrace.Span_Link{
 			TraceId:    traceIDToOC(link.TraceID()),
 			SpanId:     spanIDToOC(link.SpanID()),
-			Tracestate: traceStateToOC(link.TraceState()),
+			Tracestate: traceStateToOC(link.TraceState().AsRaw()),
 			Attributes: attributesMapToOCSpanAttributes(link.Attributes(), link.DroppedAttributesCount()),
 		}
 		ocLinks = append(ocLinks, ocLink)
@@ -352,19 +339,17 @@ func traceIDToOC(tid pcommon.TraceID) []byte {
 	if tid.IsEmpty() {
 		return nil
 	}
-	tidBytes := tid.Bytes()
-	return tidBytes[:]
+	return tid[:]
 }
 
 func spanIDToOC(sid pcommon.SpanID) []byte {
 	if sid.IsEmpty() {
 		return nil
 	}
-	sidBytes := sid.Bytes()
-	return sidBytes[:]
+	return sid[:]
 }
 
-func statusToOC(status ptrace.SpanStatus) (*octrace.Status, *octrace.AttributeValue) {
+func statusToOC(status ptrace.Status) (*octrace.Status, *octrace.AttributeValue) {
 	var attr *octrace.AttributeValue
 	var oc int32
 	switch status.Code() {

@@ -1,16 +1,5 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package carbonreceiver
 
@@ -21,10 +10,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/carbonreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/carbonreceiver/protocol"
 )
 
@@ -35,20 +26,19 @@ func TestLoadConfig(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		id       config.ComponentID
-		expected config.Receiver
+		id       component.ID
+		expected component.Config
 	}{
 		{
-			id:       config.NewComponentIDWithName(typeStr, ""),
+			id:       component.NewIDWithName(metadata.Type, ""),
 			expected: createDefaultConfig(),
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "receiver_settings"),
+			id: component.NewIDWithName(metadata.Type, "receiver_settings"),
 			expected: &Config{
-				ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
-				NetAddr: confignet.NetAddr{
+				AddrConfig: confignet.AddrConfig{
 					Endpoint:  "localhost:8080",
-					Transport: "udp",
+					Transport: confignet.TransportTypeUDP,
 				},
 				TCPIdleTimeout: 5 * time.Second,
 				Parser: &protocol.Config{
@@ -58,12 +48,11 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "regex"),
+			id: component.NewIDWithName(metadata.Type, "regex"),
 			expected: &Config{
-				ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
-				NetAddr: confignet.NetAddr{
+				AddrConfig: confignet.AddrConfig{
 					Endpoint:  "localhost:2003",
-					Transport: "tcp",
+					Transport: confignet.TransportTypeTCP,
 				},
 				TCPIdleTimeout: 30 * time.Second,
 				Parser: &protocol.Config{
@@ -97,10 +86,25 @@ func TestLoadConfig(t *testing.T) {
 
 			sub, err := cm.Sub(tt.id.String())
 			require.NoError(t, err)
-			require.NoError(t, config.UnmarshalReceiver(sub, cfg))
+			require.NoError(t, sub.Unmarshal(cfg))
 
-			assert.NoError(t, cfg.Validate())
+			assert.NoError(t, xconfmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}
+}
+
+func TestConfigValidate(t *testing.T) {
+	cfg := &Config{
+		AddrConfig: confignet.AddrConfig{
+			Endpoint:  "localhost:2003",
+			Transport: confignet.TransportTypeTCP,
+		},
+		TCPIdleTimeout: -1 * time.Second,
+		Parser: &protocol.Config{
+			Type:   "plaintext",
+			Config: &protocol.PlaintextConfig{},
+		},
+	}
+	assert.Error(t, cfg.Validate())
 }

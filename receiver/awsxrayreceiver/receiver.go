@@ -1,32 +1,22 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package awsxrayreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsxrayreceiver"
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/obsreport"
-	"go.uber.org/multierr"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/receiverhelper"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/proxy"
-	awsxray "github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/xray"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/xray/telemetry"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsxrayreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsxrayreceiver/internal/translator"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsxrayreceiver/internal/udppoller"
 )
@@ -37,30 +27,25 @@ const (
 	maxPollerCount = 2
 )
 
-// xrayReceiver implements the component.TracesReceiver interface for converting
+// xrayReceiver implements the receiver.Traces interface for converting
 // AWS X-Ray segment document into the OT internal trace format.
 type xrayReceiver struct {
-	instanceID config.ComponentID
-	poller     udppoller.Poller
-	server     proxy.Server
-	settings   component.ReceiverCreateSettings
-	consumer   consumer.Traces
-	obsrecv    *obsreport.Receiver
+	poller   udppoller.Poller
+	server   proxy.Server
+	settings receiver.Settings
+	consumer consumer.Traces
+	obsrecv  *receiverhelper.ObsReport
+	registry telemetry.Registry
 }
 
 func newReceiver(config *Config,
 	consumer consumer.Traces,
-	set component.ReceiverCreateSettings) (component.TracesReceiver, error) {
-
-	if consumer == nil {
-		return nil, component.ErrNilNextConsumer
-	}
-
+	set receiver.Settings,
+) (receiver.Traces, error) {
 	set.Logger.Info("Going to listen on endpoint for X-Ray segments",
 		zap.String(udppoller.Transport, config.Endpoint))
 	poller, err := udppoller.New(&udppoller.Config{
-		ReceiverID:         config.ID(),
-		Transport:          config.Transport,
+		Transport:          string(config.Transport),
 		Endpoint:           config.Endpoint,
 		NumOfPollerToStart: maxPollerCount,
 	}, set)
@@ -76,21 +61,26 @@ func newReceiver(config *Config,
 		return nil, err
 	}
 
+	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
+		ReceiverID:             set.ID,
+		Transport:              udppoller.Transport,
+		ReceiverCreateSettings: set,
+	})
+	if err != nil {
+		return nil, err
+	}
+
 	return &xrayReceiver{
-		instanceID: config.ID(),
-		poller:     poller,
-		server:     srv,
-		settings:   set,
-		consumer:   consumer,
-		obsrecv: obsreport.NewReceiver(obsreport.ReceiverSettings{
-			ReceiverID:             config.ID(),
-			Transport:              udppoller.Transport,
-			ReceiverCreateSettings: set,
-		}),
+		poller:   poller,
+		server:   srv,
+		settings: set,
+		consumer: consumer,
+		obsrecv:  obsrecv,
+		registry: telemetry.GlobalRegistry(),
 	}, nil
 }
 
-func (x *xrayReceiver) Start(ctx context.Context, host component.Host) error {
+func (x *xrayReceiver) Start(ctx context.Context, _ component.Host) error {
 	// TODO: Might want to pass `host` into read() below to report a fatal error
 	x.poller.Start(ctx)
 	go x.start()
@@ -108,7 +98,7 @@ func (x *xrayReceiver) Shutdown(ctx context.Context) error {
 	}
 
 	if proxyErr := x.server.Shutdown(ctx); proxyErr != nil {
-		err = multierr.Append(err, fmt.Errorf("failed to close proxy: %w", proxyErr))
+		err = errors.Join(err, fmt.Errorf("failed to close proxy: %w", proxyErr))
 	}
 	return err
 }
@@ -117,19 +107,19 @@ func (x *xrayReceiver) start() {
 	incomingSegments := x.poller.SegmentsChan()
 	for seg := range incomingSegments {
 		ctx := x.obsrecv.StartTracesOp(seg.Ctx)
-		traces, totalSpanCount, err := translator.ToTraces(seg.Payload)
+		traces, totalSpanCount, err := translator.ToTraces(seg.Payload, x.registry.LoadOrNop(x.settings.ID))
 		if err != nil {
 			x.settings.Logger.Warn("X-Ray segment to OT traces conversion failed", zap.Error(err))
-			x.obsrecv.EndTracesOp(ctx, awsxray.TypeStr, totalSpanCount, err)
+			x.obsrecv.EndTracesOp(ctx, metadata.Type.String(), totalSpanCount, err)
 			continue
 		}
 
-		err = x.consumer.ConsumeTraces(ctx, *traces)
+		err = x.consumer.ConsumeTraces(ctx, traces)
 		if err != nil {
 			x.settings.Logger.Warn("Trace consumer errored out", zap.Error(err))
-			x.obsrecv.EndTracesOp(ctx, awsxray.TypeStr, totalSpanCount, err)
+			x.obsrecv.EndTracesOp(ctx, metadata.Type.String(), totalSpanCount, err)
 			continue
 		}
-		x.obsrecv.EndTracesOp(ctx, awsxray.TypeStr, totalSpanCount, nil)
+		x.obsrecv.EndTracesOp(ctx, metadata.Type.String(), totalSpanCount, nil)
 	}
 }

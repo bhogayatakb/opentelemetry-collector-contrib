@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package dbstorage // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/storage/dbstorage"
 
@@ -21,8 +10,8 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/extension/experimental/storage"
+	"go.opentelemetry.io/collector/extension"
+	"go.opentelemetry.io/collector/extension/xextension/storage"
 	"go.uber.org/zap"
 )
 
@@ -36,7 +25,7 @@ type databaseStorage struct {
 // Ensure this storage extension implements the appropriate interface
 var _ storage.Extension = (*databaseStorage)(nil)
 
-func newDBStorage(logger *zap.Logger, config *Config) (component.Extension, error) {
+func newDBStorage(logger *zap.Logger, config *Config) (extension.Extension, error) {
 	return &databaseStorage{
 		driverName:     config.DriverName,
 		datasourceName: config.DataSource,
@@ -46,6 +35,19 @@ func newDBStorage(logger *zap.Logger, config *Config) (component.Extension, erro
 
 // Start opens a connection to the database
 func (ds *databaseStorage) Start(context.Context, component.Host) error {
+	if ds.driverName == driverSQLiteLegacy {
+		// Log warning about legacy driver usage
+		ds.logger.Warn("Legacy driver 'sqlite3' is used, please review documentation to update your configuration")
+		// Change legacy driver to a new one
+		ds.driverName = driverSQLite
+		// Try to convert legacy driver options and log errors if any
+		var err error
+		ds.datasourceName, err = replaceCompatDSNOptions(ds.logger, ds.datasourceName)
+		if err != nil {
+			return err
+		}
+	}
+
 	db, err := sql.Open(ds.driverName, ds.datasourceName)
 	if err != nil {
 		return err
@@ -60,11 +62,14 @@ func (ds *databaseStorage) Start(context.Context, component.Host) error {
 
 // Shutdown closes the connection to the database
 func (ds *databaseStorage) Shutdown(context.Context) error {
+	if ds.db == nil {
+		return nil
+	}
 	return ds.db.Close()
 }
 
 // GetClient returns a storage client for an individual component
-func (ds *databaseStorage) GetClient(ctx context.Context, kind component.Kind, ent config.ComponentID, name string) (storage.Client, error) {
+func (ds *databaseStorage) GetClient(ctx context.Context, kind component.Kind, ent component.ID, name string) (storage.Client, error) {
 	var fullName string
 	if name == "" {
 		fullName = fmt.Sprintf("%s_%s_%s", kindString(kind), ent.Type(), ent.Name())
@@ -72,7 +77,7 @@ func (ds *databaseStorage) GetClient(ctx context.Context, kind component.Kind, e
 		fullName = fmt.Sprintf("%s_%s_%s_%s", kindString(kind), ent.Type(), ent.Name(), name)
 	}
 	fullName = strings.ReplaceAll(fullName, " ", "")
-	return newClient(ctx, ds.db, fullName)
+	return newClient(ctx, ds.logger, ds.db, ds.driverName, fullName)
 }
 
 func kindString(k component.Kind) string {
@@ -85,6 +90,8 @@ func kindString(k component.Kind) string {
 		return "exporter"
 	case component.KindExtension:
 		return "extension"
+	case component.KindConnector:
+		return "connector"
 	default:
 		return "other" // not expected
 	}

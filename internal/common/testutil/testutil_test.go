@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package testutil
 
@@ -37,6 +26,7 @@ func TestGetAvailableLocalAddress(t *testing.T) {
 	require.Error(t, err)
 	require.Nil(t, ln1)
 }
+
 func TestGetAvailableLocalUDPAddress(t *testing.T) {
 	addr := GetAvailableLocalNetworkAddress(t, "udp")
 	// Endpoint should be free.
@@ -51,6 +41,10 @@ func TestGetAvailableLocalUDPAddress(t *testing.T) {
 	ln1, err := net.ListenPacket("udp", addr)
 	require.Error(t, err)
 	require.Nil(t, ln1)
+}
+
+func TestEndpointForPort(t *testing.T) {
+	require.Equal(t, "localhost:22", EndpointForPort(22))
 }
 
 func TestCreateExclusionsList(t *testing.T) {
@@ -74,8 +68,8 @@ Start Port    End Port
 * - Administered port exclusions.
 `
 	exclusions := createExclusionsList(t, exclusionsText)
-	require.Equal(t, len(exclusions), 2)
+	require.Len(t, exclusions, 2)
 
 	emptyExclusions := createExclusionsList(t, emptyExclusionsText)
-	require.Equal(t, len(emptyExclusions), 0)
+	require.Empty(t, emptyExclusions)
 }

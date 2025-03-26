@@ -12,7 +12,7 @@ Each test case within the suite should create a `testbed.TestCase` and supply im
 
 ## DataFlow
 
-`testbed.TestCase` uses `LoadGenerator` and `MockBackend` to further encapsulate pluggable components. `LoadGenerator` further encapsulates `DataProvider` and `DataSender` in order to generate and send data.  `MockBackend` further encapsulate `DataReceiver` and provide consume functionality.
+`testbed.TestCase` uses `LoadGenerator` and `MockBackend` to further encapsulate pluggable components. `LoadGenerator`'s reference implementation `ProviderSender`, created via `testbed.NewLoadGenerator()` further encapsulates `DataProvider` and `DataSender` in order to generate and send data. Any type satisfying the `LoadGenerator` interface can be used with `testbed.NewLoadGeneratorTestCase()` to exercise functionality beyond the single component limitation of `ProviderSender`. `MockBackend` further encapsulates `DataReceiver` and provides consume functionality.
 
 For instance, if using the existing end-to-end test, the general dataflow can be (Note that MockBackend does not really have a consumer instance, only to make it intuitive, this diagram draws it a separate module):
 
@@ -64,7 +64,7 @@ Generally, when designing a test for new exporter and receiver components, devel
   * `GenConfigYAMLStr()` - Generate a config string to place in exporter part of collector config so that it can send data to this receiver.
   * `ProtocolName()` - Return protocol name to use in collector config pipeline.
 
-* `Testing` - This part may vary from what kind of testing developers would like to do. In existing implementation, we can refer to [End-to-End testing](https://github.com/open-telemetry/opentelemetry-collector/blob/main/testbed/tests/e2e_test.go), [Metrics testing](https://github.com/open-telemetry/opentelemetry-collector/blob/main/testbed/tests/metric_test.go), [Traces testing](https://github.com/open-telemetry/opentelemetry-collector/blob/main/testbed/tests/trace_test.go), [Correctness Traces testing](https://github.com/open-telemetry/opentelemetry-collector/blob/main/testbed/correctness/traces/correctness_test.go), and [Correctness Metrics testing](https://github.com/open-telemetry/opentelemetry-collector/blob/main/testbed/correctness/metrics/metrics_correctness_test.go). For instance, if developers would like to design a trace test for a new exporter and receiver:
+* `Testing` - This part may vary from what kind of testing developers would like to do. In existing implementation, we can refer to [End-to-End testing](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/testbed/tests/e2e_test.go), [Metrics testing](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/testbed/tests/metric_test.go), [Traces testing](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/testbed/tests/trace_test.go), [Correctness Traces testing](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/testbed/correctnesstests/traces/correctness_test.go), and [Correctness Metrics testing](https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/testbed/correctnesstests/metrics/metrics_correctness_test.go). For instance, if developers would like to design a trace test for a new exporter and receiver:
 
   * ```go
     func TestTrace10kSPS(t *testing.T) {
@@ -76,8 +76,8 @@ Generally, when designing a test for new exporter and receiver components, devel
     	}{
     		{
     			"NewExporterOrReceiver",
-    			testbed.NewXXXDataSender(testbed.DefaultHost, testbed.GetAvailablePort(t)),
-    			testbed.NewXXXDataReceiver(testbed.GetAvailablePort(t)),
+    			testbed.NewXXXDataSender(testbed.DefaultHost, testutil.GetAvailablePort(t)),
+    			testbed.NewXXXDataReceiver(testutil.GetAvailablePort(t)),
     			testbed.ResourceSpec{
     				ExpectedMaxCPU: XX,
     				ExpectedMaxRAM: XX,
@@ -85,13 +85,14 @@ Generally, when designing a test for new exporter and receiver components, devel
     		},
     		...
     	}
-    
-    	processors := map[string]string{
-    		"batch": `
-      batch:
+    	processors := []ProcessorNameAndConfigBody{
+    		{
+    			Name: "batch",
+    			Body: `
+	  batch:
     `,
+			},
     	}
-    
     	for _, test := range tests {
     		t.Run(test.name, func(t *testing.T) {
     			Scenario10kItemsPerSecond(
@@ -107,29 +108,27 @@ Generally, when designing a test for new exporter and receiver components, devel
     }
     ```
 
-## Run Tests and Get Results
+## Running the tests
 
-Here providing some examples of how to run and get the results of testing.
+To run the tests, use the `e2e-test` Makefile target, which will compile the Collector and run the end-to-end test suites against it.
 
-1. Under the [collector-contrib](https://github.com/open-telemetry/opentelemetry-collector-contrib) repo, the following runs all the tests:
+### Run all tests
 
-```
-  cd ./testbed
-  ./runtests.sh
-```
-
-​	Then get the result:
-
-![collector-contrib tests result](CCRepo_result.png)
-
-2. Under the [collector-contrib](https://github.com/open-telemetry/opentelemetry-collector-contrib) repo, the following runs the correctness tests only:
+Run the following at the root of the repo:
 
 ```
-  cd ./testbed
-  TESTS_DIR=correctnesstests/metrics ./runtests.sh
+  make e2e-test
 ```
 
-Then get the result:
+### Run a particular test suite
 
-![collector correctness tests result](correctness_result.png)
+Run the following at the root of the repo:
+
+```
+  TESTS_DIR=correctnesstests/metrics make e2e-test
+```
+
+### Advanced usage
+
+A Makefile is also located at [`testbed/Makefile`](./Makefile) that offers targets to directly run certain test suites. Note that these targets will not compile the Collector before running.
 

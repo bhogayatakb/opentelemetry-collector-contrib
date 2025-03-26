@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 package syslog
 
 import (
@@ -18,11 +7,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component/componenttest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper/operatortest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/testutil"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/operatortest"
 )
 
 func TestUnmarshal(t *testing.T) {
@@ -83,7 +72,7 @@ func TestUnmarshal(t *testing.T) {
 				Expect: func() *Config {
 					cfg := NewConfig()
 					cfg.Protocol = RFC5424
-					cfg.ParseTo = entry.NewBodyField("log")
+					cfg.ParseTo = entry.RootableField{Field: entry.NewBodyField("log")}
 					return cfg
 				}(),
 			},
@@ -110,14 +99,14 @@ func TestUnmarshal(t *testing.T) {
 					parseField := entry.NewBodyField("severity_field")
 					severityParser := helper.NewSeverityConfig()
 					severityParser.ParseFrom = &parseField
-					mapping := map[interface{}]interface{}{
+					mapping := map[string]any{
 						"critical": "5xx",
 						"error":    "4xx",
 						"info":     "3xx",
 						"debug":    "2xx",
 					}
 					severityParser.Mapping = mapping
-					cfg.Config = &severityParser
+					cfg.SeverityConfig = &severityParser
 					return cfg
 				}(),
 			},
@@ -137,9 +126,102 @@ func TestUnmarshal(t *testing.T) {
 }
 
 func TestParserMissingProtocol(t *testing.T) {
-	_, err := NewConfig().Build(testutil.Logger(t))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "missing field 'protocol'")
+	set := componenttest.NewNopTelemetrySettings()
+	_, err := NewConfig().Build(set)
+	require.ErrorContains(t, err, "missing field 'protocol'")
+}
+
+func TestRFC6587ConfigOptions(t *testing.T) {
+	validFramingTrailer := NULTrailer
+	invalidFramingTrailer := "bad"
+	testCases := []struct {
+		desc        string
+		cfg         *Config
+		errContents string
+	}{
+		{
+			desc: "Octet Counting with RFC3164",
+			cfg: &Config{
+				ParserConfig: helper.NewParserConfig(operatorType, operatorType),
+				BaseConfig: BaseConfig{
+					Protocol:            RFC3164,
+					EnableOctetCounting: true,
+				},
+			},
+			errContents: "octet_counting and non_transparent_framing are only compatible with protocol rfc5424",
+		},
+		{
+			desc: "Non-Transparent-Framing with RFC3164",
+			cfg: &Config{
+				ParserConfig: helper.NewParserConfig(operatorType, operatorType),
+				BaseConfig: BaseConfig{
+					Protocol:                     RFC3164,
+					NonTransparentFramingTrailer: &validFramingTrailer,
+				},
+			},
+			errContents: "octet_counting and non_transparent_framing are only compatible with protocol rfc5424",
+		},
+		{
+			desc: "Non-Transparent-Framing and Octet counting both enabled with RFC5424",
+			cfg: &Config{
+				ParserConfig: helper.NewParserConfig(operatorType, operatorType),
+				BaseConfig: BaseConfig{
+					Protocol:                     RFC5424,
+					NonTransparentFramingTrailer: &validFramingTrailer,
+					EnableOctetCounting:          true,
+				},
+			},
+			errContents: "only one of octet_counting or non_transparent_framing can be enabled",
+		},
+		{
+			desc: "Valid Octet Counting",
+			cfg: &Config{
+				ParserConfig: helper.NewParserConfig(operatorType, operatorType),
+				BaseConfig: BaseConfig{
+					Protocol:                     RFC5424,
+					NonTransparentFramingTrailer: nil,
+					EnableOctetCounting:          true,
+				},
+			},
+			errContents: "",
+		},
+		{
+			desc: "Valid Non-Transparent-Framing Trailer",
+			cfg: &Config{
+				ParserConfig: helper.NewParserConfig(operatorType, operatorType),
+				BaseConfig: BaseConfig{
+					Protocol:                     RFC5424,
+					NonTransparentFramingTrailer: &validFramingTrailer,
+					EnableOctetCounting:          false,
+				},
+			},
+			errContents: "",
+		},
+		{
+			desc: "Invalid Non-Transparent-Framing Trailer",
+			cfg: &Config{
+				ParserConfig: helper.NewParserConfig(operatorType, operatorType),
+				BaseConfig: BaseConfig{
+					Protocol:                     RFC5424,
+					NonTransparentFramingTrailer: &invalidFramingTrailer,
+					EnableOctetCounting:          false,
+				},
+			},
+			errContents: "invalid non_transparent_framing_trailer",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			set := componenttest.NewNopTelemetrySettings()
+			_, err := tc.cfg.Build(set)
+			if tc.errContents != "" {
+				require.ErrorContains(t, err, tc.errContents)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestParserInvalidLocation(t *testing.T) {
@@ -147,7 +229,7 @@ func TestParserInvalidLocation(t *testing.T) {
 	config.Location = "not_a_location"
 	config.Protocol = RFC3164
 
-	_, err := config.Build(testutil.Logger(t))
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "failed to load location "+config.Location)
+	set := componenttest.NewNopTelemetrySettings()
+	_, err := config.Build(set)
+	require.ErrorContains(t, err, "failed to load location "+config.Location)
 }

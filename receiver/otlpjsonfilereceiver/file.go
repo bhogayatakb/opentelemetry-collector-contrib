@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package otlpjsonfilereceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/otlpjsonfilereceiver"
 
@@ -18,53 +7,56 @@ import (
 	"context"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/obsreport"
+	"go.opentelemetry.io/collector/consumer/xconsumer"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/pprofile"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/receiverhelper"
+	"go.opentelemetry.io/collector/receiver/xreceiver"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/adapter"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/fileconsumer"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/otlpjsonfilereceiver/internal/metadata"
 )
 
 const (
-	typeStr   = "otlpjsonfile"
-	stability = component.StabilityLevelAlpha
 	transport = "file"
 )
 
 // NewFactory creates a factory for file receiver
-func NewFactory() component.ReceiverFactory {
-	return component.NewReceiverFactory(
-		typeStr,
+func NewFactory() receiver.Factory {
+	return xreceiver.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		component.WithMetricsReceiver(createMetricsReceiver, stability),
-		component.WithLogsReceiver(createLogsReceiver, stability),
-		component.WithTracesReceiver(createTracesReceiver, stability))
+		xreceiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability),
+		xreceiver.WithLogs(createLogsReceiver, metadata.LogsStability),
+		xreceiver.WithTraces(createTracesReceiver, metadata.TracesStability),
+		xreceiver.WithProfiles(createProfilesReceiver, metadata.ProfilesStability))
 }
 
 type Config struct {
-	config.ReceiverSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct
-	fileconsumer.Config     `mapstructure:",squash"`
-	StorageID               *config.ComponentID `mapstructure:"storage"`
+	fileconsumer.Config `mapstructure:",squash"`
+	StorageID           *component.ID `mapstructure:"storage"`
+	ReplayFile          bool          `mapstructure:"replay_file"`
 }
 
-func createDefaultConfig() config.Receiver {
+func createDefaultConfig() component.Config {
 	return &Config{
-		Config:           *fileconsumer.NewConfig(),
-		ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
+		Config: *fileconsumer.NewConfig(),
 	}
 }
 
-type receiver struct {
+type otlpjsonfilereceiver struct {
 	input     *fileconsumer.Manager
-	id        config.ComponentID
-	storageID *config.ComponentID
+	id        component.ID
+	storageID *component.ID
 }
 
-func (f *receiver) Start(ctx context.Context, host component.Host) error {
+func (f *otlpjsonfilereceiver) Start(ctx context.Context, host component.Host) error {
 	storageClient, err := adapter.GetStorageClient(ctx, host, f.storageID, f.id)
 	if err != nil {
 		return err
@@ -72,81 +64,193 @@ func (f *receiver) Start(ctx context.Context, host component.Host) error {
 	return f.input.Start(storageClient)
 }
 
-func (f *receiver) Shutdown(ctx context.Context) error {
+func (f *otlpjsonfilereceiver) Shutdown(_ context.Context) error {
 	return f.input.Stop()
 }
 
-func createLogsReceiver(_ context.Context, settings component.ReceiverCreateSettings, configuration config.Receiver, logs consumer.Logs) (component.LogsReceiver, error) {
-	logsUnmarshaler := plog.NewJSONUnmarshaler()
-	obsrecv := obsreport.NewReceiver(obsreport.ReceiverSettings{
-		ReceiverID:             configuration.ID(),
+func createLogsReceiver(_ context.Context, settings receiver.Settings, configuration component.Config, logs consumer.Logs) (receiver.Logs, error) {
+	logsUnmarshaler := &plog.JSONUnmarshaler{}
+	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
+		ReceiverID:             settings.ID,
 		Transport:              transport,
 		ReceiverCreateSettings: settings,
-	})
-	cfg := configuration.(*Config)
-	input, err := cfg.Config.Build(settings.Logger.Sugar(), func(ctx context.Context, attrs *fileconsumer.FileAttributes, token []byte) {
-		ctx = obsrecv.StartMetricsOp(ctx)
-		l, err := logsUnmarshaler.UnmarshalLogs(token)
-		if err != nil {
-			obsrecv.EndLogsOp(ctx, typeStr, 0, err)
-		} else {
-			err = logs.ConsumeLogs(ctx, l)
-			obsrecv.EndLogsOp(ctx, typeStr, l.LogRecordCount(), err)
-		}
 	})
 	if err != nil {
 		return nil, err
 	}
+	cfg := configuration.(*Config)
+	opts := make([]fileconsumer.Option, 0)
+	if cfg.ReplayFile {
+		opts = append(opts, fileconsumer.WithNoTracking())
+	}
+	input, err := cfg.Config.Build(settings.TelemetrySettings, func(ctx context.Context, tokens [][]byte, attributes map[string]any, _ int64) error {
+		for _, token := range tokens {
+			ctx = obsrecv.StartLogsOp(ctx)
+			var l plog.Logs
+			l, err = logsUnmarshaler.UnmarshalLogs(token)
+			if err != nil {
+				obsrecv.EndLogsOp(ctx, metadata.Type.String(), 0, err)
+			} else {
+				logRecordCount := l.LogRecordCount()
+				if logRecordCount != 0 {
+					// Appends token.Attributes
+					for i := 0; i < l.ResourceLogs().Len(); i++ {
+						resourceLog := l.ResourceLogs().At(i)
+						for j := 0; j < resourceLog.ScopeLogs().Len(); j++ {
+							scopeLog := resourceLog.ScopeLogs().At(j)
+							for k := 0; k < scopeLog.LogRecords().Len(); k++ {
+								LogRecords := scopeLog.LogRecords().At(k)
+								appendToMap(attributes, LogRecords.Attributes())
+							}
+						}
+					}
+					err = logs.ConsumeLogs(ctx, l)
+				}
+				obsrecv.EndLogsOp(ctx, metadata.Type.String(), logRecordCount, err)
+			}
+		}
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
 
-	return &receiver{input: input, id: cfg.ID(), storageID: cfg.StorageID}, nil
+	return &otlpjsonfilereceiver{input: input, id: settings.ID, storageID: cfg.StorageID}, nil
 }
 
-func createMetricsReceiver(_ context.Context, settings component.ReceiverCreateSettings, configuration config.Receiver, metrics consumer.Metrics) (component.MetricsReceiver, error) {
-	metricsUnmarshaler := pmetric.NewJSONUnmarshaler()
-	obsrecv := obsreport.NewReceiver(obsreport.ReceiverSettings{
-		ReceiverID:             configuration.ID(),
+func createMetricsReceiver(_ context.Context, settings receiver.Settings, configuration component.Config, metrics consumer.Metrics) (receiver.Metrics, error) {
+	metricsUnmarshaler := &pmetric.JSONUnmarshaler{}
+	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
+		ReceiverID:             settings.ID,
 		Transport:              transport,
 		ReceiverCreateSettings: settings,
-	})
-	cfg := configuration.(*Config)
-	input, err := cfg.Config.Build(settings.Logger.Sugar(), func(ctx context.Context, attrs *fileconsumer.FileAttributes, token []byte) {
-		ctx = obsrecv.StartMetricsOp(ctx)
-		m, err := metricsUnmarshaler.UnmarshalMetrics(token)
-		if err != nil {
-			obsrecv.EndMetricsOp(ctx, typeStr, 0, err)
-		} else {
-			err = metrics.ConsumeMetrics(ctx, m)
-			obsrecv.EndMetricsOp(ctx, typeStr, m.MetricCount(), err)
-		}
 	})
 	if err != nil {
 		return nil, err
 	}
+	cfg := configuration.(*Config)
+	opts := make([]fileconsumer.Option, 0)
+	if cfg.ReplayFile {
+		opts = append(opts, fileconsumer.WithNoTracking())
+	}
+	input, err := cfg.Config.Build(settings.TelemetrySettings, func(ctx context.Context, tokens [][]byte, attributes map[string]any, _ int64) error {
+		for _, token := range tokens {
+			ctx = obsrecv.StartMetricsOp(ctx)
+			var m pmetric.Metrics
+			m, err = metricsUnmarshaler.UnmarshalMetrics(token)
+			if err != nil {
+				obsrecv.EndMetricsOp(ctx, metadata.Type.String(), 0, err)
+			} else {
+				if m.ResourceMetrics().Len() != 0 {
+					// Appends token.Attributes
+					for i := 0; i < m.ResourceMetrics().Len(); i++ {
+						resourceMetric := m.ResourceMetrics().At(i)
+						for j := 0; j < resourceMetric.ScopeMetrics().Len(); j++ {
+							ScopeMetric := resourceMetric.ScopeMetrics().At(j)
+							for k := 0; k < ScopeMetric.Metrics().Len(); k++ {
+								metric := ScopeMetric.Metrics().At(k)
+								appendToMap(attributes, metric.Metadata())
+							}
+						}
+					}
+					err = metrics.ConsumeMetrics(ctx, m)
+				}
+				obsrecv.EndMetricsOp(ctx, metadata.Type.String(), m.MetricCount(), err)
+			}
+		}
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
 
-	return &receiver{input: input, id: cfg.ID(), storageID: cfg.StorageID}, nil
+	return &otlpjsonfilereceiver{input: input, id: settings.ID, storageID: cfg.StorageID}, nil
 }
 
-func createTracesReceiver(ctx context.Context, settings component.ReceiverCreateSettings, configuration config.Receiver, traces consumer.Traces) (component.TracesReceiver, error) {
-	tracesUnmarshaler := ptrace.NewJSONUnmarshaler()
-	obsrecv := obsreport.NewReceiver(obsreport.ReceiverSettings{
-		ReceiverID:             configuration.ID(),
+func createTracesReceiver(_ context.Context, settings receiver.Settings, configuration component.Config, traces consumer.Traces) (receiver.Traces, error) {
+	tracesUnmarshaler := &ptrace.JSONUnmarshaler{}
+	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
+		ReceiverID:             settings.ID,
 		Transport:              transport,
 		ReceiverCreateSettings: settings,
-	})
-	cfg := configuration.(*Config)
-	input, err := cfg.Config.Build(settings.Logger.Sugar(), func(ctx context.Context, attrs *fileconsumer.FileAttributes, token []byte) {
-		ctx = obsrecv.StartTracesOp(ctx)
-		t, err := tracesUnmarshaler.UnmarshalTraces(token)
-		if err != nil {
-			obsrecv.EndTracesOp(ctx, typeStr, 0, err)
-		} else {
-			err = traces.ConsumeTraces(ctx, t)
-			obsrecv.EndTracesOp(ctx, typeStr, t.SpanCount(), err)
-		}
 	})
 	if err != nil {
 		return nil, err
 	}
+	cfg := configuration.(*Config)
+	opts := make([]fileconsumer.Option, 0)
+	if cfg.ReplayFile {
+		opts = append(opts, fileconsumer.WithNoTracking())
+	}
+	input, err := cfg.Config.Build(settings.TelemetrySettings, func(ctx context.Context, tokens [][]byte, attributes map[string]any, _ int64) error {
+		for _, token := range tokens {
+			ctx = obsrecv.StartTracesOp(ctx)
+			var t ptrace.Traces
+			t, err = tracesUnmarshaler.UnmarshalTraces(token)
+			if err != nil {
+				obsrecv.EndTracesOp(ctx, metadata.Type.String(), 0, err)
+			} else {
+				if t.ResourceSpans().Len() != 0 {
+					// Appends token.Attributes
+					for i := 0; i < t.ResourceSpans().Len(); i++ {
+						resourceSpan := t.ResourceSpans().At(i)
+						for j := 0; j < resourceSpan.ScopeSpans().Len(); j++ {
+							scopeSpan := resourceSpan.ScopeSpans().At(j)
+							for k := 0; k < scopeSpan.Spans().Len(); k++ {
+								spans := scopeSpan.Spans().At(k)
+								appendToMap(attributes, spans.Attributes())
+							}
+						}
+					}
+					err = traces.ConsumeTraces(ctx, t)
+				}
+				obsrecv.EndTracesOp(ctx, metadata.Type.String(), t.SpanCount(), err)
+			}
+		}
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
 
-	return &receiver{input: input, id: cfg.ID(), storageID: cfg.StorageID}, nil
+	return &otlpjsonfilereceiver{input: input, id: settings.ID, storageID: cfg.StorageID}, nil
+}
+
+func createProfilesReceiver(_ context.Context, settings receiver.Settings, configuration component.Config, profiles xconsumer.Profiles) (xreceiver.Profiles, error) {
+	profilesUnmarshaler := &pprofile.JSONUnmarshaler{}
+	cfg := configuration.(*Config)
+	opts := make([]fileconsumer.Option, 0)
+	if cfg.ReplayFile {
+		opts = append(opts, fileconsumer.WithNoTracking())
+	}
+	input, err := cfg.Config.Build(settings.TelemetrySettings, func(ctx context.Context, tokens [][]byte, _ map[string]any, _ int64) error {
+		for _, token := range tokens {
+			p, _ := profilesUnmarshaler.UnmarshalProfiles(token)
+			// TODO Append token.Attributes
+			if p.ResourceProfiles().Len() != 0 {
+				_ = profiles.ConsumeProfiles(ctx, p)
+			}
+		}
+		return nil
+	}, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	return &otlpjsonfilereceiver{input: input, id: settings.ID, storageID: cfg.StorageID}, nil
+}
+
+func appendToMap(attributes map[string]any, attr pcommon.Map) {
+	for key, value := range attributes {
+		switch v := value.(type) {
+		case string:
+			attr.PutStr(key, v)
+		case int:
+			attr.PutInt(key, int64(v))
+		case float64:
+			attr.PutDouble(key, float64(v))
+		case bool:
+			attr.PutBool(key, v)
+		}
+	}
 }

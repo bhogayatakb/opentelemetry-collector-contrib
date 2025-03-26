@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package schemaprocessor
 
@@ -20,10 +9,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/schemaprocessor/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/schemaprocessor/internal/translation"
 )
 
@@ -36,13 +27,12 @@ func TestLoadConfig(t *testing.T) {
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
 
-	sub, err := cm.Sub(config.NewComponentIDWithName(typeStr, "with-all-options").String())
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "with-all-options").String())
 	require.NoError(t, err)
-	require.NoError(t, config.UnmarshalProcessor(sub, cfg))
+	require.NoError(t, sub.Unmarshal(cfg))
 
 	assert.Equal(t, &Config{
-		ProcessorSettings:  config.NewProcessorSettings(config.NewComponentID(typeStr)),
-		HTTPClientSettings: confighttp.NewDefaultHTTPClientSettings(),
+		ClientConfig: confighttp.NewDefaultClientConfig(),
 		Prefetch: []string{
 			"https://opentelemetry.io/schemas/1.9.0",
 		},
@@ -94,6 +84,6 @@ func TestConfigurationValidation(t *testing.T) {
 			Targets: tc.target,
 		}
 
-		assert.ErrorIs(t, cfg.Validate(), tc.expectError, tc.scenario)
+		assert.ErrorIs(t, xconfmap.Validate(cfg), tc.expectError, tc.scenario)
 	}
 }

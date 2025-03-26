@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package groupbyattrsprocessor
 
@@ -19,10 +8,11 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/consumer/consumertest"
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/processor/processortest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/groupbyattrsprocessor/internal/metadata"
 )
 
 func TestDefaultConfiguration(t *testing.T) {
@@ -32,34 +22,35 @@ func TestDefaultConfiguration(t *testing.T) {
 
 func TestCreateTestProcessor(t *testing.T) {
 	cfg := &Config{
-		ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
-		GroupByKeys:       []string{"foo"},
+		GroupByKeys: []string{"foo"},
 	}
 
-	tp, err := createTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
+	tp, err := createTracesProcessor(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
 	assert.NoError(t, err)
 	assert.NotNil(t, tp)
-	assert.Equal(t, true, tp.Capabilities().MutatesData)
+	assert.True(t, tp.Capabilities().MutatesData)
 
-	lp, err := createLogsProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
+	lp, err := createLogsProcessor(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
 	assert.NoError(t, err)
 	assert.NotNil(t, lp)
-	assert.Equal(t, true, lp.Capabilities().MutatesData)
+	assert.True(t, lp.Capabilities().MutatesData)
 
-	mp, err := createMetricsProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
+	mp, err := createMetricsProcessor(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
 	assert.NoError(t, err)
 	assert.NotNil(t, mp)
-	assert.Equal(t, true, mp.Capabilities().MutatesData)
+	assert.True(t, mp.Capabilities().MutatesData)
 }
 
 func TestNoKeys(t *testing.T) {
 	// This is allowed since can be used for compacting data
-	gap := createGroupByAttrsProcessor(zap.NewNop(), []string{})
+	gap, err := createGroupByAttrsProcessor(processortest.NewNopSettings(metadata.Type), []string{})
+	require.NoError(t, err)
 	assert.NotNil(t, gap)
 }
 
 func TestDuplicateKeys(t *testing.T) {
-	gbap := createGroupByAttrsProcessor(zap.NewNop(), []string{"foo", "foo", ""})
+	gbap, err := createGroupByAttrsProcessor(processortest.NewNopSettings(metadata.Type), []string{"foo", "foo", ""})
+	require.NoError(t, err)
 	assert.NotNil(t, gbap)
 	assert.EqualValues(t, []string{"foo"}, gbap.groupByKeys)
 }

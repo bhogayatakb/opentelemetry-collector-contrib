@@ -1,395 +1,453 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package fileconsumer
 
 import (
-	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/mitchellh/mapstructure"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/component/componenttest"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/fileconsumer/internal/emittest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/fileconsumer/internal/fingerprint"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/fileconsumer/internal/reader"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/fileconsumer/matcher"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper/operatortest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/testutil"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/operatortest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/parser/regex"
 )
 
-func TestUnmarshal(t *testing.T) {
-	cases := []operatortest.ConfigUnmarshalTest{
-		{
-			Name:      "include_one",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "one.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "include_multi",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "one.log", "two.log", "three.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "include_glob",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "include_glob_double_asterisk",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "**.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "include_glob_double_asterisk_nested",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "directory/**/*.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "include_glob_double_asterisk_prefix",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "**/directory/**/*.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "include_inline",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "a.log", "b.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "include_invalid",
-			ExpectErr: true,
-			Expect:    nil,
-		},
-		{
-			Name:      "exclude_one",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				cfg.Exclude = append(cfg.Exclude, "one.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "exclude_multi",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				cfg.Exclude = append(cfg.Exclude, "one.log", "two.log", "three.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "exclude_glob",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				cfg.Exclude = append(cfg.Exclude, "not*.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "exclude_glob_double_asterisk",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				cfg.Exclude = append(cfg.Exclude, "not**.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "exclude_glob_double_asterisk_nested",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				cfg.Exclude = append(cfg.Exclude, "directory/**/not*.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "exclude_glob_double_asterisk_prefix",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				cfg.Exclude = append(cfg.Exclude, "**/directory/**/not*.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "exclude_inline",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Include = append(cfg.Include, "*.log")
-				cfg.Exclude = append(cfg.Exclude, "a.log", "b.log")
-				return cfg
-			}(),
-		},
-		{
-			Name:      "exclude_invalid",
-			ExpectErr: true,
-			Expect:    nil,
-		},
-		{
-			Name:      "poll_interval_no_units",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.PollInterval = time.Second
-				return cfg
-			}(),
-		},
-		{
-			Name:      "poll_interval_1s",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.PollInterval = time.Second
-				return cfg
-			}(),
-		},
-		{
-			Name:      "poll_interval_1ms",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.PollInterval = time.Millisecond
-				return cfg
-			}(),
-		},
-		{
-			Name:      "poll_interval_1000ms",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.PollInterval = time.Second
-				return cfg
-			}(),
-		},
-		{
-			Name:      "fingerprint_size_no_units",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.FingerprintSize = helper.ByteSize(1000)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "fingerprint_size_1kb_lower",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.FingerprintSize = helper.ByteSize(1000)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "fingerprint_size_1KB",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.FingerprintSize = helper.ByteSize(1000)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "fingerprint_size_1kib_lower",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.FingerprintSize = helper.ByteSize(1024)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "fingerprint_size_1KiB",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.FingerprintSize = helper.ByteSize(1024)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "fingerprint_size_float",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.FingerprintSize = helper.ByteSize(1100)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "multiline_line_start_string",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				newSplit := helper.NewSplitterConfig()
-				newSplit.Multiline.LineStartPattern = "Start"
-				cfg.Splitter = newSplit
-				return cfg
-			}(),
-		},
-		{
-			Name:      "multiline_line_start_special",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				newSplit := helper.NewSplitterConfig()
-				newSplit.Multiline.LineStartPattern = "%"
-				cfg.Splitter = newSplit
-				return cfg
-			}(),
-		},
-		{
-			Name:      "multiline_line_end_string",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				newSplit := helper.NewSplitterConfig()
-				newSplit.Multiline.LineEndPattern = "Start"
-				cfg.Splitter = newSplit
-				return cfg
-			}(),
-		},
-		{
-			Name:      "multiline_line_end_special",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				newSplit := helper.NewSplitterConfig()
-				newSplit.Multiline.LineEndPattern = "%"
-				cfg.Splitter = newSplit
-				return cfg
-			}(),
-		},
-		{
-			Name:      "multiline_random",
-			ExpectErr: true,
-			Expect:    nil,
-		},
-		{
-			Name:      "start_at_string",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.StartAt = "beginning"
-				return cfg
-			}(),
-		},
-		{
-			Name:      "max_concurrent_large",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.MaxConcurrentFiles = 9223372036854775807
-				return cfg
-			}(),
-		},
-		{
-			Name:      "max_log_size_mib_lower",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.MaxLogSize = helper.ByteSize(1048576)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "max_log_size_mib_upper",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.MaxLogSize = helper.ByteSize(1048576)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "max_log_size_mb_upper",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.MaxLogSize = helper.ByteSize(1048576)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "max_log_size_mb_lower",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.MaxLogSize = helper.ByteSize(1048576)
-				return cfg
-			}(),
-		},
-		{
-			Name:      "encoding_lower",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "utf-16le"}
-				return cfg
-			}(),
-		},
-		{
-			Name:      "encoding_upper",
-			ExpectErr: false,
-			Expect: func() *Config {
-				cfg := NewConfig()
-				cfg.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "UTF-16lE"}
-				return cfg
-			}(),
-		},
-	}
+func TestNewConfig(t *testing.T) {
+	cfg := NewConfig()
+	assert.Equal(t, 200*time.Millisecond, cfg.PollInterval)
+	assert.Equal(t, defaultMaxConcurrentFiles, cfg.MaxConcurrentFiles)
+	assert.Equal(t, "end", cfg.StartAt)
+	assert.Equal(t, fingerprint.DefaultSize, int(cfg.FingerprintSize))
+	assert.Equal(t, defaultEncoding, cfg.Encoding)
+	assert.Equal(t, reader.DefaultMaxLogSize, int(cfg.MaxLogSize))
+	assert.Equal(t, reader.DefaultFlushPeriod, cfg.FlushPeriod)
+	assert.True(t, cfg.IncludeFileName)
+	assert.False(t, cfg.IncludeFilePath)
+	assert.False(t, cfg.IncludeFileNameResolved)
+	assert.False(t, cfg.IncludeFilePathResolved)
+	assert.False(t, cfg.IncludeFileOwnerName)
+	assert.False(t, cfg.IncludeFileOwnerGroupName)
+	assert.False(t, cfg.IncludeFileRecordNumber)
+	assert.False(t, cfg.AcquireFSLock)
+}
 
-	for _, tc := range cases {
-		t.Run(tc.Name, func(t *testing.T) {
-			tc.RunDeprecated(t, NewConfig())
-		})
-	}
+func TestUnmarshal(t *testing.T) {
+	operatortest.ConfigUnmarshalTests{
+		DefaultConfig: newMockOperatorConfig(NewConfig()),
+		TestsFile:     filepath.Join(".", "testdata", "config.yaml"),
+		Tests: []operatortest.ConfigUnmarshalTest{
+			{
+				Name: "include_one",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "one.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "include_multi",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "one.log", "two.log", "three.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "include_glob",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "include_glob_double_asterisk",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "**.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "include_glob_double_asterisk_nested",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "directory/**/*.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "include_glob_double_asterisk_prefix",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "**/directory/**/*.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "include_inline",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "a.log", "b.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "include_string",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "aString")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_one",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "one.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_multi",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "one.log", "two.log", "three.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_glob",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "not*.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_glob_double_asterisk",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "not**.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_glob_double_asterisk_nested",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "directory/**/not*.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_glob_double_asterisk_prefix",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "**/directory/**/not*.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_inline",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "a.log", "b.log")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "exclude_string",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Include = append(cfg.Include, "*.log")
+					cfg.Exclude = append(cfg.Exclude, "aString")
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "sort_by_timestamp",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.OrderingCriteria = matcher.OrderingCriteria{
+						Regex: `err\.[a-zA-Z]\.\d+\.(?P<rotation_time>\d{10})\.log`,
+						SortBy: []matcher.Sort{
+							{
+								SortType:  "timestamp",
+								RegexKey:  "rotation_time",
+								Ascending: true,
+								Location:  "utc",
+								Layout:    `%Y%m%d%H`,
+							},
+						},
+					}
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "sort_by_numeric",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.OrderingCriteria = matcher.OrderingCriteria{
+						Regex: `err\.(?P<file_num>[a-zA-Z])\.\d+\.\d{10}\.log`,
+						SortBy: []matcher.Sort{
+							{
+								SortType: "numeric",
+								RegexKey: "file_num",
+							},
+						},
+					}
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "sort_by_group_by",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.OrderingCriteria = matcher.OrderingCriteria{
+						Regex:   `err\.(?P<file_num>[a-zA-Z])\.\d+\.\d{10}\.log`,
+						GroupBy: `err\.(?P<value>[a-z]+).[0-9]*.*log`,
+						SortBy: []matcher.Sort{
+							{
+								SortType: "numeric",
+								RegexKey: "file_num",
+							},
+						},
+					}
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "poll_interval_no_units",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.PollInterval = time.Second
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "poll_interval_1s",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.PollInterval = time.Second
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "poll_interval_1ms",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.PollInterval = time.Millisecond
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "poll_interval_1000ms",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.PollInterval = time.Second
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "fingerprint_size_no_units",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.FingerprintSize = helper.ByteSize(1000)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "fingerprint_size_1kb_lower",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.FingerprintSize = helper.ByteSize(1000)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "fingerprint_size_1KB",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.FingerprintSize = helper.ByteSize(1000)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "fingerprint_size_1kib_lower",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.FingerprintSize = helper.ByteSize(1024)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "fingerprint_size_1KiB",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.FingerprintSize = helper.ByteSize(1024)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "fingerprint_size_float",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.FingerprintSize = helper.ByteSize(1100)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "multiline_line_start_string",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.SplitConfig.LineStartPattern = "Start"
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "multiline_line_start_special",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.SplitConfig.LineStartPattern = "%"
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "multiline_line_end_string",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.SplitConfig.LineEndPattern = "Start"
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "multiline_line_end_special",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.SplitConfig.LineEndPattern = "%"
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "start_at_string",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.StartAt = "beginning"
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "max_concurrent_large",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.MaxConcurrentFiles = 9223372036854775807
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "max_log_size_mib_lower",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.MaxLogSize = helper.ByteSize(1048576)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "max_log_size_mib_upper",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.MaxLogSize = helper.ByteSize(1048576)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "max_log_size_mb_upper",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.MaxLogSize = helper.ByteSize(1048576)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "max_log_size_mb_lower",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.MaxLogSize = helper.ByteSize(1048576)
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "encoding_lower",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Encoding = "utf-16le"
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "encoding_upper",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.Encoding = "UTF-16lE"
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "max_batches_1",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.MaxBatches = 1
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "header_config",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					regexCfg := regex.NewConfig()
+					cfg.Header = &HeaderConfig{
+						Pattern: "^#",
+						MetadataOperators: []operator.Config{
+							{
+								Builder: regexCfg,
+							},
+						},
+					}
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+			{
+				Name: "ordering_criteria_top_n",
+				Expect: func() *mockOperatorConfig {
+					cfg := NewConfig()
+					cfg.OrderingCriteria = matcher.OrderingCriteria{
+						TopN: 10,
+					}
+					return newMockOperatorConfig(cfg)
+				}(),
+			},
+		},
+	}.Run(t)
 }
 
 func TestBuild(t *testing.T) {
@@ -411,126 +469,185 @@ func TestBuild(t *testing.T) {
 	}{
 		{
 			"Basic",
-			func(f *Config) {},
+			func(_ *Config) {},
 			require.NoError,
-			func(t *testing.T, f *Manager) {
-				require.Equal(t, f.finder.Include, []string{"/var/log/testpath.*"})
-				require.Equal(t, f.pollInterval, 10*time.Millisecond)
+			func(t *testing.T, m *Manager) {
+				require.Equal(t, 10*time.Millisecond, m.pollInterval)
 			},
 		},
 		{
 			"BadIncludeGlob",
-			func(f *Config) {
-				f.Include = []string{"["}
+			func(cfg *Config) {
+				cfg.Include = []string{"["}
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"BadExcludeGlob",
-			func(f *Config) {
-				f.Include = []string{"["}
+			func(cfg *Config) {
+				cfg.Include = []string{"["}
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"MultilineConfiguredStartAndEndPatterns",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineEndPattern:   "Exists",
-					LineStartPattern: "Exists",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineEndPattern = "Exists"
+				cfg.SplitConfig.LineStartPattern = "Exists"
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"MultilineConfiguredStartPattern",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineStartPattern: "START.*",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineStartPattern = "START.*"
 			},
 			require.NoError,
-			func(t *testing.T, f *Manager) {},
+			func(_ *testing.T, _ *Manager) {},
 		},
 		{
 			"MultilineConfiguredEndPattern",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineEndPattern: "END.*",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineEndPattern = "END.*"
 			},
 			require.NoError,
-			func(t *testing.T, f *Manager) {},
+			func(_ *testing.T, _ *Manager) {},
 		},
 		{
 			"InvalidEncoding",
-			func(f *Config) {
-				f.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "UTF-3233"}
+			func(cfg *Config) {
+				cfg.Encoding = "UTF-3233"
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"LineStartAndEnd",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineStartPattern: ".*",
-					LineEndPattern:   ".*",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineStartPattern = ".*"
+				cfg.SplitConfig.LineEndPattern = ".*"
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"NoLineStartOrEnd",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{}
-			},
+			func(_ *Config) {},
 			require.NoError,
-			func(t *testing.T, f *Manager) {},
+			func(_ *testing.T, _ *Manager) {},
 		},
 		{
 			"InvalidLineStartRegex",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineStartPattern: "(",
-				}
+			func(cfg *Config) {
+				cfg.SplitConfig.LineStartPattern = "("
 			},
 			require.Error,
 			nil,
 		},
 		{
 			"InvalidLineEndRegex",
-			func(f *Config) {
-				f.Splitter = helper.NewSplitterConfig()
-				f.Splitter.Multiline = helper.MultilineConfig{
-					LineEndPattern: "(",
+			func(cfg *Config) {
+				cfg.SplitConfig.LineEndPattern = "("
+			},
+			require.Error,
+			nil,
+		},
+		{
+			"InvalidStartAtDelete",
+			func(cfg *Config) {
+				cfg.StartAt = "end"
+				cfg.DeleteAfterRead = true
+			},
+			require.Error,
+			nil,
+		},
+		{
+			"InvalidMaxBatches",
+			func(cfg *Config) {
+				cfg.MaxBatches = -1
+			},
+			require.Error,
+			nil,
+		},
+		{
+			"ValidMaxBatches",
+			func(cfg *Config) {
+				cfg.MaxBatches = 6
+			},
+			require.NoError,
+			func(t *testing.T, m *Manager) {
+				require.Equal(t, 6, m.maxBatches)
+			},
+		},
+		{
+			"HeaderConfigNoFlag",
+			func(cfg *Config) {
+				cfg.Header = &HeaderConfig{}
+			},
+			require.Error,
+			nil,
+		},
+		{
+			"BadOrderingCriteriaRegex",
+			func(cfg *Config) {
+				cfg.OrderingCriteria = matcher.OrderingCriteria{
+					SortBy: []matcher.Sort{
+						{
+							SortType: "numeric",
+							RegexKey: "value",
+						},
+					},
 				}
 			},
 			require.Error,
 			nil,
 		},
+		{
+			"OrderingCriteriaTimestampMissingLayout",
+			func(cfg *Config) {
+				cfg.OrderingCriteria = matcher.OrderingCriteria{
+					Regex: ".*",
+					SortBy: []matcher.Sort{
+						{
+							SortType: "timestamp",
+							RegexKey: "value",
+						},
+					},
+				}
+			},
+			require.Error,
+			nil,
+		},
+		{
+			"GoodOrderingCriteriaTimestamp",
+			func(cfg *Config) {
+				cfg.OrderingCriteria = matcher.OrderingCriteria{
+					Regex: ".*",
+					SortBy: []matcher.Sort{
+						{
+							SortType: "timestamp",
+							RegexKey: "value",
+							Layout:   "%Y%m%d%H",
+						},
+					},
+				}
+			},
+			require.NoError,
+			func(_ *testing.T, _ *Manager) {},
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			tc := tc
 			t.Parallel()
 			cfg := basicConfig()
 			tc.modifyBaseConfig(cfg)
 
-			nopEmit := func(_ context.Context, _ *FileAttributes, _ []byte) {}
-
-			input, err := cfg.Build(testutil.Logger(t), nopEmit)
+			set := componenttest.NewNopTelemetrySettings()
+			input, err := cfg.Build(set, emittest.Nop)
 			tc.errorRequirement(t, err)
 			if err != nil {
 				return
@@ -541,75 +658,136 @@ func TestBuild(t *testing.T) {
 	}
 }
 
-func NewTestConfig() *Config {
-	cfg := NewConfig()
-	cfg.Include = []string{"i1", "i2"}
-	cfg.Exclude = []string{"e1", "e2"}
-	cfg.Splitter = helper.NewSplitterConfig()
-	cfg.Splitter.Multiline = helper.MultilineConfig{
-		LineStartPattern: "start",
-		LineEndPattern:   "end",
+func TestBuildWithHeader(t *testing.T) {
+	basicConfig := func() *Config {
+		cfg := NewConfig()
+		cfg.Include = []string{"/var/log/testpath.*"}
+		cfg.Exclude = []string{"/var/log/testpath.ex*"}
+		cfg.PollInterval = 10 * time.Millisecond
+		return cfg
 	}
-	cfg.FingerprintSize = 1024
-	cfg.Splitter.EncodingConfig = helper.EncodingConfig{Encoding: "utf16"}
-	return cfg
+
+	cases := []struct {
+		name             string
+		modifyBaseConfig func(*Config)
+		errorRequirement require.ErrorAssertionFunc
+		validate         func(*testing.T, *Manager)
+	}{
+		{
+			"InvalidHeaderConfig",
+			func(cfg *Config) {
+				cfg.Header = &HeaderConfig{}
+				cfg.StartAt = "beginning"
+			},
+			require.Error,
+			nil,
+		},
+		{
+			"HeaderConfigWithStartAtEnd",
+			func(cfg *Config) {
+				regexCfg := regex.NewConfig()
+				regexCfg.Regex = "^(?P<field>.*)"
+				cfg.Header = &HeaderConfig{
+					Pattern: "^#",
+					MetadataOperators: []operator.Config{
+						{
+							Builder: regexCfg,
+						},
+					},
+				}
+				cfg.StartAt = "end"
+			},
+			require.Error,
+			nil,
+		},
+		{
+			"ValidHeaderConfig",
+			func(cfg *Config) {
+				regexCfg := regex.NewConfig()
+				regexCfg.Regex = "^(?P<field>.*)"
+				cfg.Header = &HeaderConfig{
+					Pattern: "^#",
+					MetadataOperators: []operator.Config{
+						{
+							Builder: regexCfg,
+						},
+					},
+				}
+				cfg.StartAt = "beginning"
+			},
+			require.NoError,
+			func(t *testing.T, m *Manager) {
+				require.NotNil(t, m.readerFactory.HeaderConfig.SplitFunc)
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := basicConfig()
+			tc.modifyBaseConfig(cfg)
+
+			set := componenttest.NewNopTelemetrySettings()
+			input, err := cfg.Build(set, emittest.Nop)
+			tc.errorRequirement(t, err)
+			if err != nil {
+				return
+			}
+			tc.validate(t, input)
+		})
+	}
 }
 
-func TestMapStructureDecodeConfigWithHook(t *testing.T) {
-	expect := NewTestConfig()
-	cfgMap := map[string]interface{}{
-		"attributes":    map[string]interface{}{},
-		"resource":      map[string]interface{}{},
-		"include":       expect.Include,
-		"exclude":       expect.Exclude,
-		"poll_interval": 200 * time.Millisecond,
-		"multiline": map[string]interface{}{
-			"line_start_pattern": expect.Splitter.Multiline.LineStartPattern,
-			"line_end_pattern":   expect.Splitter.Multiline.LineEndPattern,
-		},
-		"force_flush_period":   500 * time.Millisecond,
-		"include_file_name":    true,
-		"include_file_path":    false,
-		"start_at":             "end",
-		"fingerprint_size":     "1024",
-		"max_log_size":         "1mib",
-		"max_concurrent_files": 1024,
-		"encoding":             "utf16",
-	}
-
-	var actual Config
-	dc := &mapstructure.DecoderConfig{Result: &actual, DecodeHook: helper.JSONUnmarshalerHook()}
-	ms, err := mapstructure.NewDecoder(dc)
-	require.NoError(t, err)
-	err = ms.Decode(cfgMap)
-	require.NoError(t, err)
-	require.Equal(t, expect, &actual)
+// includeDir is a builder-like helper for quickly setting up a test config
+func (c *Config) includeDir(dir string) *Config {
+	c.Include = append(c.Include, fmt.Sprintf("%s/*", dir))
+	return c
 }
 
-func TestMapStructureDecodeConfig(t *testing.T) {
-	expect := NewTestConfig()
-	cfgMap := map[string]interface{}{
-		"attributes":    map[string]interface{}{},
-		"resource":      map[string]interface{}{},
-		"include":       expect.Include,
-		"exclude":       expect.Exclude,
-		"poll_interval": 200 * time.Millisecond,
-		"multiline": map[string]interface{}{
-			"line_start_pattern": expect.Splitter.Multiline.LineStartPattern,
-			"line_end_pattern":   expect.Splitter.Multiline.LineEndPattern,
+// withHeader is a builder-like helper for quickly setting up a test config header
+func (c *Config) withHeader(headerMatchPattern, extractRegex string) *Config {
+	regexOpConfig := regex.NewConfig()
+	regexOpConfig.Regex = extractRegex
+
+	c.Header = &HeaderConfig{
+		Pattern: headerMatchPattern,
+		MetadataOperators: []operator.Config{
+			{
+				Builder: regexOpConfig,
+			},
 		},
-		"include_file_name":    true,
-		"include_file_path":    false,
-		"start_at":             "end",
-		"fingerprint_size":     1024,
-		"max_log_size":         1024 * 1024,
-		"max_concurrent_files": 1024,
-		"encoding":             "utf16",
-		"force_flush_period":   500 * time.Millisecond,
 	}
 
-	var actual Config
-	err := mapstructure.Decode(cfgMap, &actual)
-	require.NoError(t, err)
-	require.Equal(t, expect, &actual)
+	return c
+}
+
+// withGzipFileSuffix is a builder-like helper for quickly setting up support for gzip compressed log files
+func (c *Config) withGzip() *Config {
+	c.Compression = "gzip"
+	return c
+}
+
+const mockOperatorType = "mock"
+
+func init() {
+	operator.Register(mockOperatorType, func() operator.Builder { return newMockOperatorConfig(NewConfig()) })
+}
+
+type mockOperatorConfig struct {
+	helper.BasicConfig `mapstructure:",squash"`
+	*Config            `mapstructure:",squash"`
+}
+
+func newMockOperatorConfig(cfg *Config) *mockOperatorConfig {
+	return &mockOperatorConfig{
+		BasicConfig: helper.NewBasicConfig(mockOperatorType, mockOperatorType),
+		Config:      cfg,
+	}
+}
+
+// This function is impelmented for compatibility with operatortest
+// but is not meant to be used directly
+func (h *mockOperatorConfig) Build(_ component.TelemetrySettings) (operator.Operator, error) {
+	panic("not impelemented")
 }

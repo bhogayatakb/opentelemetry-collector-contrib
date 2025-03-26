@@ -1,154 +1,197 @@
-// Copyright 2020 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metricstransformprocessor
 
 import (
-	metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
-	"google.golang.org/protobuf/types/known/timestamppb"
+	"fmt"
+
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
 type builder struct {
-	metric *metricspb.Metric
+	metric pmetric.Metric
+	attrs  []string
 }
 
 // metricBuilder is used to build metrics for testing
-func metricBuilder() builder {
+func metricBuilder(metricType pmetric.MetricType, name string, attrs ...string) builder {
+	m := pmetric.NewMetric()
+	switch metricType {
+	case pmetric.MetricTypeGauge:
+		m.SetEmptyGauge()
+	case pmetric.MetricTypeSum:
+		m.SetEmptySum()
+	case pmetric.MetricTypeHistogram:
+		m.SetEmptyHistogram()
+	case pmetric.MetricTypeExponentialHistogram:
+		m.SetEmptyExponentialHistogram()
+	case pmetric.MetricTypeSummary:
+		m.SetEmptySummary()
+	}
+	m.SetName(name)
 	return builder{
-		metric: &metricspb.Metric{
-			MetricDescriptor: &metricspb.MetricDescriptor{},
-		},
+		metric: m,
+		attrs:  attrs,
 	}
 }
 
-// setName sets the name of the metric
-func (b builder) setName(name string) builder {
-	b.metric.MetricDescriptor.Name = name
+func (b builder) addDescription(description string) builder {
+	b.metric.SetDescription(description)
 	return b
 }
 
-// setLabels sets the labels for the metric
-func (b builder) setLabels(labels []string) builder {
-	labelKeys := make([]*metricspb.LabelKey, len(labels))
-	for i, l := range labels {
-		labelKeys[i] = &metricspb.LabelKey{
-			Key: l,
+func (b builder) addIntDatapoint(start, ts pcommon.Timestamp, val int64, attrValues ...string) builder {
+	dp := b.addNumberDatapoint(start, ts, attrValues)
+	dp.SetIntValue(val)
+	return b
+}
+
+func (b builder) addDoubleDatapoint(start, ts pcommon.Timestamp, val float64, attrValues ...string) builder {
+	dp := b.addNumberDatapoint(start, ts, attrValues)
+	dp.SetDoubleValue(val)
+	return b
+}
+
+func (b builder) setAttrs(attrs pcommon.Map, attrValues []string) {
+	if len(attrValues) != len(b.attrs) {
+		panic(
+			fmt.Sprintf(
+				"not enough attributes, expected %d attributes but got %s",
+				len(b.attrs),
+				attrValues),
+		)
+	}
+	for i, a := range b.attrs {
+		attrs.PutStr(a, attrValues[i])
+	}
+}
+
+func (b builder) addNumberDatapoint(start, ts pcommon.Timestamp, attrValues []string) pmetric.NumberDataPoint {
+	var dp pmetric.NumberDataPoint
+	switch t := b.metric.Type(); t {
+	case pmetric.MetricTypeGauge:
+		dp = b.metric.Gauge().DataPoints().AppendEmpty()
+	case pmetric.MetricTypeSum:
+		dp = b.metric.Sum().DataPoints().AppendEmpty()
+	default:
+		panic(t.String())
+	}
+	b.setAttrs(dp.Attributes(), attrValues)
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	return dp
+}
+
+func (b builder) addHistogramDatapoint(start, ts pcommon.Timestamp, count uint64, sum float64, bounds []float64,
+	buckets []uint64, attrValues ...string,
+) builder {
+	if b.metric.Type() != pmetric.MetricTypeHistogram {
+		panic(b.metric.Type().String())
+	}
+	dp := b.metric.Histogram().DataPoints().AppendEmpty()
+	b.setAttrs(dp.Attributes(), attrValues)
+	dp.SetCount(count)
+	dp.SetSum(sum)
+	dp.ExplicitBounds().FromRaw(bounds)
+	dp.BucketCounts().FromRaw(buckets)
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	return b
+}
+
+func (b builder) addHistogramDatapointWithMinMaxAndExemplars(start, ts pcommon.Timestamp, count uint64, sum, minVal, maxVal float64,
+	bounds []float64, buckets []uint64, exemplarValues []float64, attrValues ...string,
+) builder {
+	if b.metric.Type() != pmetric.MetricTypeHistogram {
+		panic(b.metric.Type().String())
+	}
+	dp := b.metric.Histogram().DataPoints().AppendEmpty()
+	b.setAttrs(dp.Attributes(), attrValues)
+	dp.SetCount(count)
+	dp.SetSum(sum)
+	dp.SetMin(minVal)
+	dp.SetMax(maxVal)
+	dp.ExplicitBounds().FromRaw(bounds)
+	dp.BucketCounts().FromRaw(buckets)
+	for ei := 0; ei < len(exemplarValues); ei++ {
+		exemplar := dp.Exemplars().AppendEmpty()
+		exemplar.SetTimestamp(ts)
+		exemplar.SetDoubleValue(exemplarValues[ei])
+	}
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	return b
+}
+
+type expHistogramConfig struct {
+	count          uint64
+	sum            float64
+	min            float64
+	max            float64
+	zeroThreshold  float64
+	zeroCount      uint64
+	scale          int32
+	positiveOffset int32
+	positiveCount  []uint64
+	negativeOffset int32
+	negativeCount  []uint64
+	exemplarValues []float64
+}
+
+func (b builder) addExpHistogramDatapoint(config expHistogramConfig) builder {
+	if b.metric.Type() != pmetric.MetricTypeExponentialHistogram {
+		panic(b.metric.Type().String())
+	}
+	dp := b.metric.ExponentialHistogram().DataPoints().AppendEmpty()
+	dp.SetCount(config.count)
+	dp.SetSum(config.sum)
+	dp.SetMin(config.min)
+	dp.SetMax(config.max)
+	dp.SetZeroThreshold(config.zeroThreshold)
+	dp.SetZeroCount(config.zeroCount)
+	dp.SetScale(config.scale)
+	dp.Positive().SetOffset(config.positiveOffset)
+	dp.Positive().BucketCounts().FromRaw(config.positiveCount)
+	dp.Negative().SetOffset(config.negativeOffset)
+	dp.Negative().BucketCounts().FromRaw(config.negativeCount)
+	for ei := 0; ei < len(config.exemplarValues); ei++ {
+		exemplar := dp.Exemplars().AppendEmpty()
+		exemplar.SetTimestamp(1)
+		exemplar.SetDoubleValue(config.exemplarValues[ei])
+	}
+	dp.SetStartTimestamp(1)
+	dp.SetTimestamp(1)
+	return b
+}
+
+func buildExpHistogramBucket(m map[int]uint64) []uint64 {
+	if len(m) == 0 {
+		return []uint64{}
+	}
+	maxIndex := 0
+	for index := range m {
+		if index > maxIndex {
+			maxIndex = index
 		}
 	}
-	b.metric.MetricDescriptor.LabelKeys = labelKeys
-	return b
-}
 
-// addTimeseries adds new timeseries with the labelValuesVal and startTimestamp
-func (b builder) addTimeseries(startTimestampSeconds int64, labelValuesVal []string) builder {
-	labelValues := make([]*metricspb.LabelValue, len(labelValuesVal))
-	for i, v := range labelValuesVal {
-		labelValues[i] = &metricspb.LabelValue{
-			Value:    v,
-			HasValue: true,
-		}
+	result := make([]uint64, maxIndex+1)
+	for index, count := range m {
+		result[index] = count
 	}
 
-	var startTimestamp *timestamppb.Timestamp
-	if startTimestampSeconds != 0 {
-		startTimestamp = &timestamppb.Timestamp{Seconds: startTimestampSeconds}
-	}
-
-	timeseries := &metricspb.TimeSeries{
-		StartTimestamp: startTimestamp,
-		LabelValues:    labelValues,
-		Points:         nil,
-	}
-	b.metric.Timeseries = append(b.metric.Timeseries, timeseries)
-	return b
-}
-
-// setDataType sets the data type of this metric
-func (b builder) setDataType(dataType metricspb.MetricDescriptor_Type) builder {
-	b.metric.MetricDescriptor.Type = dataType
-	return b
+	return result
 }
 
 // setUnit sets the unit of this metric
 func (b builder) setUnit(unit string) builder {
-	b.metric.MetricDescriptor.Unit = unit
-	return b
-}
-
-// addInt64Point adds a int64 point to the tidx-th timseries
-func (b builder) addInt64Point(tidx int, val int64, timestampVal int64) builder {
-	point := &metricspb.Point{
-		Timestamp: &timestamppb.Timestamp{
-			Seconds: timestampVal,
-			Nanos:   0,
-		},
-		Value: &metricspb.Point_Int64Value{
-			Int64Value: val,
-		},
-	}
-	b.metric.Timeseries[tidx].Points = append(b.metric.Timeseries[tidx].Points, point)
-	return b
-}
-
-// addDoublePoint adds a double point to the tidx-th timseries
-func (b builder) addDoublePoint(tidx int, val float64, timestampVal int64) builder {
-	point := &metricspb.Point{
-		Timestamp: &timestamppb.Timestamp{
-			Seconds: timestampVal,
-			Nanos:   0,
-		},
-		Value: &metricspb.Point_DoubleValue{
-			DoubleValue: val,
-		},
-	}
-	b.metric.Timeseries[tidx].Points = append(b.metric.Timeseries[tidx].Points, point)
-	return b
-}
-
-// addDistributionPoints adds a distribution point to the tidx-th timseries
-func (b builder) addDistributionPoints(tidx int, count int64, sum float64, bounds []float64, bucketsVal []int64) builder {
-	buckets := make([]*metricspb.DistributionValue_Bucket, len(bucketsVal))
-	for buIdx, bucket := range bucketsVal {
-		buckets[buIdx] = &metricspb.DistributionValue_Bucket{
-			Count: bucket,
-		}
-	}
-	point := &metricspb.Point{
-		Timestamp: &timestamppb.Timestamp{
-			Seconds: 1,
-			Nanos:   0,
-		},
-		Value: &metricspb.Point_DistributionValue{
-			DistributionValue: &metricspb.DistributionValue{
-				BucketOptions: &metricspb.DistributionValue_BucketOptions{
-					Type: &metricspb.DistributionValue_BucketOptions_Explicit_{
-						Explicit: &metricspb.DistributionValue_BucketOptions_Explicit{
-							Bounds: bounds,
-						},
-					},
-				},
-				Count:   count,
-				Sum:     sum,
-				Buckets: buckets,
-			},
-		},
-	}
-	b.metric.Timeseries[tidx].Points = append(b.metric.Timeseries[tidx].Points, point)
+	b.metric.SetUnit(unit)
 	return b
 }
 
 // Build builds from the builder to the final metric
-func (b builder) build() *metricspb.Metric {
+func (b builder) build() pmetric.Metric {
 	return b.metric
 }

@@ -1,44 +1,37 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package attributesprocessor
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/processor/processortest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/attraction"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterconfig"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterconfig"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/attributesprocessor/internal/metadata"
 )
 
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		id       config.ComponentID
-		expected config.Processor
+		id       component.ID
+		expected component.Config
 	}{
 		{
-			id: config.NewComponentIDWithName(typeStr, "insert"),
+			id: component.NewIDWithName(metadata.Type, "insert"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "attribute1", Value: 123, Action: attraction.INSERT},
@@ -48,9 +41,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "update"),
+			id: component.NewIDWithName(metadata.Type, "update"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "boo", FromAttribute: "foo", Action: attraction.UPDATE},
@@ -60,9 +52,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "upsert"),
+			id: component.NewIDWithName(metadata.Type, "upsert"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "region", Value: "planet-earth", Action: attraction.UPSERT},
@@ -72,9 +63,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "delete"),
+			id: component.NewIDWithName(metadata.Type, "delete"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "credit_card", Action: attraction.DELETE},
@@ -84,9 +74,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "hash"),
+			id: component.NewIDWithName(metadata.Type, "hash"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "user.email", Action: attraction.HASH},
@@ -95,9 +84,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "excludemulti"),
+			id: component.NewIDWithName(metadata.Type, "excludemulti"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				MatchConfig: filterconfig.MatchConfig{
 					Exclude: &filterconfig.MatchProperties{
 						Config:   *createConfig(filterset.Strict),
@@ -117,9 +105,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "includeservices"),
+			id: component.NewIDWithName(metadata.Type, "includeservices"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				MatchConfig: filterconfig.MatchConfig{
 					Include: &filterconfig.MatchProperties{
 						Config:   *createConfig(filterset.Regexp),
@@ -135,9 +122,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "selectiveprocessing"),
+			id: component.NewIDWithName(metadata.Type, "selectiveprocessing"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				MatchConfig: filterconfig.MatchConfig{
 					Include: &filterconfig.MatchProperties{
 						Config:   *createConfig(filterset.Strict),
@@ -159,9 +145,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "complex"),
+			id: component.NewIDWithName(metadata.Type, "complex"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "operation", Value: "default", Action: attraction.INSERT},
@@ -172,9 +157,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "example"),
+			id: component.NewIDWithName(metadata.Type, "example"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "db.table", Action: attraction.DELETE},
@@ -187,9 +171,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "regexp"),
+			id: component.NewIDWithName(metadata.Type, "regexp"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				MatchConfig: filterconfig.MatchConfig{
 					Include: &filterconfig.MatchProperties{
 						Config:   *createConfig(filterset.Regexp),
@@ -209,9 +192,8 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "convert"),
+			id: component.NewIDWithName(metadata.Type, "convert"),
 			expected: &Config{
-				ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
 				Settings: attraction.Settings{
 					Actions: []attraction.ActionKeyValue{
 						{Key: "http.status_code", Action: attraction.CONVERT, ConvertedType: "int"},
@@ -231,10 +213,30 @@ func TestLoadConfig(t *testing.T) {
 
 			sub, err := cm.Sub(tt.id.String())
 			require.NoError(t, err)
-			require.NoError(t, config.UnmarshalProcessor(sub, cfg))
+			require.NoError(t, sub.Unmarshal(cfg))
 
-			assert.NoError(t, cfg.Validate())
+			assert.NoError(t, xconfmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}
+}
+
+func TestSpanConfigUsedWithmetrics(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+	require.NoError(t, err)
+
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	sub, err := cm.Sub("attributes/servicesmetrics")
+
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+
+	assert.NoError(t, xconfmap.Validate(cfg))
+
+	sink := consumertest.MetricsSink{}
+
+	_, err = NewFactory().CreateMetrics(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, &sink)
+	require.Error(t, err)
 }

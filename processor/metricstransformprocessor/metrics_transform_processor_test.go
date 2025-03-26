@@ -1,37 +1,22 @@
-// Copyright 2020 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metricstransformprocessor
 
 import (
 	"context"
-	"sort"
-	"strings"
 	"testing"
 
-	metricspb "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
-	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/processor/processorhelper"
+	"go.opentelemetry.io/collector/processor/processortest"
 	"go.uber.org/zap"
-	"google.golang.org/protobuf/testing/protocmp"
 
-	internaldata "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/opencensus"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/metricstransformprocessor/internal/metadata"
 )
 
 func TestMetricsTransformProcessor(t *testing.T) {
@@ -44,75 +29,98 @@ func TestMetricsTransformProcessor(t *testing.T) {
 				logger:     zap.NewExample(),
 			}
 
-			mtp, err := processorhelper.NewMetricsProcessor(
+			mtp, err := processorhelper.NewMetrics(
 				context.Background(),
-				componenttest.NewNopProcessorCreateSettings(),
-				&Config{
-					ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
-				},
+				processortest.NewNopSettings(metadata.Type),
+				&Config{},
 				next,
 				p.processMetrics,
 				processorhelper.WithCapabilities(consumerCapabilities))
 			require.NoError(t, err)
 
 			caps := mtp.Capabilities()
-			assert.Equal(t, true, caps.MutatesData)
-			ctx := context.Background()
+			assert.True(t, caps.MutatesData)
 
 			// process
-			cErr := mtp.ConsumeMetrics(context.Background(), internaldata.OCToMetrics(nil, nil, test.in))
+			inMetrics := pmetric.NewMetrics()
+			inMetricsSlice := inMetrics.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics()
+			for _, m := range test.in {
+				m.MoveTo(inMetricsSlice.AppendEmpty())
+			}
+			cErr := mtp.ConsumeMetrics(context.Background(), inMetrics)
 			assert.NoError(t, cErr)
 
 			// get and check results
 			got := next.AllMetrics()
-			require.Equal(t, 1, len(got))
-			var actualOutMetrics []*metricspb.Metric
+			require.Len(t, got, 1)
+			gotMetricsSlice := pmetric.NewMetricSlice()
 			if got[0].ResourceMetrics().Len() > 0 {
-				_, _, actualOutMetrics = internaldata.ResourceMetricsToOC(got[0].ResourceMetrics().At(0))
-			}
-			require.Equal(t, len(test.out), len(actualOutMetrics))
-
-			for idx, out := range test.out {
-				actualOut := actualOutMetrics[idx]
-				sortTimeseries(actualOut.Timeseries)
-				sortTimeseries(out.Timeseries)
-				if diff := cmp.Diff(actualOut, out, protocmp.Transform()); diff != "" {
-					t.Errorf("Unexpected difference:\n%v", diff)
-				}
+				gotMetricsSlice = got[0].ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics()
 			}
 
-			assert.NoError(t, mtp.Shutdown(ctx))
+			require.Equal(t, len(test.out), gotMetricsSlice.Len())
+			for i, expected := range test.out {
+				assert.Equal(t, sortDataPoints(expected), sortDataPoints(gotMetricsSlice.At(i)))
+			}
 		})
 	}
 }
 
-func sortTimeseries(ts []*metricspb.TimeSeries) {
-	sort.Slice(ts, func(i, j int) bool {
-		return strings.Compare(ts[i].String(), ts[j].String()) < 0
-	})
+func sortDataPoints(m pmetric.Metric) pmetric.Metric {
+	switch m.Type() {
+	case pmetric.MetricTypeSum:
+		m.Sum().DataPoints().Sort(lessNumberDatapoint)
+	case pmetric.MetricTypeGauge:
+		m.Gauge().DataPoints().Sort(lessNumberDatapoint)
+	case pmetric.MetricTypeHistogram:
+		m.Histogram().DataPoints().Sort(lessHistogramDatapoint)
+	}
+	return m
 }
 
-func BenchmarkMetricsTransformProcessorRenameMetrics(b *testing.B) {
-	const metricCount = 1000
+func lessNumberDatapoint(a, b pmetric.NumberDataPoint) bool {
+	if a.StartTimestamp() != b.StartTimestamp() {
+		return a.StartTimestamp() < b.StartTimestamp()
+	}
+	if a.Timestamp() != b.Timestamp() {
+		return a.Timestamp() < b.Timestamp()
+	}
+	if a.IntValue() != b.IntValue() {
+		return a.IntValue() < b.IntValue()
+	}
+	if a.DoubleValue() != b.DoubleValue() {
+		return a.DoubleValue() < b.DoubleValue()
+	}
+	return lessAttributes(a.Attributes(), b.Attributes())
+}
 
-	transforms := []internalTransform{
-		{
-			MetricIncludeFilter: internalFilterStrict{include: "metric"},
-			Action:              Insert,
-			NewName:             "new/metric1",
-		},
+func lessHistogramDatapoint(a, b pmetric.HistogramDataPoint) bool {
+	if a.StartTimestamp() != b.StartTimestamp() {
+		return a.StartTimestamp() < b.StartTimestamp()
+	}
+	if a.Timestamp() != b.Timestamp() {
+		return a.Timestamp() < b.Timestamp()
+	}
+	if a.Count() != b.Count() {
+		return a.Count() < b.Count()
+	}
+	if a.Sum() != b.Sum() {
+		return a.Sum() < b.Sum()
+	}
+	return lessAttributes(a.Attributes(), b.Attributes())
+}
+
+func lessAttributes(a, b pcommon.Map) bool {
+	if a.Len() != b.Len() {
+		return a.Len() < b.Len()
 	}
 
-	in := make([]*metricspb.Metric, metricCount)
-	for i := 0; i < metricCount; i++ {
-		in[i] = metricBuilder().setName("metric1").build()
+	var res bool
+	for k, v := range a.All() {
+		bv, ok := b.Get(k)
+		if !ok || v.Str() < bv.Str() {
+			return true
+		}
 	}
-	p := newMetricsTransformProcessor(nil, transforms)
-	mtp, _ := processorhelper.NewMetricsProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), &Config{}, consumertest.NewNop(), p.processMetrics)
-
-	b.ResetTimer()
-
-	for i := 0; i < b.N; i++ {
-		assert.NoError(b, mtp.ConsumeMetrics(context.Background(), internaldata.OCToMetrics(nil, nil, in)))
-	}
+	return res
 }

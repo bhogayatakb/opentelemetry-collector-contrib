@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package sigv4authextension // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/sigv4authextension"
 
@@ -80,9 +69,12 @@ func (si *signingRoundTripper) signRequest(req *http.Request) (*http.Request, er
 
 	// Use user provided service/region if specified, use inferred service/region if not, then sign the request
 	service, region := si.inferServiceAndRegion(req2)
+	if si.credsProvider == nil {
+		return nil, fmt.Errorf("a credentials provider is not set")
+	}
 	creds, err := (*si.credsProvider).Retrieve(req2.Context())
 	if err != nil {
-		return nil, errBadCreds
+		return nil, fmt.Errorf("error retrieving credentials: %w", err)
 	}
 
 	err = si.signer.SignHTTP(req.Context(), creds, req2, payloadHash, service, region, time.Now())
@@ -122,27 +114,32 @@ func (si *signingRoundTripper) inferServiceAndRegion(r *http.Request) (service s
 	service = si.service
 	region = si.region
 
-	h := r.Host
-	if strings.HasPrefix(h, "aps-workspaces") {
-		if service == "" {
-			service = "aps"
-		}
-		rest := h[strings.Index(h, ".")+1:]
-		if region == "" {
-			region = rest[0:strings.Index(rest, ".")]
-		}
-	} else if strings.HasPrefix(h, "search-") {
-		if service == "" {
-			service = "es"
-		}
-		rest := h[strings.Index(h, ".")+1:]
-		if region == "" {
-			region = rest[0:strings.Index(rest, ".")]
-		}
+	host := r.Host
+	switch {
+	case strings.HasPrefix(host, "aps-workspaces"):
+		service, region = extractServiceAndRegion(service, region, host, "aps")
+	case strings.HasPrefix(host, "search-"):
+		service, region = extractServiceAndRegion(service, region, host, "es")
+	case strings.HasPrefix(host, "logs"):
+		service, region = extractServiceAndRegion(service, region, host, "logs")
+	case strings.HasPrefix(host, "xray"):
+		service, region = extractServiceAndRegion(service, region, host, "xray")
 	}
 
 	if service == "" || region == "" {
 		si.logger.Warn("Unable to infer region and/or service from the URL. Please provide values for region and/or service in the collector configuration.")
+	}
+
+	return service, region
+}
+
+func extractServiceAndRegion(service, region, host, defaultService string) (string, string) {
+	if service == "" {
+		service = defaultService
+	}
+	rest := host[strings.Index(host, ".")+1:]
+	if region == "" {
+		region = rest[0:strings.Index(rest, ".")]
 	}
 	return service, region
 }

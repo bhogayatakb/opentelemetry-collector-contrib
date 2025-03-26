@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package awsemfexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awsemfexporter"
 
@@ -22,7 +11,7 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.27.0"
 	"go.uber.org/zap"
 )
 
@@ -31,6 +20,7 @@ var patternKeyToAttributeMap = map[string]string{
 	"TaskId":               "aws.ecs.task.id",
 	"NodeName":             "k8s.node.name",
 	"PodName":              "pod",
+	"ServiceName":          "service.name",
 	"ContainerInstanceId":  "aws.ecs.container.instance.id",
 	"TaskDefinitionFamily": "aws.ecs.task.family",
 }
@@ -52,10 +42,9 @@ func replacePatternWithAttrValue(s, patternKey string, attrMap map[string]string
 			return replace(s, pattern, value, logger)
 		} else if value, ok := attrMap[patternKeyToAttributeMap[patternKey]]; ok {
 			return replace(s, pattern, value, logger)
-		} else {
-			logger.Debug("No resource attribute found for pattern " + pattern)
-			return strings.ReplaceAll(s, pattern, "undefined"), false
 		}
+		logger.Debug("No resource attribute found for pattern " + pattern)
+		return strings.ReplaceAll(s, pattern, "undefined"), false
 	}
 	return s, true
 }
@@ -69,17 +58,17 @@ func replace(s, pattern string, value string, logger *zap.Logger) (string, bool)
 }
 
 // getNamespace retrieves namespace for given set of metrics from user config.
-func getNamespace(rm *pmetric.ResourceMetrics, namespace string) string {
+func getNamespace(rm pmetric.ResourceMetrics, namespace string) string {
 	if len(namespace) == 0 {
 		serviceName, svcNameOk := rm.Resource().Attributes().Get(conventions.AttributeServiceName)
 		serviceNamespace, svcNsOk := rm.Resource().Attributes().Get(conventions.AttributeServiceNamespace)
 		switch {
-		case svcNameOk && svcNsOk && serviceName.Type() == pcommon.ValueTypeString && serviceNamespace.Type() == pcommon.ValueTypeString:
-			namespace = fmt.Sprintf("%s/%s", serviceNamespace.StringVal(), serviceName.StringVal())
-		case svcNameOk && serviceName.Type() == pcommon.ValueTypeString:
-			namespace = serviceName.StringVal()
-		case svcNsOk && serviceNamespace.Type() == pcommon.ValueTypeString:
-			namespace = serviceNamespace.StringVal()
+		case svcNameOk && svcNsOk && serviceName.Type() == pcommon.ValueTypeStr && serviceNamespace.Type() == pcommon.ValueTypeStr:
+			namespace = fmt.Sprintf("%s/%s", serviceNamespace.Str(), serviceName.Str())
+		case svcNameOk && serviceName.Type() == pcommon.ValueTypeStr:
+			namespace = serviceName.Str()
+		case svcNsOk && serviceNamespace.Type() == pcommon.ValueTypeStr:
+			namespace = serviceNamespace.Str()
 		}
 	}
 
@@ -90,7 +79,7 @@ func getNamespace(rm *pmetric.ResourceMetrics, namespace string) string {
 }
 
 // getLogInfo retrieves the log group and log stream names from a given set of metrics.
-func getLogInfo(rm *pmetric.ResourceMetrics, cWNamespace string, config *Config) (string, string, bool) {
+func getLogInfo(rm pmetric.ResourceMetrics, cWNamespace string, config *Config) (string, string, bool) {
 	var logGroup, logStream string
 	groupReplaced := true
 	streamReplaced := true
@@ -131,13 +120,15 @@ func dedupDimensions(dimensions [][]string) (deduped [][]string) {
 // The returned dimensions are sorted in alphabetical order within each dimension set
 func dimensionRollup(dimensionRollupOption string, labels map[string]string) [][]string {
 	var rollupDimensionArray [][]string
-	var dimensionZero []string
+
+	// Empty dimension must be always present in a roll up.
+	dimensionZero := []string{}
 
 	instrLibName, hasOTelKey := labels[oTellibDimensionKey]
 	if hasOTelKey {
 		// If OTel key exists in labels, add it as a zero dimension but remove it
 		// temporarily from labels as it is not an original label
-		dimensionZero = []string{oTellibDimensionKey}
+		dimensionZero = append(dimensionZero, oTellibDimensionKey)
 		delete(labels, oTellibDimensionKey)
 	}
 
@@ -174,9 +165,8 @@ func unixNanoToMilliseconds(timestamp pcommon.Timestamp) int64 {
 func attrMaptoStringMap(attrMap pcommon.Map) map[string]string {
 	strMap := make(map[string]string, attrMap.Len())
 
-	attrMap.Range(func(k string, v pcommon.Value) bool {
+	for k, v := range attrMap.All() {
 		strMap[k] = v.AsString()
-		return true
-	})
+	}
 	return strMap
 }

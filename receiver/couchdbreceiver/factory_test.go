@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package couchdbreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/couchdbreceiver"
 
@@ -19,15 +8,17 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
 	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/receiver/receivertest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/couchdbreceiver/internal/metadata"
 )
 
 func TestType(t *testing.T) {
 	factory := NewFactory()
 	ft := factory.Type()
-	require.EqualValues(t, "couchdb", ft)
+	require.EqualValues(t, metadata.Type, ft)
 }
 
 func TestValidConfig(t *testing.T) {
@@ -37,10 +28,10 @@ func TestValidConfig(t *testing.T) {
 	cfg.Password = "otel"
 
 	require.EqualValues(t, defaultEndpoint, cfg.Endpoint)
-	require.NoError(t, cfg.Validate())
+	require.NoError(t, xconfmap.Validate(cfg))
 }
 
-func TestCreateMetricsReceiver(t *testing.T) {
+func TestCreateMetrics(t *testing.T) {
 	testCases := []struct {
 		desc string
 		run  func(t *testing.T)
@@ -52,26 +43,12 @@ func TestCreateMetricsReceiver(t *testing.T) {
 
 				_, err := createMetricsReceiver(
 					context.Background(),
-					componenttest.NewNopReceiverCreateSettings(),
+					receivertest.NewNopSettings(metadata.Type),
 					createDefaultConfig(),
 					consumertest.NewNop(),
 				)
 
 				require.NoError(t, err)
-
-			},
-		},
-		{
-			desc: "Nil consumer",
-			run: func(t *testing.T) {
-				t.Parallel()
-				_, err := createMetricsReceiver(
-					context.Background(),
-					componenttest.NewNopReceiverCreateSettings(),
-					createDefaultConfig(),
-					nil,
-				)
-				require.ErrorIs(t, err, component.ErrNilNextConsumer)
 			},
 		},
 	}

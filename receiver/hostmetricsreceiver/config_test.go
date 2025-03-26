@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package hostmetricsreceiver
 
@@ -19,15 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
-	"go.opentelemetry.io/collector/service/servicetest"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterset"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/cpuscraper"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/diskscraper"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/filesystemscraper"
@@ -37,87 +25,106 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/pagingscraper"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/processesscraper"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/processscraper"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/systemscraper"
 )
 
 func TestLoadConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
+	t.Parallel()
+
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
 	require.NoError(t, err)
 
-	factory := NewFactory()
-	factories.Receivers[typeStr] = factory
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
-
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
-
-	assert.Equal(t, len(cfg.Receivers), 2)
-
-	r0 := cfg.Receivers[config.NewComponentID(typeStr)]
-	defaultConfigCPUScraper := factory.CreateDefaultConfig()
-	defaultConfigCPUScraper.(*Config).Scrapers = map[string]internal.Config{
-		cpuscraper.TypeStr: (&cpuscraper.Factory{}).CreateDefaultConfig(),
-	}
-
-	assert.Equal(t, defaultConfigCPUScraper, r0)
-
-	r1 := cfg.Receivers[config.NewComponentIDWithName(typeStr, "customname")].(*Config)
-	expectedConfig := &Config{
-		ScraperControllerSettings: scraperhelper.ScraperControllerSettings{
-			ReceiverSettings:   config.NewReceiverSettings(config.NewComponentIDWithName(typeStr, "customname")),
-			CollectionInterval: 30 * time.Second,
-		},
-		Scrapers: map[string]internal.Config{
-			cpuscraper.TypeStr:  (&cpuscraper.Factory{}).CreateDefaultConfig(),
-			diskscraper.TypeStr: (&diskscraper.Factory{}).CreateDefaultConfig(),
-			loadscraper.TypeStr: (func() internal.Config {
-				cfg := (&loadscraper.Factory{}).CreateDefaultConfig()
-				cfg.(*loadscraper.Config).CPUAverage = true
-				return cfg
-			})(),
-			filesystemscraper.TypeStr: (&filesystemscraper.Factory{}).CreateDefaultConfig(),
-			memoryscraper.TypeStr:     (&memoryscraper.Factory{}).CreateDefaultConfig(),
-			networkscraper.TypeStr: (func() internal.Config {
-				cfg := (&networkscraper.Factory{}).CreateDefaultConfig()
-				cfg.(*networkscraper.Config).Include = networkscraper.MatchConfig{
-					Interfaces: []string{"test1"},
-					Config:     filterset.Config{MatchType: "strict"},
+	tests := []struct {
+		id       component.ID
+		expected component.Config
+	}{
+		{
+			id: component.NewID(metadata.Type),
+			expected: func() component.Config {
+				cfg := createDefaultConfig().(*Config)
+				cpu := cpuscraper.NewFactory()
+				cfg.Scrapers = map[component.Type]component.Config{
+					cpu.Type(): func() component.Config {
+						return cpu.CreateDefaultConfig()
+					}(),
 				}
 				return cfg
-			})(),
-			processesscraper.TypeStr: (&processesscraper.Factory{}).CreateDefaultConfig(),
-			pagingscraper.TypeStr:    (&pagingscraper.Factory{}).CreateDefaultConfig(),
-			processscraper.TypeStr: (func() internal.Config {
-				cfg := (&processscraper.Factory{}).CreateDefaultConfig()
-				cfg.(*processscraper.Config).Include = processscraper.MatchConfig{
-					Names:  []string{"test2", "test3"},
-					Config: filterset.Config{MatchType: "regexp"},
-				}
-				return cfg
-			})(),
+			}(),
+		},
+		{
+			id: component.NewIDWithName(metadata.Type, "customname"),
+			expected: &Config{
+				MetadataCollectionInterval: 5 * time.Minute,
+				ControllerConfig: scraperhelper.ControllerConfig{
+					CollectionInterval: 30 * time.Second,
+					InitialDelay:       time.Second,
+				},
+				Scrapers: map[component.Type]component.Config{
+					component.MustNewType("cpu"):  cpuscraper.NewFactory().CreateDefaultConfig(),
+					component.MustNewType("disk"): diskscraper.NewFactory().CreateDefaultConfig(),
+					component.MustNewType("load"): (func() component.Config {
+						cfg := loadscraper.NewFactory().CreateDefaultConfig()
+						cfg.(*loadscraper.Config).CPUAverage = true
+						return cfg
+					})(),
+					component.MustNewType("filesystem"): filesystemscraper.NewFactory().CreateDefaultConfig(),
+					component.MustNewType("memory"):     memoryscraper.NewFactory().CreateDefaultConfig(),
+					component.MustNewType("network"): (func() component.Config {
+						cfg := networkscraper.NewFactory().CreateDefaultConfig()
+						cfg.(*networkscraper.Config).Include = networkscraper.MatchConfig{
+							Interfaces: []string{"test1"},
+							Config:     filterset.Config{MatchType: "strict"},
+						}
+						return cfg
+					})(),
+					component.MustNewType("processes"): processesscraper.NewFactory().CreateDefaultConfig(),
+					component.MustNewType("paging"):    pagingscraper.NewFactory().CreateDefaultConfig(),
+					component.MustNewType("process"): (func() component.Config {
+						cfg := processscraper.NewFactory().CreateDefaultConfig()
+						cfg.(*processscraper.Config).Include = processscraper.MatchConfig{
+							Names:  []string{"test2", "test3"},
+							Config: filterset.Config{MatchType: "regexp"},
+						}
+						return cfg
+					})(),
+					component.MustNewType("system"): systemscraper.NewFactory().CreateDefaultConfig(),
+				},
+			},
 		},
 	}
 
-	assert.Equal(t, expectedConfig, r1)
+	for _, tt := range tests {
+		t.Run(tt.id.String(), func(t *testing.T) {
+			factory := NewFactory()
+			cfg := factory.CreateDefaultConfig()
+
+			sub, err := cm.Sub(tt.id.String())
+			require.NoError(t, err)
+			require.NoError(t, sub.Unmarshal(cfg))
+
+			require.NoError(t, xconfmap.Validate(cfg))
+			require.Equal(t, tt.expected, cfg)
+		})
+	}
 }
 
 func TestLoadInvalidConfig_NoScrapers(t *testing.T) {
-	factories, err := componenttest.NopFactories()
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config-noscrapers.yaml"))
 	require.NoError(t, err)
 
-	factory := NewFactory()
-	factories.Receivers[typeStr] = factory
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config-noscrapers.yaml"), factories)
-
-	require.EqualError(t, err, "receiver \"hostmetrics\" has invalid configuration: must specify at least one scraper when using hostmetrics receiver")
+	require.NoError(t, cm.Unmarshal(cfg))
+	require.ErrorContains(t, xconfmap.Validate(cfg), "must specify at least one scraper when using hostmetrics receiver")
 }
 
 func TestLoadInvalidConfig_InvalidScraperKey(t *testing.T) {
-	factories, err := componenttest.NopFactories()
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config-invalidscraperkey.yaml"))
 	require.NoError(t, err)
 
-	factory := NewFactory()
-	factories.Receivers[typeStr] = factory
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config-invalidscraperkey.yaml"), factories)
-
-	require.EqualError(t, err, "error reading receivers configuration for \"hostmetrics\": invalid scraper key: invalidscraperkey")
+	require.ErrorContains(t, cm.Unmarshal(cfg), "invalid scraper key: invalidscraperkey")
 }

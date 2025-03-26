@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package logzioexporter
 
@@ -21,31 +10,34 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/confighttp"
-	"go.opentelemetry.io/collector/config/configtest"
-	"go.opentelemetry.io/collector/service/servicetest"
+	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/exporter/exportertest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/logzioexporter/internal/metadata"
 )
 
 func TestCreateDefaultConfig(t *testing.T) {
 	cfg := createDefaultConfig()
 	assert.NotNil(t, cfg, "failed to create default config")
-	assert.NoError(t, configtest.CheckConfigStruct(cfg))
+	assert.NoError(t, componenttest.CheckConfigStruct(cfg))
 }
 
-func TestCreateTracesExporter(t *testing.T) {
-
-	factories, err := componenttest.NopFactories()
+func TestCreateTraces(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
 	require.NoError(t, err)
 	factory := NewFactory()
-	factories.Exporters[typeStr] = factory
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
-	require.NoError(t, err)
+	cfg := factory.CreateDefaultConfig()
 
-	params := componenttest.NewNopExporterCreateSettings()
-	exporter, err := factory.CreateTracesExporter(context.Background(), params, cfg.Exporters[config.NewComponentIDWithName(typeStr, "2")])
-	assert.Nil(t, err)
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "2").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+
+	params := exportertest.NewNopSettings(metadata.Type)
+	exporter, err := factory.CreateTraces(context.Background(), params, cfg)
+	assert.NoError(t, err)
 	assert.NotNil(t, exporter)
 }
 
@@ -55,25 +47,24 @@ func TestGenerateUrl(t *testing.T) {
 		region   string
 		expected string
 	}
-	var generateURLTests = []generateURLTest{
+	generateURLTests := []generateURLTest{
 		{"", "us", "https://listener.logz.io:8071/?token=token"},
 		{"", "", "https://listener.logz.io:8071/?token=token"},
-		{"https://doesnotexist.com", "", "https://doesnotexist.com"},
-		{"https://doesnotexist.com", "us", "https://doesnotexist.com"},
-		{"https://doesnotexist.com", "not-valid", "https://doesnotexist.com"},
+		{"https://nonexistent.com", "", "https://nonexistent.com"},
+		{"https://nonexistent.com", "us", "https://nonexistent.com"},
+		{"https://nonexistent.com", "not-valid", "https://nonexistent.com"},
 		{"", "not-valid", "https://listener.logz.io:8071/?token=token"},
 		{"", "US", "https://listener.logz.io:8071/?token=token"},
 		{"", "Us", "https://listener.logz.io:8071/?token=token"},
 		{"", "EU", "https://listener-eu.logz.io:8071/?token=token"},
 	}
 	for _, test := range generateURLTests {
+		clientConfig := confighttp.NewDefaultClientConfig()
+		clientConfig.Endpoint = test.endpoint
 		cfg := &Config{
-			Region:           test.region,
-			Token:            "token",
-			ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-			HTTPClientSettings: confighttp.HTTPClientSettings{
-				Endpoint: test.endpoint,
-			},
+			Region:       test.region,
+			Token:        "token",
+			ClientConfig: clientConfig,
 		}
 		output, _ := generateEndpoint(cfg)
 		require.Equal(t, test.expected, output)
@@ -85,7 +76,7 @@ func TestGetListenerURL(t *testing.T) {
 		arg1     string
 		expected string
 	}
-	var getListenerURLTests = []getListenerURLTest{
+	getListenerURLTests := []getListenerURLTest{
 		{"us", "https://listener.logz.io:8071"},
 		{"eu", "https://listener-eu.logz.io:8071"},
 		{"au", "https://listener-au.logz.io:8071"},
@@ -100,6 +91,6 @@ func TestGetListenerURL(t *testing.T) {
 	}
 	for _, test := range getListenerURLTests {
 		output := getListenerURL(test.arg1)
-		require.Equal(t, output, test.expected)
+		require.Equal(t, test.expected, output)
 	}
 }

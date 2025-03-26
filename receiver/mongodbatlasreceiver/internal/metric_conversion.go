@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package internal // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/mongodbatlasreceiver/internal"
 
@@ -30,15 +19,79 @@ func processMeasurements(
 	var errs error
 
 	for _, meas := range measurements {
-		err := metadata.MeasurementsToMetric(mb, meas, false)
+		err := metadata.MeasurementsToMetric(mb, meas)
 		if err != nil {
 			errs = multierr.Append(errs, err)
 		}
 	}
 
+	err := calculateTotalMetrics(mb, measurements)
+	if err != nil {
+		errs = multierr.Append(errs, err)
+	}
 	if errs != nil {
 		return fmt.Errorf("errors occurred while processing measurements: %w", errs)
 	}
 
 	return nil
+}
+
+func calculateTotalMetrics(
+	mb *metadata.MetricsBuilder,
+	measurements []*mongodbatlas.Measurements,
+) error {
+	var err error
+	dptTotalMeasCombined := false
+	var dptTotalMeas *mongodbatlas.Measurements
+
+	for _, meas := range measurements {
+		switch meas.Name {
+		case "DISK_PARTITION_THROUGHPUT_READ", "DISK_PARTITION_THROUGHPUT_WRITE":
+			if dptTotalMeas == nil {
+				dptTotalMeas = cloneMeasurement(meas)
+				dptTotalMeas.Name = "DISK_PARTITION_THROUGHPUT_TOTAL"
+				continue
+			}
+
+			// Combine data point values with matching timestamps
+			for j, totalMeas := range dptTotalMeas.DataPoints {
+				if totalMeas.Timestamp != meas.DataPoints[j].Timestamp ||
+					(totalMeas.Value == nil && meas.DataPoints[j].Value == nil) {
+					continue
+				}
+				if totalMeas.Value == nil {
+					totalMeas.Value = new(float32)
+				}
+				addValue := *meas.DataPoints[j].Value
+				if meas.DataPoints[j].Value == nil {
+					addValue = 0
+				}
+				*totalMeas.Value += addValue
+				dptTotalMeasCombined = true
+			}
+		default:
+		}
+	}
+
+	if dptTotalMeasCombined {
+		err = metadata.MeasurementsToMetric(mb, dptTotalMeas)
+	}
+	return err
+}
+
+func cloneMeasurement(meas *mongodbatlas.Measurements) *mongodbatlas.Measurements {
+	clone := &mongodbatlas.Measurements{
+		Name:       meas.Name,
+		Units:      meas.Units,
+		DataPoints: make([]*mongodbatlas.DataPoints, len(meas.DataPoints)),
+	}
+
+	for i, dp := range meas.DataPoints {
+		if dp != nil {
+			newDP := *dp
+			clone.DataPoints[i] = &newDP
+		}
+	}
+
+	return clone
 }

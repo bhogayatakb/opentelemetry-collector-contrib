@@ -1,197 +1,144 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package file
 
 import (
-	"os"
-	"path/filepath"
+	"context"
+	"fmt"
+	"math"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component/componenttest"
+	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/fileconsumer"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/internal/filetest"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/testutil"
 )
 
-type fileInputBenchmark struct {
-	name   string
-	paths  []string
-	config func() *Config
-}
-
-type benchFile struct {
-	*os.File
-	log func(int)
-}
-
-func simpleTextFile(b *testing.B, file *os.File) *benchFile {
-	line := stringWithLength(49) + "\n"
-	return &benchFile{
-		File: file,
-		log: func(_ int) {
-			_, err := file.WriteString(line)
-			require.NoError(b, err)
-		},
-	}
-}
-
-func BenchmarkFileInput(b *testing.B) {
-	cases := []fileInputBenchmark{
-		{
-			name: "Single",
-			paths: []string{
-				"file0.log",
-			},
-			config: func() *Config {
-				cfg := NewConfigWithID("test_id")
-				cfg.Include = []string{
-					"file0.log",
-				}
-				return cfg
-			},
-		},
-		{
-			name: "Glob",
-			paths: []string{
-				"file0.log",
-				"file1.log",
-				"file2.log",
-				"file3.log",
-			},
-			config: func() *Config {
-				cfg := NewConfigWithID("test_id")
-				cfg.Include = []string{"file*.log"}
-				return cfg
-			},
-		},
-		{
-			name: "MultiGlob",
-			paths: []string{
-				"file0.log",
-				"file1.log",
-				"log0.log",
-				"log1.log",
-			},
-			config: func() *Config {
-				cfg := NewConfigWithID("test_id")
-				cfg.Include = []string{
-					"file*.log",
-					"log*.log",
-				}
-				return cfg
-			},
-		},
-		{
-			name: "MaxConcurrent",
-			paths: []string{
-				"file0.log",
-				"file1.log",
-				"file2.log",
-				"file3.log",
-			},
-			config: func() *Config {
-				cfg := NewConfigWithID("test_id")
-				cfg.Include = []string{
-					"file*.log",
-				}
-				cfg.MaxConcurrentFiles = 2
-				return cfg
-			},
-		},
-		{
-			name: "FngrPrntLarge",
-			paths: []string{
-				"file0.log",
-			},
-			config: func() *Config {
-				cfg := NewConfigWithID("test_id")
-				cfg.Include = []string{
-					"file*.log",
-				}
-				cfg.FingerprintSize = 10 * fileconsumer.DefaultFingerprintSize
-				return cfg
-			},
-		},
-		{
-			name: "FngrPrntSmall",
-			paths: []string{
-				"file0.log",
-			},
-			config: func() *Config {
-				cfg := NewConfigWithID("test_id")
-				cfg.Include = []string{
-					"file*.log",
-				}
-				cfg.FingerprintSize = fileconsumer.DefaultFingerprintSize / 10
-				return cfg
-			},
-		},
-	}
-
-	for _, bench := range cases {
-		b.Run(bench.name, func(b *testing.B) {
-			rootDir := b.TempDir()
-
-			var files []*benchFile
-			for _, path := range bench.paths {
-				file := openFile(b, filepath.Join(rootDir, path))
-				files = append(files, simpleTextFile(b, file))
-			}
-
-			cfg := bench.config()
-			cfg.OutputIDs = []string{"fake"}
-			for i, inc := range cfg.Include {
-				cfg.Include[i] = filepath.Join(rootDir, inc)
-			}
-			cfg.StartAt = "beginning"
-
-			op, err := cfg.Build(testutil.Logger(b))
-			require.NoError(b, err)
-
-			fakeOutput := testutil.NewFakeOutput(b)
-			err = op.SetOutputs([]operator.Operator{fakeOutput})
-			require.NoError(b, err)
-
-			// write half the lines before starting
-			mid := b.N / 2
-			for i := 0; i < mid; i++ {
-				for _, file := range files {
-					file.log(i)
-				}
-			}
-
-			b.ResetTimer()
-			err = op.Start(testutil.NewMockPersister("test"))
-			defer func() {
-				require.NoError(b, op.Stop())
-			}()
-			require.NoError(b, err)
-
-			// write the remainder of lines while running
-			go func() {
-				for i := mid; i < b.N; i++ {
-					for _, file := range files {
-						file.log(i)
-					}
-				}
-			}()
-
-			for i := 0; i < b.N*len(files); i++ {
-				<-fakeOutput.Received
-			}
+func BenchmarkReadExistingLogs(b *testing.B) {
+	for n := range 6 { // powers of 10
+		numLines := int(math.Pow(10, float64(n)))
+		b.Run(fmt.Sprintf("%d-lines", numLines), func(b *testing.B) {
+			benchmarkReadExistingLogs(b, numLines)
 		})
 	}
+}
+
+func benchmarkReadExistingLogs(b *testing.B, lines int) {
+	logFilePath := generateLogFile(b, lines)
+
+	config := NewConfig()
+	config.Include = []string{
+		logFilePath,
+	}
+	// Use aggressive poll interval so we're not measuring excess sleep time
+	config.PollInterval = time.Microsecond
+	config.StartAt = "beginning"
+
+	op, err := config.Build(componenttest.NewNopTelemetrySettings())
+	require.NoError(b, err)
+	op.SetOutputIDs([]string{benchmarkOutputID})
+
+	doneChan := make(chan struct{})
+	require.NoError(b, op.SetOutputs([]operator.Operator{newBenchmarkOutput(lines, doneChan)}))
+
+	b.ResetTimer()
+	for range b.N {
+		require.NoError(b, op.Start(testutil.NewUnscopedMockPersister()))
+
+		// Wait until all logs are read
+		if lines > 0 {
+			<-doneChan
+		}
+		require.NoError(b, op.Stop())
+	}
+}
+
+func generateLogFile(tb testing.TB, numLines int) string {
+	f := filetest.OpenTemp(tb, tb.TempDir())
+	for range numLines {
+		_, err := f.Write(filetest.TokenWithLength(999))
+		require.NoError(tb, err)
+		_, err = f.WriteString("\n")
+		require.NoError(tb, err)
+	}
+	return f.Name()
+}
+
+type benchmarkOutput struct {
+	totalLogs    int
+	logsReceived int
+	doneChan     chan<- struct{}
+}
+
+// Assert that benchmarkOutput implements the operator.Operator interface
+var _ operator.Operator = (*benchmarkOutput)(nil)
+
+func newBenchmarkOutput(totalLogs int, doneChan chan<- struct{}) *benchmarkOutput {
+	return &benchmarkOutput{
+		totalLogs: totalLogs,
+		doneChan:  doneChan,
+	}
+}
+
+// CanOutput implements operator.Operator.
+func (o *benchmarkOutput) CanOutput() bool { return false }
+
+// CanProcess implements operator.Operator.
+func (o *benchmarkOutput) CanProcess() bool { return true }
+
+// GetOutputIDs implements operator.Operator.
+func (o *benchmarkOutput) GetOutputIDs() []string { return nil }
+
+const benchmarkOutputID = "benchmark"
+
+// ID implements operator.Operator.
+func (o *benchmarkOutput) ID() string { return benchmarkOutputID }
+
+// Logger implements operator.Operator.
+func (o *benchmarkOutput) Logger() *zap.Logger { return nil }
+
+// Outputs implements operator.Operator.
+func (o *benchmarkOutput) Outputs() []operator.Operator { return nil }
+
+// SetOutputIDs implements operator.Operator.
+func (o *benchmarkOutput) SetOutputIDs([]string) {}
+
+// SetOutputs implements operator.Operator.
+func (o *benchmarkOutput) SetOutputs([]operator.Operator) error { return nil }
+
+// Start implements operator.Operator.
+func (o *benchmarkOutput) Start(operator.Persister) error {
+	return nil
+}
+
+// Stop implements operator.Operator.
+func (o *benchmarkOutput) Stop() error {
+	return nil
+}
+
+// Type implements operator.Operator.
+func (o *benchmarkOutput) Type() string { return "benchmark_output" }
+
+func (o *benchmarkOutput) Process(_ context.Context, _ *entry.Entry) error {
+	o.logsReceived++
+	if o.logsReceived == o.totalLogs {
+		o.doneChan <- struct{}{}
+		o.logsReceived = 0
+	}
+	return nil
+}
+
+func (o *benchmarkOutput) ProcessBatch(_ context.Context, entries []*entry.Entry) error {
+	o.logsReceived += len(entries)
+	if o.logsReceived >= o.totalLogs {
+		o.doneChan <- struct{}{}
+		o.logsReceived = 0
+	}
+	return nil
 }

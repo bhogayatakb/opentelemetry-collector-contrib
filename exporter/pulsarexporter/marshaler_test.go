@@ -1,15 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package pulsarexporter
 
@@ -23,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.27.0"
 )
 
 func TestDefaultTracesMarshalers(t *testing.T) {
@@ -97,8 +87,8 @@ func TestOTLPTracesJsonMarshaling(t *testing.T) {
 	span.SetName(t.Name())
 	span.SetStartTimestamp(pcommon.NewTimestampFromTime(now))
 	span.SetEndTimestamp(pcommon.NewTimestampFromTime(now.Add(time.Second)))
-	span.SetSpanID(pcommon.NewSpanID([8]byte{0, 1, 2, 3, 4, 5, 6, 7}))
-	span.SetParentSpanID(pcommon.NewSpanID([8]byte{8, 9, 10, 11, 12, 13, 14}))
+	span.SetSpanID([8]byte{0, 1, 2, 3, 4, 5, 6, 7})
+	span.SetParentSpanID([8]byte{8, 9, 10, 11, 12, 13, 14})
 
 	marshaler, ok := tracesMarshalers()["otlp_json"]
 	require.True(t, ok, "Must have otlp json marshaller")
@@ -112,23 +102,23 @@ func TestOTLPTracesJsonMarshaling(t *testing.T) {
 
 	// Since marshaling json is not guaranteed to be in order
 	// within a string, using a map to compare that the expected values are there
-	expectedJSON := map[string]interface{}{
-		"resourceSpans": []interface{}{
-			map[string]interface{}{
-				"resource": map[string]interface{}{},
-				"scopeSpans": []interface{}{
-					map[string]interface{}{
-						"scope": map[string]interface{}{},
-						"spans": []interface{}{
-							map[string]interface{}{
+	expectedMap := map[string]any{
+		"resourceSpans": []any{
+			map[string]any{
+				"resource": map[string]any{},
+				"scopeSpans": []any{
+					map[string]any{
+						"scope": map[string]any{},
+						"spans": []any{
+							map[string]any{
 								"traceId":           "",
 								"spanId":            "0001020304050607",
 								"parentSpanId":      "08090a0b0c0d0e00",
 								"name":              t.Name(),
-								"kind":              ptrace.SpanKindInternal.String(),
+								"kind":              float64(ptrace.SpanKindInternal),
 								"startTimeUnixNano": fmt.Sprint(now.UnixNano()),
 								"endTimeUnixNano":   fmt.Sprint(now.Add(time.Second).UnixNano()),
-								"status":            map[string]interface{}{},
+								"status":            map[string]any{},
 							},
 						},
 						"schemaUrl": conventions.SchemaURL,
@@ -139,9 +129,9 @@ func TestOTLPTracesJsonMarshaling(t *testing.T) {
 		},
 	}
 
-	var final map[string]interface{}
+	var final map[string]any
 	err = json.Unmarshal(payload, &final)
 	require.NoError(t, err, "Must not error marshaling expected data")
 
-	assert.Equal(t, expectedJSON, final, "Must match the expected value")
+	assert.Equal(t, expectedMap, final, "Must match the expected value")
 }

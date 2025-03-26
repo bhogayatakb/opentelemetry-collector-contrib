@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package flinkmetricsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/flinkmetricsreceiver"
 
@@ -21,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"go.opentelemetry.io/collector/component"
@@ -65,8 +55,8 @@ type flinkClient struct {
 	logger       *zap.Logger
 }
 
-func newClient(cfg *Config, host component.Host, settings component.TelemetrySettings, logger *zap.Logger) (client, error) {
-	httpClient, err := cfg.ToClient(host, settings)
+func newClient(ctx context.Context, cfg *Config, host component.Host, settings component.TelemetrySettings, logger *zap.Logger) (client, error) {
+	httpClient, err := cfg.ToClient(ctx, host, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP Client: %w", err)
 	}
@@ -140,9 +130,9 @@ func (c *flinkClient) getMetrics(ctx context.Context, path string) (*models.Metr
 	}
 
 	// Construct a get query parameter using comma-separated list of string values to select specific metrics
-	var query []string
-	for _, metricName := range *metrics {
-		query = append(query, metricName.ID)
+	query := make([]string, len(*metrics))
+	for i, metricName := range *metrics {
+		query[i] = metricName.ID
 	}
 	metricsPath := path + "?get=" + strings.Join(query, ",")
 
@@ -199,8 +189,8 @@ func (c *flinkClient) GetTaskmanagersMetrics(ctx context.Context) ([]*models.Tas
 
 // getTaskmanagersMetricsByIDs gets taskmanager metrics for each task manager id.
 func (c *flinkClient) getTaskmanagersMetricsByIDs(ctx context.Context, taskmanagerIDs *models.TaskmanagerIDsResponse) ([]*models.TaskmanagerMetrics, error) {
-	var taskmanagerInstances []*models.TaskmanagerMetrics
-	for _, taskmanager := range taskmanagerIDs.Taskmanagers {
+	taskmanagerInstances := make([]*models.TaskmanagerMetrics, len(taskmanagerIDs.Taskmanagers))
+	for i, taskmanager := range taskmanagerIDs.Taskmanagers {
 		query := fmt.Sprintf(taskmanagersMetricEndpoint, taskmanager.ID)
 		metrics, err := c.getMetrics(ctx, query)
 		if err != nil {
@@ -212,7 +202,7 @@ func (c *flinkClient) getTaskmanagersMetricsByIDs(ctx context.Context, taskmanag
 			Host:          getTaskmanagerHost(taskmanager.ID),
 			Metrics:       *metrics,
 		}
-		taskmanagerInstances = append(taskmanagerInstances, taskmanagerInstance)
+		taskmanagerInstances[i] = taskmanagerInstance
 	}
 	return taskmanagerInstances, nil
 }
@@ -239,8 +229,8 @@ func (c *flinkClient) GetJobsMetrics(ctx context.Context) ([]*models.JobMetrics,
 
 // getJobsMetricsByIDs gets jobs metrics for each job id.
 func (c *flinkClient) getJobsMetricsByIDs(ctx context.Context, jobIDs *models.JobOverviewResponse) ([]*models.JobMetrics, error) {
-	var jobInstances []*models.JobMetrics
-	for _, job := range jobIDs.Jobs {
+	jobInstances := make([]*models.JobMetrics, len(jobIDs.Jobs))
+	for i, job := range jobIDs.Jobs {
 		query := fmt.Sprintf(jobsMetricEndpoint, job.Jid)
 		metrics, err := c.getMetrics(ctx, query)
 		if err != nil {
@@ -251,7 +241,7 @@ func (c *flinkClient) getJobsMetricsByIDs(ctx context.Context, jobIDs *models.Jo
 			JobName: job.Name,
 			Metrics: *metrics,
 		}
-		jobInstances = append(jobInstances, &jobInstance)
+		jobInstances[i] = &jobInstance
 	}
 	return jobInstances, nil
 }
@@ -324,7 +314,7 @@ func (c *flinkClient) getSubtasksMetricsByIDs(ctx context.Context, jobsResponse 
 						TaskmanagerID: getTaskmanagerID(subtask.TaskmanagerID),
 						JobName:       jobsWithIDResponse.Name,
 						TaskName:      vertex.Name,
-						SubtaskIndex:  fmt.Sprintf("%v", subtask.Subtask),
+						SubtaskIndex:  strconv.Itoa(subtask.Subtask),
 						Metrics:       *subtaskMetrics,
 					})
 			}

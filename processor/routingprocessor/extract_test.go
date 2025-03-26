@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package routingprocessor
 
@@ -19,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/client"
 	"go.uber.org/zap"
 	"google.golang.org/grpc/metadata"
 )
@@ -67,6 +56,45 @@ func TestExtractorForTraces_FromContext(t *testing.T) {
 			fromAttr:      "X-Tenant",
 			expectedValue: "globex",
 		},
+		{
+			name: "value from existing HTTP attribute",
+			ctxFunc: func() context.Context {
+				return client.NewContext(context.Background(),
+					client.Info{Metadata: client.NewMetadata(map[string][]string{
+						"X-Tenant": {"acme"},
+					})})
+			},
+			fromAttr:      "X-Tenant",
+			expectedValue: "acme",
+		},
+		{
+			name: "value from existing HTTP attribute: case-insensitive",
+			ctxFunc: func() context.Context {
+				return client.NewContext(context.Background(),
+					client.Info{Metadata: client.NewMetadata(map[string][]string{
+						"X-Tenant": {"acme"},
+					})})
+			},
+			fromAttr:      "x-tenant",
+			expectedValue: "acme",
+		},
+		{
+			name:          "no values from empty context",
+			ctxFunc:       context.Background,
+			fromAttr:      "X-Tenant",
+			expectedValue: "",
+		},
+		{
+			name: "no values from existing HTTP attribute",
+			ctxFunc: func() context.Context {
+				return client.NewContext(context.Background(),
+					client.Info{Metadata: client.NewMetadata(map[string][]string{
+						"X-Tenant": {""},
+					})})
+			},
+			fromAttr:      "X-Tenant",
+			expectedValue: "",
+		},
 	}
 
 	for _, tc := range testcases {
@@ -76,51 +104,6 @@ func TestExtractorForTraces_FromContext(t *testing.T) {
 			assert.Equal(t,
 				tc.expectedValue,
 				e.extractFromContext(tc.ctxFunc()),
-			)
-		})
-	}
-}
-
-func TestExtractorForTraces_FromResourceAttribute(t *testing.T) {
-	testcases := []struct {
-		name          string
-		tracesFunc    func() ptrace.Traces
-		fromAttr      string
-		expectedValue string
-	}{
-		{
-			name: "value from resource attribute",
-			tracesFunc: func() ptrace.Traces {
-				traces := ptrace.NewTraces()
-				rSpans := traces.ResourceSpans().AppendEmpty()
-				rSpans.Resource().Attributes().
-					InsertString("k8s.namespace.name", "namespace-1")
-				return traces
-			},
-			fromAttr:      "k8s.namespace.name",
-			expectedValue: "namespace-1",
-		},
-		{
-			name: "value from resource attribute even when the same context attribute exists",
-			tracesFunc: func() ptrace.Traces {
-				traces := ptrace.NewTraces()
-				rSpans := traces.ResourceSpans().AppendEmpty()
-				rSpans.Resource().Attributes().
-					InsertString("k8s.namespace.name", "namespace-1")
-				return traces
-			},
-			fromAttr:      "k8s.namespace.name",
-			expectedValue: "namespace-1",
-		},
-	}
-
-	for _, tc := range testcases {
-		t.Run(tc.name, func(t *testing.T) {
-			e := newExtractor(tc.fromAttr, zap.NewNop())
-
-			assert.Equal(t,
-				tc.expectedValue,
-				e.extractAttrFromResource(tc.tracesFunc().ResourceSpans().At(0).Resource()),
 			)
 		})
 	}

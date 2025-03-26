@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package signalfxexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/signalfxexporter"
 
@@ -22,6 +11,7 @@ import (
 	"strings"
 
 	sfxpb "github.com/signalfx/com_signalfx_metrics_protobuf/model"
+	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/consumer/consumererror"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
@@ -44,7 +34,7 @@ func (s *sfxEventClient) pushLogsData(ctx context.Context, ld plog.Logs) (int, e
 		return 0, nil
 	}
 
-	accessToken := s.retrieveAccessToken(rls.At(0))
+	accessToken := s.retrieveAccessToken(ctx, rls.At(0))
 
 	var sfxEvents []*sfxpb.Event
 	numDroppedLogRecords := 0
@@ -69,7 +59,7 @@ func (s *sfxEventClient) pushLogsData(ctx context.Context, ld plog.Logs) (int, e
 	if !strings.HasSuffix(eventURL.Path, "v2/event") {
 		eventURL.Path = path.Join(eventURL.Path, "v2/event")
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", eventURL.String(), body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, eventURL.String(), body)
 	if err != nil {
 		return ld.LogRecordCount(), consumererror.NewPermanent(err)
 	}
@@ -115,10 +105,21 @@ func (s *sfxEventClient) encodeBody(events []*sfxpb.Event) (bodyReader io.Reader
 	return s.getReader(body)
 }
 
-func (s *sfxEventClient) retrieveAccessToken(rl plog.ResourceLogs) string {
+func (s *sfxEventClient) retrieveAccessToken(ctx context.Context, rl plog.ResourceLogs) string {
+	if !s.accessTokenPassthrough {
+		// Nothing to do if token is pass through not configured or resource is nil.
+		return ""
+	}
+
+	cl := client.FromContext(ctx)
+	ss := cl.Metadata.Get(splunk.SFxAccessTokenHeader)
+	if len(ss) > 0 {
+		return ss[0]
+	}
+
 	attrs := rl.Resource().Attributes()
-	if accessToken, ok := attrs.Get(splunk.SFxAccessTokenLabel); ok && accessToken.Type() == pcommon.ValueTypeString {
-		return accessToken.StringVal()
+	if accessToken, ok := attrs.Get(splunk.SFxAccessTokenLabel); ok && accessToken.Type() == pcommon.ValueTypeStr {
+		return accessToken.Str()
 	}
 	return ""
 }

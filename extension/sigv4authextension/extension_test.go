@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package sigv4authextension
 
@@ -47,7 +36,7 @@ func TestRoundTripper(t *testing.T) {
 	assert.NotNil(t, sa)
 
 	rt, err := sa.RoundTripper(base)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	si := rt.(*signingRoundTripper)
 	assert.Equal(t, base, si.transport)
@@ -55,16 +44,6 @@ func TestRoundTripper(t *testing.T) {
 	assert.Equal(t, cfg.Service, si.service)
 	assert.Equal(t, awsSDKInfo, si.awsSDKInfo)
 	assert.Equal(t, cfg.credsProvider, si.credsProvider)
-
-}
-
-func TestPerRPCCredentials(t *testing.T) {
-	cfg := &Config{Region: "region", Service: "service", AssumeRole: AssumeRole{ARN: "rolearn", STSRegion: "region"}}
-	sa := newSigv4Extension(cfg, "", zap.NewNop())
-
-	rpc, err := sa.PerRPCCredentials()
-	assert.Nil(t, rpc)
-	assert.Error(t, err)
 }
 
 func TestGetCredsProviderFromConfig(t *testing.T) {
@@ -114,10 +93,10 @@ func TestGetCredsProviderFromConfig(t *testing.T) {
 }
 
 func TestCloneRequest(t *testing.T) {
-	req1, err := http.NewRequest("GET", "https://example.com", nil)
+	req1, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	assert.NoError(t, err)
 
-	req2, err := http.NewRequest("GET", "https://example.com", nil)
+	req2, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	assert.NoError(t, err)
 	req2.Header.Add("Header1", "val1")
 

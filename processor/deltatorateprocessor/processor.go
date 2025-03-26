@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package deltatorateprocessor // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/deltatorateprocessor"
 
@@ -62,36 +51,30 @@ func (dtrp *deltaToRateProcessor) processMetrics(_ context.Context, md pmetric.M
 				if _, ok := dtrp.ConfiguredMetrics[metric.Name()]; !ok {
 					continue
 				}
-				if metric.DataType() != pmetric.MetricDataTypeSum || metric.Sum().AggregationTemporality() != pmetric.MetricAggregationTemporalityDelta {
+				if metric.Type() != pmetric.MetricTypeSum || metric.Sum().AggregationTemporality() != pmetric.AggregationTemporalityDelta {
 					dtrp.logger.Info(fmt.Sprintf("Configured metric for rate calculation %s is not a delta sum\n", metric.Name()))
 					continue
 				}
-				newDoubleDataPointSlice := pmetric.NewNumberDataPointSlice()
-				dataPoints := metric.Sum().DataPoints()
+				dataPointSlice := metric.Sum().DataPoints()
 
-				for i := 0; i < dataPoints.Len(); i++ {
-					fromDataPoint := dataPoints.At(i)
-					newDp := newDoubleDataPointSlice.AppendEmpty()
-					fromDataPoint.CopyTo(newDp)
+				for i := 0; i < dataPointSlice.Len(); i++ {
+					dataPoint := dataPointSlice.At(i)
 
-					durationNanos := time.Duration(fromDataPoint.Timestamp() - fromDataPoint.StartTimestamp())
+					durationNanos := time.Duration(dataPoint.Timestamp() - dataPoint.StartTimestamp())
 					var rate float64
-					switch fromDataPoint.ValueType() {
+					switch dataPoint.ValueType() {
 					case pmetric.NumberDataPointValueTypeDouble:
-						rate = calculateRate(fromDataPoint.DoubleVal(), durationNanos)
+						rate = calculateRate(dataPoint.DoubleValue(), durationNanos)
 					case pmetric.NumberDataPointValueTypeInt:
-						rate = calculateRate(float64(fromDataPoint.IntVal()), durationNanos)
+						rate = calculateRate(float64(dataPoint.IntValue()), durationNanos)
 					default:
-						return md, consumererror.NewPermanent(fmt.Errorf("invalid data point type:%d", fromDataPoint.ValueType()))
+						return md, consumererror.NewPermanent(fmt.Errorf("invalid data point type:%d", dataPoint.ValueType()))
 					}
-					newDp.SetDoubleVal(rate)
+					dataPoint.SetDoubleValue(rate)
 				}
 
-				metric.SetDataType(pmetric.MetricDataTypeGauge)
-				for d := 0; d < newDoubleDataPointSlice.Len(); d++ {
-					dp := metric.Gauge().DataPoints().AppendEmpty()
-					newDoubleDataPointSlice.At(d).CopyTo(dp)
-				}
+				// Setting the data type removed all the data points, so we must move them back to the metric.
+				dataPointSlice.MoveAndAppendTo(metric.SetEmptyGauge().DataPoints())
 			}
 		}
 	}

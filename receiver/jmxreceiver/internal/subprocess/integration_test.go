@@ -1,19 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build integration && !windows
-// +build integration,!windows
 
 package subprocess
 
@@ -26,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/process"
+	"github.com/shirou/gopsutil/v4/process"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -53,19 +41,19 @@ func TestSubprocessIntegration(t *testing.T) {
 
 func (suite *SubprocessIntegrationSuite) SetupSuite() {
 	t := suite.T()
-	scriptFile, err := os.CreateTemp("", "subproc")
+	scriptFile, err := os.CreateTemp(t.TempDir(), "subproc")
 	require.NoError(t, err)
 
 	_, err = scriptFile.Write([]byte(scriptContents))
 	require.NoError(t, err)
-	require.NoError(t, scriptFile.Chmod(0700))
+	require.NoError(t, scriptFile.Chmod(0o700))
 	scriptFile.Close()
 
 	suite.scriptPath = scriptFile.Name()
 }
 
 func (suite *SubprocessIntegrationSuite) TearDownSuite() {
-	require.NoError(suite.T(), os.Remove(suite.scriptPath))
+	suite.Require().NoError(os.Remove(suite.scriptPath))
 }
 
 // prepareSubprocess will create a Subprocess based on a temporary script.
@@ -99,7 +87,7 @@ func (suite *SubprocessIntegrationSuite) prepareSubprocess(conf *Config) (*Subpr
 			return false
 		}
 		require.NoError(t, err)
-		require.True(t, strings.HasPrefix(cmdline, expectedExecutable), fmt.Sprintf("%v doesn't have prefix %v", cmdline, expectedExecutable))
+		require.Truef(t, strings.HasPrefix(cmdline, expectedExecutable), "%v doesn't have prefix %v", cmdline, expectedExecutable)
 		procInfo = proc
 		return true
 	}
@@ -129,8 +117,10 @@ func (suite *SubprocessIntegrationSuite) TestHappyPath() {
 	defer cancel()
 
 	subprocess, procInfo, findProcessInfo := suite.prepareSubprocess(&Config{})
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 
 	assert.Eventually(t, findProcessInfo, 5*time.Second, 10*time.Millisecond)
 	require.NotNil(t, *procInfo)
@@ -146,8 +136,10 @@ func (suite *SubprocessIntegrationSuite) TestWithArgs() {
 	defer cancel()
 
 	subprocess, procInfo, findProcessInfo := suite.prepareSubprocess(&Config{Args: []string{"myArgs"}})
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 
 	require.Eventually(t, findProcessInfo, 5*time.Second, 10*time.Millisecond)
 	require.NotNil(t, *procInfo)
@@ -170,8 +162,10 @@ func (suite *SubprocessIntegrationSuite) TestWithEnvVars() {
 	}
 
 	subprocess, procInfo, findProcessInfo := suite.prepareSubprocess(config)
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 	require.Eventually(t, findProcessInfo, 5*time.Second, 10*time.Millisecond)
 	require.NotNil(t, *procInfo)
 
@@ -188,8 +182,10 @@ func (suite *SubprocessIntegrationSuite) TestWithAutoRestart() {
 
 	restartDelay := 100 * time.Millisecond
 	subprocess, procInfo, findProcessInfo := suite.prepareSubprocess(&Config{RestartOnError: true, RestartDelay: &restartDelay})
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 
 	require.Eventually(t, findProcessInfo, 5*time.Second, 10*time.Millisecond)
 	require.NotNil(t, *procInfo)
@@ -214,8 +210,10 @@ func (suite *SubprocessIntegrationSuite) TestSendingStdin() {
 	defer cancel()
 
 	subprocess, procInfo, findProcessInfo := suite.prepareSubprocess(&Config{StdInContents: "mystdincontents"})
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 
 	require.Eventually(t, findProcessInfo, 5*time.Second, 10*time.Millisecond)
 	require.NotNil(t, *procInfo)
@@ -234,12 +232,14 @@ func (suite *SubprocessIntegrationSuite) TestSendingStdinFails() {
 	subprocess := NewSubprocess(&Config{ExecutablePath: "echo", Args: []string{"finished"}}, logger)
 
 	intentionalError := fmt.Errorf("intentional failure")
-	subprocess.sendToStdIn = func(contents string, writer io.Writer) error {
+	subprocess.sendToStdIn = func(string, io.Writer) error {
 		return intentionalError
 	}
 
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 
 	matched := func() bool {
 		died := len(logObserver.FilterMessage("subprocess died").All()) == 1
@@ -259,8 +259,10 @@ func (suite *SubprocessIntegrationSuite) TestSubprocessBadExec() {
 	logger := zap.New(logCore)
 
 	subprocess := NewSubprocess(&Config{ExecutablePath: "/does/not/exist"}, logger)
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 
 	matched := func() bool {
 		return len(logObserver.FilterMessage("subprocess died").All()) == 1
@@ -278,8 +280,10 @@ func (suite *SubprocessIntegrationSuite) TestSubprocessSuccessfullyReturns() {
 	// process exit. Here we sleep before returning, but this will need to be addressed if short lived processes
 	// become an intended use case without forcing users to read stdout before closing.
 	subprocess := NewSubprocess(&Config{ExecutablePath: "sh", Args: []string{"-c", "echo finished; sleep .1"}}, zap.NewNop())
-	subprocess.Start(ctx)
-	defer subprocess.Shutdown(ctx)
+	assert.NoError(t, subprocess.Start(ctx))
+	defer func() {
+		assert.NoError(t, subprocess.Shutdown(ctx))
+	}()
 
 	matched := func() bool {
 		_, ok := <-subprocess.shutdownSignal

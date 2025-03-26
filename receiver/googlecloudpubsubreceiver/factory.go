@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package googlecloudpubsubreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudpubsubreceiver"
 
@@ -19,28 +8,28 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/obsreport"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/receiverhelper"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudpubsubreceiver/internal/metadata"
 )
 
 const (
-	typeStr              = "googlecloudpubsub"
-	stability            = component.StabilityLevelBeta
 	reportTransport      = "pubsub"
 	reportFormatProtobuf = "protobuf"
 )
 
-func NewFactory() component.ReceiverFactory {
+func NewFactory() receiver.Factory {
 	f := &pubsubReceiverFactory{
 		receivers: make(map[*Config]*pubsubReceiver),
 	}
-	return component.NewReceiverFactory(
-		typeStr,
+	return receiver.NewFactory(
+		metadata.Type,
 		f.CreateDefaultConfig,
-		component.WithTracesReceiver(f.CreateTracesReceiver, stability),
-		component.WithMetricsReceiver(f.CreateMetricsReceiver, stability),
-		component.WithLogsReceiver(f.CreateLogsReceiver, stability),
+		receiver.WithTraces(f.CreateTraces, metadata.TracesStability),
+		receiver.WithMetrics(f.CreateMetrics, metadata.MetricsStability),
+		receiver.WithLogs(f.CreateLogs, metadata.LogsStability),
 	)
 }
 
@@ -48,82 +37,84 @@ type pubsubReceiverFactory struct {
 	receivers map[*Config]*pubsubReceiver
 }
 
-func (factory *pubsubReceiverFactory) CreateDefaultConfig() config.Receiver {
-	return &Config{
-		ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
-	}
+func (factory *pubsubReceiverFactory) CreateDefaultConfig() component.Config {
+	return &Config{}
 }
 
-func (factory *pubsubReceiverFactory) ensureReceiver(params component.ReceiverCreateSettings, config config.Receiver) *pubsubReceiver {
+func (factory *pubsubReceiverFactory) ensureReceiver(settings receiver.Settings, config component.Config) (*pubsubReceiver, error) {
 	receiver := factory.receivers[config.(*Config)]
 	if receiver != nil {
-		return receiver
+		return receiver, nil
 	}
 	rconfig := config.(*Config)
-	receiver = &pubsubReceiver{
-		logger: params.Logger,
-		obsrecv: obsreport.NewReceiver(obsreport.ReceiverSettings{
-			ReceiverID:             config.ID(),
-			Transport:              reportTransport,
-			ReceiverCreateSettings: params,
-		}),
-		userAgent: strings.ReplaceAll(rconfig.UserAgent, "{{version}}", params.BuildInfo.Version),
-		config:    rconfig,
-	}
-	factory.receivers[config.(*Config)] = receiver
-	return receiver
-}
-
-func (factory *pubsubReceiverFactory) CreateTracesReceiver(
-	_ context.Context,
-	params component.ReceiverCreateSettings,
-	cfg config.Receiver,
-	consumer consumer.Traces) (component.TracesReceiver, error) {
-
-	if consumer == nil {
-		return nil, component.ErrNilNextConsumer
-	}
-	err := cfg.(*Config).validateForTrace()
+	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
+		ReceiverID:             settings.ID,
+		Transport:              reportTransport,
+		ReceiverCreateSettings: settings,
+	})
 	if err != nil {
 		return nil, err
 	}
-	receiver := factory.ensureReceiver(params, cfg)
+	receiver = &pubsubReceiver{
+		settings:  settings,
+		obsrecv:   obsrecv,
+		userAgent: strings.ReplaceAll(rconfig.UserAgent, "{{version}}", settings.BuildInfo.Version),
+		config:    rconfig,
+	}
+	factory.receivers[config.(*Config)] = receiver
+	return receiver, nil
+}
+
+func (factory *pubsubReceiverFactory) CreateTraces(
+	_ context.Context,
+	params receiver.Settings,
+	cfg component.Config,
+	consumer consumer.Traces,
+) (receiver.Traces, error) {
+	err := cfg.(*Config).validate()
+	if err != nil {
+		return nil, err
+	}
+	receiver, err := factory.ensureReceiver(params, cfg)
+	if err != nil {
+		return nil, err
+	}
 	receiver.tracesConsumer = consumer
 	return receiver, nil
 }
 
-func (factory *pubsubReceiverFactory) CreateMetricsReceiver(
+func (factory *pubsubReceiverFactory) CreateMetrics(
 	_ context.Context,
-	params component.ReceiverCreateSettings,
-	cfg config.Receiver,
-	consumer consumer.Metrics) (component.MetricsReceiver, error) {
-
-	if consumer == nil {
-		return nil, component.ErrNilNextConsumer
-	}
-	err := cfg.(*Config).validateForMetric()
+	params receiver.Settings,
+	cfg component.Config,
+	consumer consumer.Metrics,
+) (receiver.Metrics, error) {
+	err := cfg.(*Config).validate()
 	if err != nil {
 		return nil, err
 	}
-	receiver := factory.ensureReceiver(params, cfg)
+	receiver, err := factory.ensureReceiver(params, cfg)
+	if err != nil {
+		return nil, err
+	}
 	receiver.metricsConsumer = consumer
 	return receiver, nil
 }
 
-func (factory *pubsubReceiverFactory) CreateLogsReceiver(
+func (factory *pubsubReceiverFactory) CreateLogs(
 	_ context.Context,
-	params component.ReceiverCreateSettings,
-	cfg config.Receiver,
-	consumer consumer.Logs) (component.LogsReceiver, error) {
-
-	if consumer == nil {
-		return nil, component.ErrNilNextConsumer
-	}
-	err := cfg.(*Config).validateForLog()
+	params receiver.Settings,
+	cfg component.Config,
+	consumer consumer.Logs,
+) (receiver.Logs, error) {
+	err := cfg.(*Config).validate()
 	if err != nil {
 		return nil, err
 	}
-	receiver := factory.ensureReceiver(params, cfg)
+	receiver, err := factory.ensureReceiver(params, cfg)
+	if err != nil {
+		return nil, err
+	}
 	receiver.logsConsumer = consumer
 	return receiver, nil
 }

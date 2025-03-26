@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package expvarreceiver
 
@@ -19,68 +8,84 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/service/servicetest"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/expvarreceiver/internal/metadata"
 )
 
 func TestLoadConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
-	assert.NoError(t, err)
+	t.Parallel()
 
 	factory := NewFactory()
-	factories.Receivers[typeStr] = factory
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config", "config.yaml"), factories)
+	metricCfg := metadata.DefaultMetricsBuilderConfig()
+	metricCfg.Metrics.ProcessRuntimeMemstatsTotalAlloc.Enabled = true
+	metricCfg.Metrics.ProcessRuntimeMemstatsMallocs.Enabled = false
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = "http://localhost:8000/custom/path"
+	clientConfig.Timeout = time.Second * 5
+	tests := []struct {
+		id           component.ID
+		expected     component.Config
+		errorMessage string
+	}{
+		{
+			id:       component.NewIDWithName(metadata.Type, "default"),
+			expected: factory.CreateDefaultConfig(),
+		},
+		{
+			id: component.NewIDWithName(metadata.Type, "custom"),
+			expected: &Config{
+				ControllerConfig: scraperhelper.ControllerConfig{
+					CollectionInterval: 30 * time.Second,
+					InitialDelay:       time.Second,
+					Timeout:            time.Second * 5,
+				},
+				ClientConfig:         clientConfig,
+				MetricsBuilderConfig: metricCfg,
+			},
+		},
+		{
+			id:           component.NewIDWithName(metadata.Type, "bad_schemeless_endpoint"),
+			errorMessage: "scheme must be 'http' or 'https', but was 'localhost'",
+		},
+		{
+			id:           component.NewIDWithName(metadata.Type, "bad_hostless_endpoint"),
+			errorMessage: "host not found in HTTP endpoint",
+		},
+		{
+			id:           component.NewIDWithName(metadata.Type, "bad_invalid_url"),
+			errorMessage: "endpoint is not a valid URL: parse \"#$%^&*()_\": invalid URL escape \"%^&\"",
+		},
+	}
 
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
-	assert.Equal(t, 2, len(cfg.Receivers))
+	for _, tt := range tests {
+		t.Run(tt.id.String(), func(t *testing.T) {
+			cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config", "config.yaml"))
+			require.NoError(t, err)
 
-	// Validate default config
-	expectedCfg := factory.CreateDefaultConfig().(*Config)
-	expectedCfg.SetIDName("default")
+			factory := NewFactory()
+			cfg := factory.CreateDefaultConfig()
 
-	assert.Equal(t, expectedCfg, cfg.Receivers[config.NewComponentIDWithName(typeStr, "default")])
+			sub, err := cm.Sub(tt.id.String())
+			require.NoError(t, err)
+			require.NoError(t, sub.Unmarshal(cfg))
 
-	// Validate custom config
-	expectedCfg = factory.CreateDefaultConfig().(*Config)
-	expectedCfg.SetIDName("custom")
-	expectedCfg.CollectionInterval = time.Second * 30
-	expectedCfg.Endpoint = "http://localhost:8000/custom/path"
-	expectedCfg.Timeout = time.Second * 5
-	expectedCfg.MetricsConfig = metadata.DefaultMetricsSettings()
-	expectedCfg.MetricsConfig.ProcessRuntimeMemstatsTotalAlloc.Enabled = true
-	expectedCfg.MetricsConfig.ProcessRuntimeMemstatsMallocs.Enabled = false
-
-	assert.Equal(t, expectedCfg, cfg.Receivers[config.NewComponentIDWithName(typeStr, "custom")])
-}
-
-func TestFailedLoadConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
-	assert.NoError(t, err)
-
-	factory := NewFactory()
-	factories.Receivers[typeStr] = factory
-
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config", "bad_schemeless_endpoint_config.yaml"), factories)
-	assert.EqualError(t, err, "receiver \"expvar\" has invalid configuration: scheme must be 'http' or 'https', but was 'localhost'")
-
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config", "bad_hostless_endpoint_config.yaml"), factories)
-	assert.EqualError(t, err, "receiver \"expvar\" has invalid configuration: host not found in HTTP endpoint")
-
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config", "bad_invalid_url_config.yaml"), factories)
-	assert.EqualError(t, err, "receiver \"expvar\" has invalid configuration: endpoint is not a valid URL: parse \"#$%^&*()_\": invalid URL escape \"%^&\"")
-
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config", "bad_collection_interval_config.yaml"), factories)
-	assert.EqualError(t, err, "error reading receivers configuration for \"expvar\": 1 error(s) decoding:\n\n* error decoding 'collection_interval': time: invalid duration \"fourminutes\"")
-
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config", "bad_metric_config.yaml"), factories)
-	assert.EqualError(t, err, "error reading receivers configuration for \"expvar\": 1 error(s) decoding:\n\n* 'metrics.process.runtime.memstats.total_alloc' has invalid keys: invalid_field")
-
-	_, err = servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config", "bad_metric_name.yaml"), factories)
-	assert.EqualError(t, err, "error reading receivers configuration for \"expvar\": 1 error(s) decoding:\n\n* 'metrics' has invalid keys: bad_metric.name")
+			if tt.expected == nil {
+				assert.EqualError(t, xconfmap.Validate(cfg), tt.errorMessage)
+				return
+			}
+			assert.NoError(t, xconfmap.Validate(cfg))
+			if diff := cmp.Diff(tt.expected, cfg, cmpopts.IgnoreUnexported(metadata.MetricConfig{})); diff != "" {
+				t.Errorf("Config mismatch (-expected +actual):\n%s", diff)
+			}
+		})
+	}
 }

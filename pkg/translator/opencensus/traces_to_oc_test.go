@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package opencensus
 
@@ -70,12 +59,9 @@ func TestAttributesMapToOC(t *testing.T) {
 		},
 		DroppedAttributesCount: 234,
 	}
-	assert.EqualValues(t, ocAttrs,
-		attributesMapToOCSpanAttributes(
-			pcommon.NewMapFromRaw(map[string]interface{}{
-				"abc": "def",
-			}),
-			234))
+	attrs := pcommon.NewMap()
+	attrs.PutStr("abc", "def")
+	assert.EqualValues(t, ocAttrs, attributesMapToOCSpanAttributes(attrs, 234))
 
 	ocAttrs.AttributeMap["intval"] = &octrace.AttributeValue{
 		Value: &octrace.AttributeValue_IntValue{IntValue: 345},
@@ -86,15 +72,13 @@ func TestAttributesMapToOC(t *testing.T) {
 	ocAttrs.AttributeMap["doubleval"] = &octrace.AttributeValue{
 		Value: &octrace.AttributeValue_DoubleValue{DoubleValue: 4.5},
 	}
-	assert.EqualValues(t, ocAttrs,
-		attributesMapToOCSpanAttributes(pcommon.NewMapFromRaw(
-			map[string]interface{}{
-				"abc":       "def",
-				"intval":    345,
-				"boolval":   true,
-				"doubleval": 4.5,
-			}),
-			234))
+	assert.NoError(t, attrs.FromRaw(map[string]any{
+		"abc":       "def",
+		"intval":    345,
+		"boolval":   true,
+		"doubleval": 4.5,
+	}))
+	assert.EqualValues(t, ocAttrs, attributesMapToOCSpanAttributes(attrs, 234))
 }
 
 func TestSpanKindToOC(t *testing.T) {
@@ -140,13 +124,13 @@ func TestAttributesMapTOOcSameProcessAsParentSpan(t *testing.T) {
 	attr := pcommon.NewMap()
 	assert.Nil(t, attributesMapToOCSameProcessAsParentSpan(attr))
 
-	attr.UpsertBool(occonventions.AttributeSameProcessAsParentSpan, true)
+	attr.PutBool(occonventions.AttributeSameProcessAsParentSpan, true)
 	assert.True(t, proto.Equal(wrapperspb.Bool(true), attributesMapToOCSameProcessAsParentSpan(attr)))
 
-	attr.UpsertBool(occonventions.AttributeSameProcessAsParentSpan, false)
+	attr.PutBool(occonventions.AttributeSameProcessAsParentSpan, false)
 	assert.True(t, proto.Equal(wrapperspb.Bool(false), attributesMapToOCSameProcessAsParentSpan(attr)))
 
-	attr.UpsertInt(occonventions.AttributeSameProcessAsParentSpan, 13)
+	attr.PutInt(occonventions.AttributeSameProcessAsParentSpan, 13)
 	assert.Nil(t, attributesMapToOCSameProcessAsParentSpan(attr))
 }
 
@@ -361,7 +345,7 @@ func TestInternalTracesToOCTracesAndBack(t *testing.T) {
 	assert.NoError(t, err)
 	for _, td := range tds {
 		ocNode, ocResource, ocSpans := ResourceSpansToOC(td.ResourceSpans().At(0))
-		assert.Equal(t, td.SpanCount(), len(ocSpans))
+		assert.Len(t, ocSpans, td.SpanCount())
 		tdFromOC := OCToTraces(ocNode, ocResource, ocSpans)
 		assert.NotNil(t, tdFromOC)
 		assert.Equal(t, td.SpanCount(), tdFromOC.SpanCount())

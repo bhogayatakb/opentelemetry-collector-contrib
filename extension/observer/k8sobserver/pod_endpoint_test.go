@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package k8sobserver // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/k8sobserver"
 
@@ -31,7 +20,24 @@ func TestPodObjectToPortEndpoint(t *testing.T) {
 				Name:      "pod-2",
 				Namespace: "default",
 				UID:       "pod-2-UID",
-				Labels:    map[string]string{"env": "prod"}}},
+				Labels:    map[string]string{"env": "prod"},
+			},
+		},
+		{
+			ID:     "namespace/pod-2-UID/container-2",
+			Target: "1.2.3.4",
+			Details: &observer.PodContainer{
+				Name:        "container-2",
+				Image:       "container-image-2",
+				ContainerID: "a808232bb4a57d421bb16f20dc9ab2a441343cb0aae8c369dc375838c7a49fd7",
+				Pod: observer.Pod{
+					Name:      "pod-2",
+					Namespace: "default",
+					UID:       "pod-2-UID",
+					Labels:    map[string]string{"env": "prod"},
+				},
+			},
+		},
 		{
 			ID:     "namespace/pod-2-UID/https(443)",
 			Target: "1.2.3.4:443",
@@ -40,12 +46,14 @@ func TestPodObjectToPortEndpoint(t *testing.T) {
 					Name:      "pod-2",
 					Namespace: "default",
 					UID:       "pod-2-UID",
-					Labels:    map[string]string{"env": "prod"}},
+					Labels:    map[string]string{"env": "prod"},
+				},
 				Port:      443,
-				Transport: observer.ProtocolTCP}},
+				Transport: observer.ProtocolTCP,
+			},
+		},
 	}
 
 	endpoints := convertPodToEndpoints("namespace", podWithNamedPorts)
 	require.Equal(t, expectedEndpoints, endpoints)
-
 }

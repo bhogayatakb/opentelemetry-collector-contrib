@@ -1,18 +1,6 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
-// nolint:gocritic
 package ecsinfo // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awscontainerinsightreceiver/internal/ecsInfo"
 
 import (
@@ -57,7 +45,8 @@ type taskInfo struct {
 }
 
 func newECSTaskInfo(ctx context.Context, ecsTaskEndpointProvider hostIPProvider,
-	refreshInterval time.Duration, logger *zap.Logger, httpClient doer, readyC chan bool) ecsTaskInfoProvider {
+	refreshInterval time.Duration, logger *zap.Logger, httpClient doer, readyC chan bool,
+) ecsTaskInfoProvider {
 	ti := &taskInfo{
 		logger:                  logger,
 		httpClient:              httpClient,
@@ -67,7 +56,7 @@ func newECSTaskInfo(ctx context.Context, ecsTaskEndpointProvider hostIPProvider,
 	}
 
 	shouldRefresh := func() bool {
-		//keep refreshing to update task info and running task number
+		// keep refreshing to update task info and running task number
 		return true
 	}
 	go host.RefreshUntil(ctx, ti.refresh, ti.refreshInterval, shouldRefresh, 0)
@@ -91,7 +80,6 @@ func (ti *taskInfo) getTasksInfo(ctx context.Context) (ecsTasksInfo *ECSTasksInf
 }
 
 func (ti *taskInfo) refresh(ctx context.Context) {
-
 	ecsTasksInfo := ti.getTasksInfo(ctx)
 	runningTaskCount := int64(0)
 	var tasks []ECSTask
@@ -108,11 +96,10 @@ func (ti *taskInfo) refresh(ctx context.Context) {
 	ti.runningTaskCount = runningTaskCount
 	ti.runningTasksInfo = tasks
 
-	//notify cgroups that the task info is ready
+	// notify cgroups that the task info is ready
 	if len(ti.runningTasksInfo) != 0 && ti.runningTaskCount != 0 && !isClosed(ti.readyC) {
 		close(ti.readyC)
 	}
-
 }
 
 func (ti *taskInfo) getRunningTaskCount() int64 {

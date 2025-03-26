@@ -1,23 +1,12 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
-// nolint:gocritic
 package ecsinfo // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awscontainerinsightreceiver/internal/ecsInfo"
 
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -54,7 +43,7 @@ type cgroupScannerProvider interface {
 	getCPUReserved() int64
 	getMemReserved() int64
 
-	//use for test
+	// use for test
 	getCPUReservedInTask(taskID string, clusterName string) int64
 	getMEMReservedInTask(taskID string, clusterName string, containers []ECSContainer) int64
 }
@@ -97,7 +86,6 @@ func newCGroupScanner(ctx context.Context, mountConfigPath string, logger *zap.L
 }
 
 func (c *cgroupScanner) refresh() {
-
 	if c.ecsTaskInfoProvider == nil {
 		return
 	}
@@ -164,7 +152,7 @@ func (c *cgroupScanner) getMEMReservedInTask(taskID string, clusterName string, 
 	for _, container := range containers {
 		containerPath := filepath.Join(memPath, container.DockerID)
 
-		//soft limit first
+		// soft limit first
 		if softLimit, err := readInt64(containerPath, "memory.soft_limit_in_bytes"); err == nil && softLimit != kernelMagicCodeNotSet {
 			sum += softLimit
 			continue
@@ -184,7 +172,7 @@ func readString(dirpath string, file string) (string, error) {
 	// Read
 	out, err := os.ReadFile(cgroupFile)
 	if err != nil {
-		// Ignore non-existent files
+		// Ignore nonexistent files
 		log.Printf("W! readString: Failed to read %q: %s", cgroupFile, err)
 		return "", err
 	}
@@ -208,6 +196,7 @@ func readInt64(dirpath string, file string) (int64, error) {
 
 	return val, nil
 }
+
 func getCGroupMountPoint(mountConfigPath string) (string, error) {
 	f, err := os.Open(mountConfigPath)
 	if err != nil {
@@ -240,7 +229,7 @@ func getCGroupMountPoint(mountConfigPath string) (string, error) {
 			return filepath.Dir(fields[4]), nil
 		}
 	}
-	return "", fmt.Errorf("mount point not existed")
+	return "", errors.New("mount point not existed")
 }
 
 func getCGroupPathForTask(cgroupMount, controller, taskID, clusterName string) (string, error) {
@@ -280,11 +269,12 @@ func getTaskCgroupPathFromARN(arn string) (string, error) {
 	}
 
 	result = strings.Split(result[5], "/")
-	if len(result) == 2 {
+	switch len(result) {
+	case 2:
 		return result[1], nil
-	} else if len(result) == 3 {
+	case 3:
 		return result[2], nil
-	} else {
+	default:
 		return "", fmt.Errorf("invalid ecs task arn: %q", arn)
 	}
 }

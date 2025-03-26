@@ -1,16 +1,5 @@
-// Copyright OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package signalfx // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/signalfx"
 
@@ -47,7 +36,7 @@ const (
 type FromTranslator struct{}
 
 // FromMetrics converts pmetric.Metrics to SignalFx proto data points.
-func (ft *FromTranslator) FromMetrics(md pmetric.Metrics) ([]*sfxpb.DataPoint, error) {
+func (ft *FromTranslator) FromMetrics(md pmetric.Metrics, dropHistogramBuckets bool, processHistograms bool) ([]*sfxpb.DataPoint, error) {
 	var sfxDataPoints []*sfxpb.DataPoint
 
 	rms := md.ResourceMetrics()
@@ -58,7 +47,7 @@ func (ft *FromTranslator) FromMetrics(md pmetric.Metrics) ([]*sfxpb.DataPoint, e
 		for j := 0; j < rm.ScopeMetrics().Len(); j++ {
 			ilm := rm.ScopeMetrics().At(j)
 			for k := 0; k < ilm.Metrics().Len(); k++ {
-				sfxDataPoints = append(sfxDataPoints, ft.FromMetric(ilm.Metrics().At(k), extraDimensions)...)
+				sfxDataPoints = append(sfxDataPoints, ft.FromMetric(ilm.Metrics().At(k), extraDimensions, dropHistogramBuckets, processHistograms)...)
 			}
 		}
 	}
@@ -68,44 +57,57 @@ func (ft *FromTranslator) FromMetrics(md pmetric.Metrics) ([]*sfxpb.DataPoint, e
 
 // FromMetric converts pmetric.Metric to SignalFx proto data points.
 // TODO: Remove this and change signalfxexporter to us FromMetrics.
-func (ft *FromTranslator) FromMetric(m pmetric.Metric, extraDimensions []*sfxpb.Dimension) []*sfxpb.DataPoint {
+func (ft *FromTranslator) FromMetric(m pmetric.Metric, extraDimensions []*sfxpb.Dimension, dropHistogramBuckets bool, processHistograms bool) []*sfxpb.DataPoint {
 	var dps []*sfxpb.DataPoint
 
 	mt := fromMetricTypeToMetricType(m)
 
-	switch m.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	switch m.Type() {
+	case pmetric.MetricTypeGauge:
 		dps = convertNumberDataPoints(m.Gauge().DataPoints(), m.Name(), mt, extraDimensions)
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		dps = convertNumberDataPoints(m.Sum().DataPoints(), m.Name(), mt, extraDimensions)
-	case pmetric.MetricDataTypeHistogram:
-		dps = convertHistogram(m.Histogram().DataPoints(), m.Name(), mt, extraDimensions)
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeHistogram:
+		if processHistograms {
+			dps = convertHistogram(m.Histogram().DataPoints(), m.Name(), mt, extraDimensions, dropHistogramBuckets)
+		}
+	case pmetric.MetricTypeSummary:
 		dps = convertSummaryDataPoints(m.Summary().DataPoints(), m.Name(), extraDimensions)
+	case pmetric.MetricTypeExponentialHistogram:
+	case pmetric.MetricTypeEmpty:
 	}
 
 	return dps
 }
 
 func fromMetricTypeToMetricType(metric pmetric.Metric) *sfxpb.MetricType {
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	switch metric.Type() {
+	case pmetric.MetricTypeGauge:
 		return &sfxMetricTypeGauge
 
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		if !metric.Sum().IsMonotonic() {
 			return &sfxMetricTypeGauge
 		}
-		if metric.Sum().AggregationTemporality() == pmetric.MetricAggregationTemporalityDelta {
+		if metric.Sum().AggregationTemporality() == pmetric.AggregationTemporalityDelta {
 			return &sfxMetricTypeCounter
 		}
 		return &sfxMetricTypeCumulativeCounter
 
-	case pmetric.MetricDataTypeHistogram:
-		if metric.Histogram().AggregationTemporality() == pmetric.MetricAggregationTemporalityDelta {
+	case pmetric.MetricTypeHistogram:
+		if metric.Histogram().AggregationTemporality() == pmetric.AggregationTemporalityDelta {
 			return &sfxMetricTypeCounter
 		}
 		return &sfxMetricTypeCumulativeCounter
+
+	case pmetric.MetricTypeEmpty:
+		return nil
+
+	case pmetric.MetricTypeSummary:
+		return nil
+
+	case pmetric.MetricTypeExponentialHistogram:
+		return nil
 	}
 
 	return nil
@@ -120,17 +122,18 @@ func convertNumberDataPoints(in pmetric.NumberDataPointSlice, name string, mt *s
 		dp := dps.appendPoint(name, mt, fromTimestamp(inDp.Timestamp()), attributesToDimensions(inDp.Attributes(), extraDims))
 		switch inDp.ValueType() {
 		case pmetric.NumberDataPointValueTypeInt:
-			val := inDp.IntVal()
+			val := inDp.IntValue()
 			dp.Value.IntValue = &val
 		case pmetric.NumberDataPointValueTypeDouble:
-			val := inDp.DoubleVal()
+			val := inDp.DoubleValue()
 			dp.Value.DoubleValue = &val
+		case pmetric.NumberDataPointValueTypeEmpty:
 		}
 	}
 	return dps.out
 }
 
-func convertHistogram(in pmetric.HistogramDataPointSlice, name string, mt *sfxpb.MetricType, extraDims []*sfxpb.Dimension) []*sfxpb.DataPoint {
+func convertHistogram(in pmetric.HistogramDataPointSlice, name string, mt *sfxpb.MetricType, extraDims []*sfxpb.Dimension, dropHistogramBuckets bool) []*sfxpb.DataPoint {
 	var numDPs int
 	for i := 0; i < in.Len(); i++ {
 		histDP := in.At(i)
@@ -167,15 +170,20 @@ func convertHistogram(in pmetric.HistogramDataPointSlice, name string, mt *sfxpb
 		if histDP.HasMin() {
 			// Min is always a gauge.
 			minDP := dps.appendPoint(name+"_min", &sfxMetricTypeGauge, ts, dims)
-			min := histDP.Min()
-			minDP.Value.DoubleValue = &min
+			minVal := histDP.Min()
+			minDP.Value.DoubleValue = &minVal
 		}
 
 		if histDP.HasMax() {
 			// Max is always a gauge.
 			maxDP := dps.appendPoint(name+"_max", &sfxMetricTypeGauge, ts, dims)
-			max := histDP.Max()
-			maxDP.Value.DoubleValue = &max
+			maxVal := histDP.Max()
+			maxDP.Value.DoubleValue = &maxVal
+		}
+
+		// Drop Histogram Buckets if flag is set.
+		if dropHistogramBuckets {
+			continue
 		}
 
 		bounds := histDP.ExplicitBounds()
@@ -257,13 +265,12 @@ func attributesToDimensions(attributes pcommon.Map, extraDims []*sfxpb.Dimension
 	}
 	dimensionsValue := make([]sfxpb.Dimension, attributes.Len())
 	pos := 0
-	attributes.Range(func(k string, v pcommon.Value) bool {
+	for k, v := range attributes.All() {
 		dimensionsValue[pos].Key = k
 		dimensionsValue[pos].Value = v.AsString()
 		dimensions = append(dimensions, &dimensionsValue[pos])
 		pos++
-		return true
-	})
+	}
 	return dimensions
 }
 
@@ -273,10 +280,10 @@ type dpsBuilder struct {
 	pos     int
 }
 
-func newDpsBuilder(cap int) dpsBuilder {
+func newDpsBuilder(capacity int) dpsBuilder {
 	return dpsBuilder{
-		baseOut: make([]sfxpb.DataPoint, cap),
-		out:     make([]*sfxpb.DataPoint, 0, cap),
+		baseOut: make([]sfxpb.DataPoint, capacity),
+		out:     make([]*sfxpb.DataPoint, 0, capacity),
 	}
 }
 

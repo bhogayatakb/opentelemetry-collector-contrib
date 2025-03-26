@@ -1,21 +1,9 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package alibabacloudlogserviceexporter
 
 import (
-	"reflect"
 	"sort"
 	"testing"
 
@@ -32,9 +20,10 @@ func TestMetricDataToLogService(t *testing.T) {
 	md.ResourceMetrics().AppendEmpty() // Add an empty ResourceMetrics
 	rm := md.ResourceMetrics().AppendEmpty()
 
-	rm.Resource().Attributes().UpsertString("labelB", "valueB")
-	rm.Resource().Attributes().UpsertString("labelA", "valueA")
-	rm.Resource().Attributes().UpsertString("a", "b")
+	rm.Resource().Attributes().PutStr("labelB", "valueB")
+	rm.Resource().Attributes().PutStr("labelA", "valueA")
+	rm.Resource().Attributes().PutStr("service.name", "unknown-service")
+	rm.Resource().Attributes().PutStr("a", "b")
 	sms := rm.ScopeMetrics()
 	sms.AppendEmpty() // Add an empty ScopeMetrics
 	sm := sms.AppendEmpty()
@@ -48,68 +37,62 @@ func TestMetricDataToLogService(t *testing.T) {
 	noneMetric.SetName("none")
 
 	intGaugeMetric := metrics.AppendEmpty()
-	intGaugeMetric.SetDataType(pmetric.MetricDataTypeGauge)
 	intGaugeMetric.SetName("int_gauge")
-	intGauge := intGaugeMetric.Gauge()
+	intGauge := intGaugeMetric.SetEmptyGauge()
 	intGaugeDataPoints := intGauge.DataPoints()
 	intGaugeDataPoint := intGaugeDataPoints.AppendEmpty()
-	intGaugeDataPoint.Attributes().UpsertString("innerLabel", "innerValue")
-	intGaugeDataPoint.SetIntVal(10)
+	intGaugeDataPoint.Attributes().PutStr("innerLabel", "innerValue")
+	intGaugeDataPoint.SetIntValue(10)
 	intGaugeDataPoint.SetTimestamp(pcommon.Timestamp(100_000_000))
 
 	doubleGaugeMetric := metrics.AppendEmpty()
-	doubleGaugeMetric.SetDataType(pmetric.MetricDataTypeGauge)
 	doubleGaugeMetric.SetName("double_gauge")
-	doubleGauge := doubleGaugeMetric.Gauge()
+	doubleGauge := doubleGaugeMetric.SetEmptyGauge()
 	doubleGaugeDataPoints := doubleGauge.DataPoints()
 	doubleGaugeDataPoint := doubleGaugeDataPoints.AppendEmpty()
-	doubleGaugeDataPoint.Attributes().UpsertString("innerLabel", "innerValue")
-	doubleGaugeDataPoint.SetDoubleVal(10.1)
+	doubleGaugeDataPoint.Attributes().PutStr("innerLabel", "innerValue")
+	doubleGaugeDataPoint.SetDoubleValue(10.1)
 	doubleGaugeDataPoint.SetTimestamp(pcommon.Timestamp(100_000_000))
 
 	intSumMetric := metrics.AppendEmpty()
-	intSumMetric.SetDataType(pmetric.MetricDataTypeSum)
 	intSumMetric.SetName("int_sum")
-	intSum := intSumMetric.Sum()
+	intSum := intSumMetric.SetEmptySum()
 	intSumDataPoints := intSum.DataPoints()
 	intSumDataPoint := intSumDataPoints.AppendEmpty()
-	intSumDataPoint.Attributes().UpsertString("innerLabel", "innerValue")
-	intSumDataPoint.SetIntVal(11)
+	intSumDataPoint.Attributes().PutStr("innerLabel", "innerValue")
+	intSumDataPoint.SetIntValue(11)
 	intSumDataPoint.SetTimestamp(pcommon.Timestamp(100_000_000))
 
 	doubleSumMetric := metrics.AppendEmpty()
-	doubleSumMetric.SetDataType(pmetric.MetricDataTypeSum)
 	doubleSumMetric.SetName("double_sum")
-	doubleSum := doubleSumMetric.Sum()
+	doubleSum := doubleSumMetric.SetEmptySum()
 	doubleSumDataPoints := doubleSum.DataPoints()
 	doubleSumDataPoint := doubleSumDataPoints.AppendEmpty()
-	doubleSumDataPoint.Attributes().UpsertString("innerLabel", "innerValue")
-	doubleSumDataPoint.SetDoubleVal(10.1)
+	doubleSumDataPoint.Attributes().PutStr("innerLabel", "innerValue")
+	doubleSumDataPoint.SetDoubleValue(10.1)
 	doubleSumDataPoint.SetTimestamp(pcommon.Timestamp(100_000_000))
 
 	doubleHistogramMetric := metrics.AppendEmpty()
-	doubleHistogramMetric.SetDataType(pmetric.MetricDataTypeHistogram)
 	doubleHistogramMetric.SetName("double_$histogram")
-	doubleHistogram := doubleHistogramMetric.Histogram()
+	doubleHistogram := doubleHistogramMetric.SetEmptyHistogram()
 	doubleHistogramDataPoints := doubleHistogram.DataPoints()
 	doubleHistogramDataPoint := doubleHistogramDataPoints.AppendEmpty()
-	doubleHistogramDataPoint.Attributes().UpsertString("innerLabel", "innerValue")
+	doubleHistogramDataPoint.Attributes().PutStr("innerLabel", "innerValue")
 	doubleHistogramDataPoint.SetCount(2)
 	doubleHistogramDataPoint.SetSum(10.1)
 	doubleHistogramDataPoint.SetTimestamp(pcommon.Timestamp(100_000_000))
-	doubleHistogramDataPoint.SetBucketCounts(pcommon.NewImmutableUInt64Slice([]uint64{1, 2, 3}))
-	doubleHistogramDataPoint.SetExplicitBounds(pcommon.NewImmutableFloat64Slice([]float64{1, 2}))
+	doubleHistogramDataPoint.BucketCounts().FromRaw([]uint64{1, 2, 3})
+	doubleHistogramDataPoint.ExplicitBounds().FromRaw([]float64{1, 2})
 
 	doubleSummaryMetric := metrics.AppendEmpty()
-	doubleSummaryMetric.SetDataType(pmetric.MetricDataTypeSummary)
 	doubleSummaryMetric.SetName("double-summary")
-	doubleSummary := doubleSummaryMetric.Summary()
+	doubleSummary := doubleSummaryMetric.SetEmptySummary()
 	doubleSummaryDataPoints := doubleSummary.DataPoints()
 	doubleSummaryDataPoint := doubleSummaryDataPoints.AppendEmpty()
 	doubleSummaryDataPoint.SetCount(2)
 	doubleSummaryDataPoint.SetSum(10.1)
 	doubleSummaryDataPoint.SetTimestamp(pcommon.Timestamp(100_000_000))
-	doubleSummaryDataPoint.Attributes().UpsertString("innerLabel", "innerValue")
+	doubleSummaryDataPoint.Attributes().PutStr("innerLabel", "innerValue")
 	quantileVal := doubleSummaryDataPoint.QuantileValues().AppendEmpty()
 	quantileVal.SetValue(10.2)
 	quantileVal.SetQuantile(0.9)
@@ -129,7 +112,6 @@ func TestMetricDataToLogService(t *testing.T) {
 			})
 		}
 		gotLogPairs = append(gotLogPairs, pairs)
-
 	}
 
 	wantLogs := make([][]logKeyValuePair, 0, len(gotLogs))
@@ -142,19 +124,17 @@ func TestMetricDataToLogService(t *testing.T) {
 	for j := 0; j < len(gotLogs); j++ {
 		sort.Sort(logKeyValuePairs(gotLogPairs[j]))
 		sort.Sort(logKeyValuePairs(wantLogs[j]))
-		if !reflect.DeepEqual(gotLogPairs[j], wantLogs[j]) {
-			t.Errorf("Unsuccessful conversion \nGot:\n\t%v\nWant:\n\t%v", gotLogPairs, wantLogs)
-		}
+		assert.Equal(t, wantLogs[j], gotLogPairs[j])
 	}
 }
 
 func TestMetricCornerCases(t *testing.T) {
-	assert.Equal(t, min(1, 2), 1)
-	assert.Equal(t, min(2, 1), 1)
-	assert.Equal(t, min(1, 1), 1)
+	assert.Equal(t, 1, min(1, 2))
+	assert.Equal(t, 1, min(2, 1))
+	assert.Equal(t, 1, min(1, 1))
 	var label KeyValues
 	label.Append("a", "b")
-	assert.Equal(t, label.String(), "a#$#b")
+	assert.Equal(t, "a#$#b", label.String())
 }
 
 func TestMetricLabelSanitize(t *testing.T) {
@@ -163,7 +143,7 @@ func TestMetricLabelSanitize(t *testing.T) {
 	label.Append("0test", "key_0test")
 	label.Append("test_normal", "test_normal")
 	label.Append("0test", "key_0test")
-	assert.Equal(t, label.String(), "key_test#$#key_test|key_0test#$#key_0test|test_normal#$#test_normal|key_0test#$#key_0test")
+	assert.Equal(t, "key_test#$#key_test|key_0test#$#key_0test|test_normal#$#test_normal|key_0test#$#key_0test", label.String())
 	label.Sort()
-	assert.Equal(t, label.String(), "key_0test#$#key_0test|key_0test#$#key_0test|key_test#$#key_test|test_normal#$#test_normal")
+	assert.Equal(t, "key_0test#$#key_0test|key_0test#$#key_0test|key_test#$#key_test|test_normal#$#test_normal", label.String())
 }

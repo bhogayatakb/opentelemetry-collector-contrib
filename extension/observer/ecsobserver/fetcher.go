@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package ecsobserver // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/ecsobserver"
 
@@ -25,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ec2"
 	"github.com/aws/aws-sdk-go/service/ecs"
-	"github.com/hashicorp/golang-lru/simplelru"
+	"github.com/hashicorp/golang-lru/v2/simplelru"
 	"go.uber.org/zap"
 )
 
@@ -61,8 +50,8 @@ type taskFetcher struct {
 	ecs               ecsClient
 	ec2               ec2Client
 	cluster           string
-	taskDefCache      simplelru.LRUCache
-	ec2Cache          simplelru.LRUCache
+	taskDefCache      *simplelru.LRU[string, *ecs.TaskDefinition]
+	ec2Cache          *simplelru.LRU[string, *ec2.Instance]
 	serviceNameFilter serviceNameFilter
 }
 
@@ -80,7 +69,7 @@ type taskFetcherOptions struct {
 func newTaskFetcherFromConfig(cfg Config, logger *zap.Logger) (*taskFetcher, error) {
 	svcNameFilter, err := serviceConfigsToFilter(cfg.Services)
 	if err != nil {
-		return nil, fmt.Errorf("init serivce name filter failed: %w", err)
+		return nil, fmt.Errorf("init service name filter failed: %w", err)
 	}
 	return newTaskFetcher(taskFetcherOptions{
 		Logger:            logger,
@@ -92,11 +81,11 @@ func newTaskFetcherFromConfig(cfg Config, logger *zap.Logger) (*taskFetcher, err
 
 func newTaskFetcher(opts taskFetcherOptions) (*taskFetcher, error) {
 	// Init cache
-	taskDefCache, err := simplelru.NewLRU(taskDefCacheSize, nil)
+	taskDefCache, err := simplelru.NewLRU[string, *ecs.TaskDefinition](taskDefCacheSize, nil)
 	if err != nil {
 		return nil, err
 	}
-	ec2Cache, err := simplelru.NewLRU(ec2CacheSize, nil)
+	ec2Cache, err := simplelru.NewLRU[string, *ec2.Instance](ec2CacheSize, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -139,9 +128,9 @@ func newTaskFetcher(opts taskFetcherOptions) (*taskFetcher, error) {
 
 func (f *taskFetcher) fetchAndDecorate(ctx context.Context) ([]*taskAnnotated, error) {
 	// taskAnnotated
-	rawTasks, err := f.getAllTasks(ctx)
+	rawTasks, err := f.getDiscoverableTasks(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("getAllTasks failed: %w", err)
+		return nil, fmt.Errorf("getDiscoverableTasks failed: %w", err)
 	}
 	tasks, err := f.attachTaskDefinition(ctx, rawTasks)
 	if err != nil {
@@ -162,9 +151,10 @@ func (f *taskFetcher) fetchAndDecorate(ctx context.Context) ([]*taskAnnotated, e
 	return tasks, nil
 }
 
-// getAllTasks get arns of all running tasks and describe those tasks.
+// getDiscoverableTasks get arns of all running tasks and describe those tasks
+// and filter only fargate tasks or EC2 task which container instance is known.
 // There is no API to list task detail without arn so we need to call two APIs.
-func (f *taskFetcher) getAllTasks(ctx context.Context) ([]*ecs.Task, error) {
+func (f *taskFetcher) getDiscoverableTasks(ctx context.Context) ([]*ecs.Task, error) {
 	svc := f.ecs
 	cluster := aws.String(f.cluster)
 	req := ecs.ListTasksInput{Cluster: cluster}
@@ -178,11 +168,23 @@ func (f *taskFetcher) getAllTasks(ctx context.Context) ([]*ecs.Task, error) {
 		descRes, err := svc.DescribeTasksWithContext(ctx, &ecs.DescribeTasksInput{
 			Cluster: cluster,
 			Tasks:   listRes.TaskArns,
+			Include: []*string{
+				aws.String("TAGS"),
+			},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("ecs.DescribeTasks failed: %w", err)
 		}
-		tasks = append(tasks, descRes.Tasks...)
+
+		for _, task := range descRes.Tasks {
+			// Preserve only fargate tasks or EC2 tasks with non-nil ContainerInstanceArn.
+			// When ECS task of EC2 launch type is in state Provisioning/Pending, it may
+			// not have EC2 instance. Such tasks have `nil` instance arn and the
+			// attachContainerInstance call will fail
+			if task.ContainerInstanceArn != nil || aws.StringValue(task.LaunchType) != ecs.LaunchTypeEc2 {
+				tasks = append(tasks, task)
+			}
+		}
 		if listRes.NextToken == nil {
 			break
 		}
@@ -206,7 +208,7 @@ func (f *taskFetcher) attachTaskDefinition(ctx context.Context, tasks []*ecs.Tas
 		}
 		var def *ecs.TaskDefinition
 		if cached, ok := f.taskDefCache.Get(arn); ok {
-			def = cached.(*ecs.TaskDefinition)
+			def = cached
 		} else {
 			res, err := svc.DescribeTaskDefinitionWithContext(ctx, &ecs.DescribeTaskDefinitionInput{
 				TaskDefinition: aws.String(arn),
@@ -220,12 +222,12 @@ func (f *taskFetcher) attachTaskDefinition(ctx context.Context, tasks []*ecs.Tas
 		arn2Def[arn] = def
 	}
 
-	var tasksWithDef []*taskAnnotated
-	for _, t := range tasks {
-		tasksWithDef = append(tasksWithDef, &taskAnnotated{
+	tasksWithDef := make([]*taskAnnotated, len(tasks))
+	for i, t := range tasks {
+		tasksWithDef[i] = &taskAnnotated{
 			Task:       t,
 			Definition: arn2Def[aws.StringValue(t.TaskDefinitionArn)],
-		})
+		}
 	}
 	return tasksWithDef, nil
 }
@@ -252,7 +254,7 @@ func (f *taskFetcher) attachContainerInstance(ctx context.Context, tasks []*task
 	for instanceArn := range ciToEC2 {
 		cached, ok := f.ec2Cache.Get(instanceArn)
 		if ok {
-			ciToEC2[instanceArn] = cached.(*ec2.Instance) // use value from cache
+			ciToEC2[instanceArn] = cached // use value from cache
 		} else {
 			instanceList = append(instanceList, aws.String(instanceArn))
 		}
@@ -261,7 +263,7 @@ func (f *taskFetcher) attachContainerInstance(ctx context.Context, tasks []*task
 
 	// DescribeContainerInstance size limit is 100, do it in batch.
 	for i := 0; i < len(instanceList); i += describeContainerInstanceLimit {
-		end := minInt(i+describeContainerInstanceLimit, len(instanceList))
+		end := min(i+describeContainerInstanceLimit, len(instanceList))
 		if err := f.describeContainerInstances(ctx, instanceList[i:end], ciToEC2); err != nil {
 			return fmt.Errorf("describe container instanced failed offset=%d: %w", i, err)
 		}
@@ -276,7 +278,7 @@ func (f *taskFetcher) attachContainerInstance(ctx context.Context, tasks []*task
 		containerInstance := aws.StringValue(t.Task.ContainerInstanceArn)
 		ec2Info, ok := ciToEC2[containerInstance]
 		if !ok {
-			return fmt.Errorf("container instance ec2 info not found containerInstnace=%q", containerInstance)
+			return fmt.Errorf("container instance ec2 info not found containerInstance=%q", containerInstance)
 		}
 		t.EC2 = ec2Info
 	}
@@ -290,7 +292,8 @@ func (f *taskFetcher) attachContainerInstance(ctx context.Context, tasks []*task
 
 // Run ecs.DescribeContainerInstances and ec2.DescribeInstances for a batch (less than 100 container instances).
 func (f *taskFetcher) describeContainerInstances(ctx context.Context, instanceList []*string,
-	ci2EC2 map[string]*ec2.Instance) error {
+	ci2EC2 map[string]*ec2.Instance,
+) error {
 	// Get container instances
 	res, err := f.ecs.DescribeContainerInstancesWithContext(ctx, &ecs.DescribeContainerInstancesInput{
 		Cluster:            aws.String(f.cluster),
@@ -301,11 +304,11 @@ func (f *taskFetcher) describeContainerInstances(ctx context.Context, instanceLi
 	}
 
 	// Create the index to map ec2 id back to container instance id.
-	var ec2Ids []*string
+	ec2Ids := make([]*string, len(res.ContainerInstances))
 	ec2IdToCI := make(map[string]string)
-	for _, containerInstance := range res.ContainerInstances {
+	for i, containerInstance := range res.ContainerInstances {
 		ec2Id := containerInstance.Ec2InstanceId
-		ec2Ids = append(ec2Ids, ec2Id)
+		ec2Ids[i] = ec2Id
 		ec2IdToCI[aws.StringValue(ec2Id)] = aws.StringValue(containerInstance.ContainerInstanceArn)
 	}
 
@@ -341,7 +344,7 @@ type serviceNameFilter func(name string) bool
 func (f *taskFetcher) getAllServices(ctx context.Context) ([]*ecs.Service, error) {
 	svc := f.ecs
 	cluster := aws.String(f.cluster)
-	// List and filter out services we need to desribe.
+	// List and filter out services we need to describe.
 	listReq := ecs.ListServicesInput{Cluster: cluster}
 	var servicesToDescribe []*string
 	for {
@@ -365,7 +368,7 @@ func (f *taskFetcher) getAllServices(ctx context.Context) ([]*ecs.Service, error
 	// DescribeServices size limit is 10 so we need to do paging on client side.
 	var services []*ecs.Service
 	for i := 0; i < len(servicesToDescribe); i += describeServiceLimit {
-		end := minInt(i+describeServiceLimit, len(servicesToDescribe))
+		end := min(i+describeServiceLimit, len(servicesToDescribe))
 		desc := &ecs.DescribeServicesInput{
 			Cluster:  cluster,
 			Services: servicesToDescribe[i:end],
@@ -396,7 +399,7 @@ func (f *taskFetcher) attachService(tasks []*taskAnnotated, services []*ecs.Serv
 
 	// Attach service to task
 	for _, t := range tasks {
-		// taskAnnotated is created using RunTask i.e. not manged by a service.
+		// taskAnnotated is created using RunTask i.e. not managed by a service.
 		if t.Task.StartedBy == nil {
 			continue
 		}
@@ -415,21 +418,12 @@ func (f *taskFetcher) attachService(tasks []*taskAnnotated, services []*ecs.Serv
 // Util Start
 
 func sortStringPointers(ps []*string) {
-	var ss []string
-	for _, p := range ps {
-		ss = append(ss, aws.StringValue(p))
+	ss := make([]string, len(ps))
+	for i, p := range ps {
+		ss[i] = aws.StringValue(p)
 	}
 	sort.Strings(ss)
 	for i := range ss {
 		ps[i] = aws.String(ss[i])
 	}
 }
-
-func minInt(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// Util End

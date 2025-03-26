@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package splunkhecexporter
 
@@ -22,13 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/splunk"
 )
 
 func Test_traceDataToSplunk(t *testing.T) {
-	logger := zap.NewNop()
 	ts := pcommon.Timestamp(123)
 
 	tests := []struct {
@@ -42,12 +29,12 @@ func Test_traceDataToSplunk(t *testing.T) {
 			traceDataFn: func() ptrace.Traces {
 				traces := ptrace.NewTraces()
 				rs := traces.ResourceSpans().AppendEmpty()
-				rs.Resource().Attributes().UpsertString("com.splunk.source", "myservice")
-				rs.Resource().Attributes().UpsertString("host.name", "myhost")
-				rs.Resource().Attributes().UpsertString("com.splunk.sourcetype", "mysourcetype")
-				rs.Resource().Attributes().UpsertString("com.splunk.index", "myindex")
+				rs.Resource().Attributes().PutStr("com.splunk.source", "myservice")
+				rs.Resource().Attributes().PutStr("host.name", "myhost")
+				rs.Resource().Attributes().PutStr("com.splunk.sourcetype", "mysourcetype")
+				rs.Resource().Attributes().PutStr("com.splunk.index", "myindex")
 				ils := rs.ScopeSpans().AppendEmpty()
-				initSpan("myspan", &ts, ils.Spans().AppendEmpty())
+				initSpan("myspan", ts, ils.Spans().AppendEmpty())
 				return traces
 			},
 			wantSplunkEvent: commonSplunkEvent("myspan", ts),
@@ -60,12 +47,12 @@ func Test_traceDataToSplunk(t *testing.T) {
 			traceDataFn: func() ptrace.Traces {
 				traces := ptrace.NewTraces()
 				rs := traces.ResourceSpans().AppendEmpty()
-				rs.Resource().Attributes().UpsertString("mysource", "myservice")
-				rs.Resource().Attributes().UpsertString("myhost", "myhost")
-				rs.Resource().Attributes().UpsertString("mysourcetype", "othersourcetype")
-				rs.Resource().Attributes().UpsertString("myindex", "mysourcetype")
+				rs.Resource().Attributes().PutStr("mysource", "myservice")
+				rs.Resource().Attributes().PutStr("myhost", "myhost")
+				rs.Resource().Attributes().PutStr("mysourcetype", "othersourcetype")
+				rs.Resource().Attributes().PutStr("myindex", "mysourcetype")
 				ils := rs.ScopeSpans().AppendEmpty()
-				initSpan("myspan", &ts, ils.Spans().AppendEmpty())
+				initSpan("myspan", ts, ils.Spans().AppendEmpty())
 				return traces
 			},
 			configFn: func() *Config {
@@ -92,41 +79,37 @@ func Test_traceDataToSplunk(t *testing.T) {
 			traces := tt.traceDataFn()
 
 			cfg := tt.configFn()
-			event := mapSpanToSplunkEvent(traces.ResourceSpans().At(0).Resource(), traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0), cfg, logger)
+			event := mapSpanToSplunkEvent(traces.ResourceSpans().At(0).Resource(), traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0), cfg)
 			require.NotNil(t, event)
 			assert.Equal(t, tt.wantSplunkEvent, event)
 		})
 	}
 }
 
-func initSpan(name string, ts *pcommon.Timestamp, span ptrace.Span) {
-	span.Attributes().UpsertString("foo", "bar")
+func initSpan(name string, ts pcommon.Timestamp, span ptrace.Span) {
+	span.Attributes().PutStr("foo", "bar")
 	span.SetName(name)
-	if ts != nil {
-		span.SetStartTimestamp(*ts)
-	}
+	span.SetStartTimestamp(ts)
 	spanLink := span.Links().AppendEmpty()
-	spanLink.SetTraceState("OK")
+	spanLink.TraceState().FromRaw("OK")
 	bytes, _ := hex.DecodeString("12345678")
 	var traceID [16]byte
 	copy(traceID[:], bytes)
-	spanLink.SetTraceID(pcommon.NewTraceID(traceID))
+	spanLink.SetTraceID(traceID)
 	bytes, _ = hex.DecodeString("1234")
 	var spanID [8]byte
 	copy(spanID[:], bytes)
-	spanLink.SetSpanID(pcommon.NewSpanID(spanID))
-	spanLink.Attributes().UpsertInt("foo", 1)
-	spanLink.Attributes().UpsertBool("bar", false)
-	foobarContents := spanLink.Attributes().UpsertEmptySlice("foobar")
-	foobarContents.AppendEmpty().SetStringVal("a")
-	foobarContents.AppendEmpty().SetStringVal("b")
+	spanLink.SetSpanID(spanID)
+	spanLink.Attributes().PutInt("foo", 1)
+	spanLink.Attributes().PutBool("bar", false)
+	foobarContents := spanLink.Attributes().PutEmptySlice("foobar")
+	foobarContents.AppendEmpty().SetStr("a")
+	foobarContents.AppendEmpty().SetStr("b")
 
 	spanEvent := span.Events().AppendEmpty()
-	spanEvent.Attributes().UpsertString("foo", "bar")
+	spanEvent.Attributes().PutStr("foo", "bar")
 	spanEvent.SetName("myEvent")
-	if ts != nil {
-		spanEvent.SetTimestamp(*ts + 3)
-	}
+	spanEvent.SetTimestamp(ts + 3)
 }
 
 func commonSplunkEvent(
@@ -139,11 +122,12 @@ func commonSplunkEvent(
 		Source:     "myservice",
 		SourceType: "mysourcetype",
 		Index:      "myindex",
-		Event: hecSpan{Name: name, StartTime: ts,
+		Event: hecSpan{
+			Name: name, StartTime: ts,
 			TraceID:    "",
 			SpanID:     "",
 			ParentSpan: "",
-			Attributes: map[string]interface{}{
+			Attributes: map[string]any{
 				"foo": "bar",
 			},
 			EndTime: 0x0,
@@ -151,20 +135,20 @@ func commonSplunkEvent(
 			Status:  hecSpanStatus{Message: "", Code: "STATUS_CODE_UNSET"},
 			Events: []hecEvent{
 				{
-					Attributes: map[string]interface{}{"foo": "bar"},
+					Attributes: map[string]any{"foo": "bar"},
 					Name:       "myEvent",
 					Timestamp:  ts + 3,
 				},
 			},
 			Links: []hecLink{
 				{
-					Attributes: map[string]interface{}{"foo": int64(1), "bar": false, "foobar": []interface{}{"a", "b"}},
+					Attributes: map[string]any{"foo": int64(1), "bar": false, "foobar": []any{"a", "b"}},
 					TraceID:    "12345678000000000000000000000000",
 					SpanID:     "1234000000000000",
 					TraceState: "OK",
 				},
 			},
 		},
-		Fields: map[string]interface{}{},
+		Fields: map[string]any{},
 	}
 }

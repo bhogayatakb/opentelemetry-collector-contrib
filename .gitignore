@@ -1,4 +1,5 @@
 local/
+vendor/
 
 # GoLand IDEA
 /.idea/
@@ -8,6 +9,9 @@ local/
 .vscode
 *.code-workspace
 
+# Project IDX
+.idx/
+
 # Binaries for programs and plugins
 *.exe
 *.exe~
@@ -16,6 +20,7 @@ local/
 *.dylib
 bin/
 dist/
+.tools/
 
 # Emacs
 *~
@@ -24,13 +29,18 @@ dist/
 # Miscellaneous files
 *.sw[op]
 *.DS_Store
+__debug_bin*
 
 # Coverage
-coverage.txt
-integration-coverage.txt
-coverage.html
+coverage/*
+*-coverage.txt
 integration-coverage.html
+internal/tools/testresults/*
 
 # Wix
 *.wixobj
 *.wixpdb
+
+go.work*
+
+/result

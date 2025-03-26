@@ -1,21 +1,11 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package k8sobserver // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/k8sobserver"
 
 import (
 	"fmt"
+	"strings"
 
 	v1 "k8s.io/api/core/v1"
 
@@ -49,22 +39,41 @@ func convertPodToEndpoints(idNamespace string, pod *v1.Pod) []observer.Endpoint 
 	}}
 
 	// Map of running containers by name.
-	containerRunning := map[string]bool{}
+	runningContainers := map[string]RunningContainer{}
 
 	for _, container := range pod.Status.ContainerStatuses {
 		if container.State.Running != nil {
-			containerRunning[container.Name] = true
+			runningContainers[container.Name] = containerIDWithRuntime(container)
 		}
 	}
 
 	// Create endpoint for each named container port.
 	for _, container := range pod.Spec.Containers {
-		if !containerRunning[container.Name] {
+		var runningContainer RunningContainer
+		var ok bool
+		if runningContainer, ok = runningContainers[container.Name]; !ok {
 			continue
 		}
 
+		endpointID := observer.EndpointID(
+			fmt.Sprintf(
+				"%s/%s", podID, container.Name,
+			),
+		)
+		endpoints = append(endpoints, observer.Endpoint{
+			ID:     endpointID,
+			Target: podIP,
+			Details: &observer.PodContainer{
+				Name:        container.Name,
+				ContainerID: runningContainer.ID,
+				Image:       container.Image,
+				Pod:         podDetails,
+			},
+		})
+
+		// Create endpoint for each named container port.
 		for _, port := range container.Ports {
-			endpointID := observer.EndpointID(
+			endpointID = observer.EndpointID(
 				fmt.Sprintf(
 					"%s/%s(%d)", podID, port.Name, port.ContainerPort,
 				),
@@ -93,4 +102,21 @@ func getTransport(protocol v1.Protocol) observer.Transport {
 		return observer.ProtocolUDP
 	}
 	return observer.ProtocolUnknown
+}
+
+// containerIDWithRuntime parses the container ID to get the actual ID string
+func containerIDWithRuntime(c v1.ContainerStatus) RunningContainer {
+	cID := c.ContainerID
+	if cID != "" {
+		parts := strings.Split(cID, "://")
+		if len(parts) == 2 {
+			return RunningContainer{parts[1], parts[0]}
+		}
+	}
+	return RunningContainer{}
+}
+
+type RunningContainer struct {
+	ID      string
+	Runtime string
 }

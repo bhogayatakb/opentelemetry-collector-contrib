@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package statsreader
 
@@ -21,13 +10,13 @@ import (
 
 	"cloud.google.com/go/spanner"
 	database "cloud.google.com/go/spanner/admin/database/apiv1"
+	"cloud.google.com/go/spanner/admin/database/apiv1/databasepb"
 	"cloud.google.com/go/spanner/spannertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.uber.org/zap"
 	"google.golang.org/api/option"
-	databasepb "google.golang.org/genproto/googleapis/spanner/admin/database/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
@@ -50,7 +39,7 @@ func createMetricsMetadataFromTimestampColumn(query string, timestampColumn stri
 	// Labels
 	queryLabelValuesMetadata := []metadata.LabelValueMetadata{labelValueMetadata}
 
-	metricDataType := metadata.NewMetricDataType(pmetric.MetricDataTypeGauge, pmetric.MetricAggregationTemporalityUnspecified, false)
+	metricDataType := metadata.NewMetricType(pmetric.MetricTypeGauge, pmetric.AggregationTemporalityUnspecified, false)
 
 	metricValueMetadata, _ := metadata.NewMetricValueMetadata("metric_value", "METRIC_VALUE", metricDataType, "unit",
 		metadata.IntValueType)
@@ -67,7 +56,7 @@ func createMetricsMetadataFromTimestampColumn(query string, timestampColumn stri
 	}
 }
 
-func createCurrentStatsReaderWithCorruptedMetadata(client *spanner.Client) Reader { //nolint
+func createCurrentStatsReaderWithCorruptedMetadata(client *spanner.Client) Reader {
 	query := "SELECT * FROM STATS"
 	databaseID := datasource.NewDatabaseID(projectID, instanceID, databaseName)
 	databaseFromClient := datasource.NewDatabaseFromClient(client, databaseID)
@@ -76,7 +65,7 @@ func createCurrentStatsReaderWithCorruptedMetadata(client *spanner.Client) Reade
 		createMetricsMetadataFromTimestampColumn(query, "NOT_EXISTING"), ReaderConfig{})
 }
 
-func createCurrentStatsReader(client *spanner.Client) Reader { //nolint
+func createCurrentStatsReader(client *spanner.Client) Reader {
 	query := "SELECT * FROM STATS"
 	databaseID := datasource.NewDatabaseID(projectID, instanceID, databaseName)
 	databaseFromClient := datasource.NewDatabaseFromClient(client, databaseID)
@@ -84,7 +73,7 @@ func createCurrentStatsReader(client *spanner.Client) Reader { //nolint
 	return newCurrentStatsReader(zap.NewNop(), databaseFromClient, createMetricsMetadata(query), ReaderConfig{})
 }
 
-func createCurrentStatsReaderWithMaxRowsLimit(client *spanner.Client) Reader { //nolint
+func createCurrentStatsReaderWithMaxRowsLimit(client *spanner.Client) Reader {
 	query := "SELECT * FROM STATS"
 	databaseID := datasource.NewDatabaseID(projectID, instanceID, databaseName)
 	databaseFromClient := datasource.NewDatabaseFromClient(client, databaseID)
@@ -95,7 +84,7 @@ func createCurrentStatsReaderWithMaxRowsLimit(client *spanner.Client) Reader { /
 	return newCurrentStatsReader(zap.NewNop(), databaseFromClient, createMetricsMetadata(query), config)
 }
 
-func createIntervalStatsReaderWithCorruptedMetadata(client *spanner.Client, backfillEnabled bool) Reader { //nolint
+func createIntervalStatsReaderWithCorruptedMetadata(client *spanner.Client, backfillEnabled bool) Reader {
 	query := "SELECT * FROM STATS WHERE INTERVAL_END = @pullTimestamp"
 	databaseID := datasource.NewDatabaseID(projectID, instanceID, databaseName)
 	databaseFromClient := datasource.NewDatabaseFromClient(client, databaseID)
@@ -107,7 +96,7 @@ func createIntervalStatsReaderWithCorruptedMetadata(client *spanner.Client, back
 		createMetricsMetadataFromTimestampColumn(query, "NOT_EXISTING"), config)
 }
 
-func createIntervalStatsReader(client *spanner.Client, backfillEnabled bool) Reader { //nolint
+func createIntervalStatsReader(client *spanner.Client, backfillEnabled bool) Reader {
 	query := "SELECT * FROM STATS WHERE INTERVAL_END = @pullTimestamp"
 	databaseID := datasource.NewDatabaseID(projectID, instanceID, databaseName)
 	databaseFromClient := datasource.NewDatabaseFromClient(client, databaseID)
@@ -118,7 +107,7 @@ func createIntervalStatsReader(client *spanner.Client, backfillEnabled bool) Rea
 	return newIntervalStatsReader(zap.NewNop(), databaseFromClient, createMetricsMetadata(query), config)
 }
 
-func createIntervalStatsReaderWithMaxRowsLimit(client *spanner.Client, backfillEnabled bool) Reader { //nolint
+func createIntervalStatsReaderWithMaxRowsLimit(client *spanner.Client, backfillEnabled bool) Reader {
 	query := "SELECT * FROM STATS WHERE INTERVAL_END = @pullTimestamp"
 	databaseID := datasource.NewDatabaseID(projectID, instanceID, databaseName)
 	databaseFromClient := datasource.NewDatabaseFromClient(client, databaseID)
@@ -138,7 +127,7 @@ func TestStatsReaders_Read(t *testing.T) {
 	require.NoError(t, err)
 	defer server.Close()
 
-	conn, err := grpc.Dial(server.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(server.Addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
 
 	databaseAdminClient, err := database.NewDatabaseAdminClient(ctx, option.WithGRPCConn(conn))
@@ -168,13 +157,13 @@ func TestStatsReaders_Read(t *testing.T) {
 	_, err = databaseClient.Apply(ctx, []*spanner.Mutation{
 		spanner.Insert("STATS",
 			[]string{"INTERVAL_END", "METRIC_LABEL", "METRIC_VALUE"},
-			[]interface{}{timestamp, "Qwerty", 10}),
+			[]any{timestamp, "Qwerty", 10}),
 		spanner.Insert("STATS",
 			[]string{"INTERVAL_END", "METRIC_LABEL", "METRIC_VALUE"},
-			[]interface{}{timestamp.Add(-1 * time.Minute), "Test", 20}),
+			[]any{timestamp.Add(-1 * time.Minute), "Test", 20}),
 		spanner.Insert("STATS",
 			[]string{"INTERVAL_END", "METRIC_LABEL", "METRIC_VALUE"},
-			[]interface{}{timestamp.Add(-1 * time.Minute), "Spanner", 30}),
+			[]any{timestamp.Add(-1 * time.Minute), "Spanner", 30}),
 	})
 
 	require.NoError(t, err)
@@ -203,7 +192,7 @@ func TestStatsReaders_Read(t *testing.T) {
 				require.Error(t, err)
 			} else {
 				require.NoError(t, err)
-				assert.Equal(t, testCase.expectedMetricsAmount, len(metrics))
+				assert.Len(t, metrics, testCase.expectedMetricsAmount)
 			}
 		})
 	}

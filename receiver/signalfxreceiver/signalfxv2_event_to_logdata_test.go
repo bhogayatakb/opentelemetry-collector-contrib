@@ -1,16 +1,5 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package signalfxreceiver
 
@@ -24,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/plogtest"
 )
 
 func TestSignalFxV2EventsToLogData(t *testing.T) {
@@ -39,7 +30,7 @@ func TestSignalFxV2EventsToLogData(t *testing.T) {
 			Timestamp:  msec,
 			Category:   &userDefinedCat,
 			Dimensions: buildNDimensions(3),
-			Properties: mapToEventProps(map[string]interface{}{
+			Properties: mapToEventProps(map[string]any{
 				"env":      "prod",
 				"isActive": true,
 				"rack":     5,
@@ -49,33 +40,31 @@ func TestSignalFxV2EventsToLogData(t *testing.T) {
 		}
 	}
 
-	buildDefaultLogs := func() plog.LogRecordSlice {
-		logSlice := plog.NewLogRecordSlice()
-		l := logSlice.AppendEmpty()
+	buildDefaultLogs := func() plog.ScopeLogs {
+		sl := plog.NewScopeLogs()
+		l := sl.LogRecords().AppendEmpty()
 		l.SetTimestamp(pcommon.NewTimestampFromTime(now.Truncate(time.Millisecond)))
 		attrs := l.Attributes()
-		attrs.UpsertString("com.splunk.signalfx.event_type", "shutdown")
-		attrs.UpsertString("k0", "v0")
-		attrs.UpsertString("k1", "v1")
-		attrs.UpsertString("k2", "v2")
-		attrs.UpsertInt("com.splunk.signalfx.event_category", int64(sfxpb.EventCategory_USER_DEFINED))
+		attrs.PutStr("com.splunk.signalfx.event_type", "shutdown")
+		attrs.PutStr("k0", "v0")
+		attrs.PutStr("k1", "v1")
+		attrs.PutStr("k2", "v2")
+		attrs.PutInt("com.splunk.signalfx.event_category", int64(sfxpb.EventCategory_USER_DEFINED))
 
-		propMap := attrs.UpsertEmptyMap("com.splunk.signalfx.event_properties")
-		propMap.UpsertString("env", "prod")
-		propMap.UpsertBool("isActive", true)
-		propMap.UpsertInt("rack", 5)
-		propMap.UpsertDouble("temp", 40.5)
-		propMap.UpsertEmpty("nullProp")
-		propMap.Sort()
+		propMap := attrs.PutEmptyMap("com.splunk.signalfx.event_properties")
+		propMap.PutStr("env", "prod")
+		propMap.PutBool("isActive", true)
+		propMap.PutInt("rack", 5)
+		propMap.PutDouble("temp", 40.5)
+		propMap.PutEmpty("nullProp")
 
-		l.Attributes().Sort()
-		return logSlice
+		return sl
 	}
 
 	tests := []struct {
 		name      string
 		sfxEvents []*sfxpb.Event
-		expected  plog.LogRecordSlice
+		expected  plog.ScopeLogs
 	}{
 		{
 			name:      "default",
@@ -89,9 +78,9 @@ func TestSignalFxV2EventsToLogData(t *testing.T) {
 				e.Category = nil
 				return []*sfxpb.Event{e}
 			}(),
-			expected: func() plog.LogRecordSlice {
+			expected: func() plog.ScopeLogs {
 				lrs := buildDefaultLogs()
-				lrs.At(0).Attributes().UpsertEmpty("com.splunk.signalfx.event_category")
+				lrs.LogRecords().At(0).Attributes().PutEmpty("com.splunk.signalfx.event_category")
 				return lrs
 			}(),
 		},
@@ -99,18 +88,15 @@ func TestSignalFxV2EventsToLogData(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			lrs := plog.NewLogRecordSlice()
-			signalFxV2EventsToLogRecords(tt.sfxEvents, lrs)
-			for i := 0; i < lrs.Len(); i++ {
-				lrs.At(i).Attributes().Sort()
-			}
-			assert.Equal(t, tt.expected, lrs)
+			sl := plog.NewScopeLogs()
+			signalFxV2EventsToLogRecords(tt.sfxEvents, sl.LogRecords())
+			assert.NoError(t, plogtest.CompareScopeLogs(tt.expected, sl))
 		})
 	}
 }
 
-func mapToEventProps(m map[string]interface{}) []*sfxpb.Property {
-	var out []*sfxpb.Property
+func mapToEventProps(m map[string]any) []*sfxpb.Property {
+	out := make([]*sfxpb.Property, 0, len(m))
 	for k, v := range m {
 		var pval sfxpb.PropertyValue
 

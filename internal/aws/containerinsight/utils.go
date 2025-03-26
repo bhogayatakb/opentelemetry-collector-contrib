@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 package containerinsight // import "github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/containerinsight"
 
 import (
@@ -18,17 +7,16 @@ import (
 	"log"
 	"strconv"
 	"strings"
-	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.uber.org/zap"
 )
 
-// SumFields takes an array of type map[string]interface{} and do
+// SumFields takes an array of type map[string]any and do
 // the summation on the values corresponding to the same keys.
-// It is assumed that the underlying type of interface{} to be float64.
-func SumFields(fields []map[string]interface{}) map[string]float64 {
+// It is assumed that the underlying type of any to be float64.
+func SumFields(fields []map[string]any) map[string]float64 {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -165,8 +153,10 @@ func GetUnitForMetric(metric string) string {
 	return metricToUnitMap[metric]
 }
 
-// ConvertToOTLPMetrics converts a field containing metric values and a tag containing the relevant labels to OTLP metrics
-func ConvertToOTLPMetrics(fields map[string]interface{}, tags map[string]string, logger *zap.Logger) pmetric.Metrics {
+// ConvertToOTLPMetrics converts a field containing metric values and tags containing the relevant labels to OTLP metrics.
+// For legacy reasons, the timestamp is stored in the tags map with the key "Timestamp", but, unlike other tags,
+// it is not added as a resource attribute to avoid high-cardinality metrics.
+func ConvertToOTLPMetrics(fields map[string]any, tags map[string]string, logger *zap.Logger) pmetric.Metrics {
 	md := pmetric.NewMetrics()
 	rms := md.ResourceMetrics()
 	rm := rms.AppendEmpty()
@@ -177,10 +167,11 @@ func ConvertToOTLPMetrics(fields map[string]interface{}, tags map[string]string,
 		if tagKey == Timestamp {
 			timeNs, _ := strconv.ParseUint(tagValue, 10, 64)
 			timestamp = pcommon.Timestamp(timeNs)
-			// convert from nanosecond to millisecond (as emf log use millisecond timestamp)
-			tagValue = strconv.FormatUint(timeNs/uint64(time.Millisecond), 10)
+
+			// Do not add Timestamp as a resource attribute to avoid high-cardinality.
+			continue
 		}
-		resource.Attributes().UpsertString(tagKey, tagValue)
+		resource.Attributes().PutStr(tagKey, tagValue)
 	}
 
 	ilms := rm.ScopeMetrics()
@@ -218,24 +209,22 @@ func ConvertToOTLPMetrics(fields map[string]interface{}, tags map[string]string,
 func intGauge(ilm pmetric.ScopeMetrics, metricName string, unit string, value int64, ts pcommon.Timestamp) {
 	metric := initMetric(ilm, metricName, unit)
 
-	metric.SetDataType(pmetric.MetricDataTypeGauge)
-	intGauge := metric.Gauge()
+	intGauge := metric.SetEmptyGauge()
 	dataPoints := intGauge.DataPoints()
 	dataPoint := dataPoints.AppendEmpty()
 
-	dataPoint.SetIntVal(value)
+	dataPoint.SetIntValue(value)
 	dataPoint.SetTimestamp(ts)
 }
 
 func doubleGauge(ilm pmetric.ScopeMetrics, metricName string, unit string, value float64, ts pcommon.Timestamp) {
 	metric := initMetric(ilm, metricName, unit)
 
-	metric.SetDataType(pmetric.MetricDataTypeGauge)
-	doubleGauge := metric.Gauge()
+	doubleGauge := metric.SetEmptyGauge()
 	dataPoints := doubleGauge.DataPoints()
 	dataPoint := dataPoints.AppendEmpty()
 
-	dataPoint.SetDoubleVal(value)
+	dataPoint.SetDoubleValue(value)
 	dataPoint.SetTimestamp(ts)
 }
 

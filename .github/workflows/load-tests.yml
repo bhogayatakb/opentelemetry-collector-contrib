@@ -1,87 +1,81 @@
 name: load-tests
+
 on:
   push:
-    branches: [ main ]
     tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
-  pull_request:
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+  workflow_dispatch:
+  schedule:
+    - cron: "27 0,12 * * *" # Run at 00:27 and 12:27 UTC every day.
 
+# Do not cancel this workflow on main. See https://github.com/open-telemetry/opentelemetry-collector-contrib/pull/16616
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref }}
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
+
+env:
+  # Make sure to exit early if cache segment download times out after 2 minutes.
+  # We limit cache download as a whole to 5 minutes.
+  SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2
+
+permissions: read-all
 
 jobs:
   setup-environment:
     timeout-minutes: 30
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     if: ${{ github.actor != 'dependabot[bot]' }}
     outputs:
       loadtest_matrix: ${{ steps.splitloadtest.outputs.loadtest_matrix }}
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
-      - name: Setup Go
-        uses: actions/setup-go@v3
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5
         with:
-          go-version: 1.19
+          go-version: "1.23.7"
+          cache: false
       - name: Cache Go
         id: go-cache
-        uses: actions/cache@v3
+        timeout-minutes: 5
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
         with:
           path: |
             ~/go/bin
             ~/go/pkg/mod
             ~/.cache/go-build
           key: loadtest-${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        env:
-          # See: https://github.com/actions/cache/issues/810#issuecomment-1222550359
-          # Cache downloads for this workflow consistently run in under 2 minutes
-          SEGMENT_DOWNLOAD_TIMEOUT_MIN: 5
       - name: Install Dependencies
         if: steps.go-cache.outputs.cache-hit != 'true'
         run: make -j2 gomoddownload
       - name: Install Tools
         if: steps.go-cache.outputs.cache-hit != 'true'
         run: make install-tools
-      - run: make otelcontribcol-testbed
-      - name: Upload Collector Binaries
-        uses: actions/upload-artifact@v3
+      - run: make genoteltestbedcol
+      - run: make oteltestbedcol
+      - name: Upload Testbed Binaries
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4
         with:
-          name: collector-binaries
+          name: testbed-binaries
           path: ./bin/*
       - name: Split Loadtest Jobs
         id: splitloadtest
         run: ./.github/workflows/scripts/setup_e2e_tests.sh
 
   loadtest:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     needs: [setup-environment]
     strategy:
       fail-fast: false
       matrix: ${{ fromJson(needs.setup-environment.outputs.loadtest_matrix) }}
     steps:
-      - name: Checkout Repo
-        uses: actions/checkout@v3
-      - run: sudo chmod 0777 -R /opt
-      - name: Fluentbit Cache
-        id: fluentbit-cache
-        uses: actions/cache@v3
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5
         with:
-          path: /opt/td-agent-bit
-          key: fluentbit-cache-1.5.3
-      - run: sudo ln -s /opt/td-agent-bit/bin/td-agent-bit /usr/local/bin/fluent-bit
-      - name: Install fluentbit
-        if: steps.fluentbit-cache.outputs.cache-hit != 'true'
-        run: |
-          wget https://packages.fluentbit.io/ubuntu/bionic/pool/main/t/td-agent-bit/td-agent-bit_1.5.3_amd64.deb
-          sudo dpkg -i ./td-agent-bit*.deb
-      - name: Setup Go
-        uses: actions/setup-go@v3
-        with:
-          go-version: 1.19
+          go-version: "1.23.7"
+          cache: false
       - name: Cache Go
         id: go-cache
-        uses: actions/cache@v3
+        timeout-minutes: 5
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4
         with:
           path: |
             ~/go/bin
@@ -95,10 +89,10 @@ jobs:
         if: steps.go-cache.outputs.cache-hit != 'true'
         run: make install-tools
       - run: mkdir -p results && touch results/TESTRESULTS.md
-      - name: Download Collector Binaries
-        uses: actions/download-artifact@v3
+      - name: Download Testbed Binaries
+        uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
         with:
-          name: collector-binaries
+          name: testbed-binaries
           path: bin/
       - run: chmod +x bin/*
       - name: Loadtest
@@ -106,8 +100,9 @@ jobs:
         env:
           TEST_ARGS: "-test.run=${{ matrix.test }}"
       - name: Set results filename
+        if: ${{ failure() || success() }}
         id: filename
-        run: echo "::set-output name=name::$(echo '${{ matrix.test }}' | sed -e 's/|/_/g')"
+        run: echo "name=$(echo '${{ matrix.test }}' | sed -e 's/|/_/g')" >> $GITHUB_OUTPUT
       - name: Create Test Result Archive
         if: ${{ failure() || success() }}
         continue-on-error: true
@@ -115,9 +110,40 @@ jobs:
       - name: Upload Test Results
         if: ${{ failure() || success() }}
         continue-on-error: true
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4
         with:
+          name: test-result-archive-${{steps.filename.outputs.name}}
           path: ./*.tar
-      - name: GitHub Issue Generator
-        if: ${{ failure() && github.ref == 'refs/heads/main' }}
-        run: issuegenerator $TEST_RESULTS
+      - run: cp testbed/tests/results/benchmarks.json testbed/tests/results/${{steps.filename.outputs.name}}.json
+      - name: Upload benchmarks.json
+        uses: actions/upload-artifact@4cec3d8aa04e39d1a68397de0c4cd6fb9dce8ec1 # v4
+        with:
+          name: benchmark-results-${{steps.filename.outputs.name}}
+          path: testbed/tests/results/${{steps.filename.outputs.name}}.json
+
+  update-benchmarks:
+    runs-on: ubuntu-24.04
+    needs: [loadtest]
+    permissions:
+      # deployments permission to deploy GitHub pages website
+      deployments: write
+      # contents permission to update benchmark contents in gh-pages branch
+      contents: write
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+      - uses: actions/download-artifact@cc203385981b70ca67e1cc392babf9cc229d5806 # v4
+        with:
+          pattern: benchmark-results-*
+          merge-multiple: true
+          path: results
+      - run: jq -s 'map(.[])' results/*.json > output.json
+      - uses: benchmark-action/github-action-benchmark@d48d326b4ca9ba73ca0cd0d59f108f9e02a381c7 # v1
+        with:
+          tool: "customSmallerIsBetter"
+          output-file-path: output.json
+          gh-pages-branch: benchmarks
+          max-items-in-chart: 100
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          benchmark-data-dir-path: "docs/benchmarks/loadtests"
+          auto-push: true

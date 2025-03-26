@@ -1,28 +1,17 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package jaeger
 
 import (
 	"testing"
 
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.9.0"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/goldendataset"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/tracetranslator"
@@ -175,13 +164,13 @@ func TestGetTagFromSpanKind(t *testing.T) {
 }
 
 func TestAttributesToJaegerProtoTags(t *testing.T) {
-
 	attributes := pcommon.NewMap()
-	attributes.UpsertBool("bool-val", true)
-	attributes.UpsertInt("int-val", 123)
-	attributes.UpsertString("string-val", "abc")
-	attributes.UpsertDouble("double-val", 1.23)
-	attributes.UpsertString(conventions.AttributeServiceName, "service-name")
+	attributes.PutBool("bool-val", true)
+	attributes.PutInt("int-val", 123)
+	attributes.PutStr("string-val", "abc")
+	attributes.PutDouble("double-val", 1.23)
+	attributes.PutEmptyBytes("bytes-val").FromRaw([]byte{1, 2, 3, 4})
+	attributes.PutStr(conventions.AttributeServiceName, "service-name")
 
 	expected := []model.KeyValue{
 		{
@@ -205,6 +194,11 @@ func TestAttributesToJaegerProtoTags(t *testing.T) {
 			VFloat64: 1.23,
 		},
 		{
+			Key:     "bytes-val",
+			VType:   model.ValueType_BINARY,
+			VBinary: []byte{1, 2, 3, 4},
+		},
+		{
 			Key:   conventions.AttributeServiceName,
 			VType: model.ValueType_STRING,
 			VStr:  "service-name",
@@ -216,21 +210,18 @@ func TestAttributesToJaegerProtoTags(t *testing.T) {
 
 	// The last item in expected ("service-name") must be skipped in resource tags translation
 	got = appendTagsFromResourceAttributes(make([]model.KeyValue, 0, len(expected)-1), attributes)
-	require.EqualValues(t, expected[:4], got)
+	require.EqualValues(t, expected[:5], got)
 }
 
 func TestInternalTracesToJaegerProto(t *testing.T) {
-
 	tests := []struct {
 		name string
 		td   ptrace.Traces
 		jb   *model.Batch
-		err  error
 	}{
 		{
 			name: "empty",
 			td:   ptrace.NewTraces(),
-			err:  nil,
 		},
 
 		{
@@ -239,13 +230,11 @@ func TestInternalTracesToJaegerProto(t *testing.T) {
 			jb: &model.Batch{
 				Process: generateProtoProcess(),
 			},
-			err: nil,
 		},
 
 		{
 			name: "no-resource-attrs",
 			td:   generateTracesResourceOnlyWithNoAttrs(),
-			err:  nil,
 		},
 
 		{
@@ -259,7 +248,6 @@ func TestInternalTracesToJaegerProto(t *testing.T) {
 					generateProtoSpanWithTraceState(),
 				},
 			},
-			err: nil,
 		},
 		{
 			name: "library-info",
@@ -272,7 +260,6 @@ func TestInternalTracesToJaegerProto(t *testing.T) {
 					generateProtoSpanWithLibraryInfo("io.opentelemetry.test"),
 				},
 			},
-			err: nil,
 		},
 		{
 			name: "two-spans-child-parent",
@@ -283,10 +270,9 @@ func TestInternalTracesToJaegerProto(t *testing.T) {
 				},
 				Spans: []*model.Span{
 					generateProtoSpan(),
-					generateProtoChildSpanWithErrorTags(),
+					generateProtoChildSpan(),
 				},
 			},
-			err: nil,
 		},
 
 		{
@@ -301,7 +287,6 @@ func TestInternalTracesToJaegerProto(t *testing.T) {
 					generateProtoFollowerSpan(),
 				},
 			},
-			err: nil,
 		},
 
 		{
@@ -315,18 +300,30 @@ func TestInternalTracesToJaegerProto(t *testing.T) {
 					generateJProtoSpanWithEventAttribute(),
 				},
 			},
-			err: nil,
+		},
+		{
+			name: "a-spans-with-two-parent",
+			td:   generateTracesSpanWithTwoParents(),
+			jb: &model.Batch{
+				Process: &model.Process{
+					ServiceName: tracetranslator.ResourceNoServiceName,
+				},
+				Spans: []*model.Span{
+					generateProtoSpan(),
+					generateProtoFollowerSpan(),
+					generateProtoTwoParentsSpan(),
+				},
+			},
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			jbs, err := ProtoFromTraces(test.td)
-			assert.EqualValues(t, test.err, err)
+			jbs := ProtoFromTraces(test.td)
 			if test.jb == nil {
-				assert.Len(t, jbs, 0)
+				assert.Empty(t, jbs)
 			} else {
-				require.Equal(t, 1, len(jbs))
+				require.Len(t, jbs, 1)
 				assert.EqualValues(t, test.jb, jbs[0])
 			}
 		})
@@ -339,8 +336,7 @@ func TestInternalTracesToJaegerProtoBatchesAndBack(t *testing.T) {
 		"../../../internal/coreinternal/goldendataset/testdata/generated_pict_pairs_spans.txt")
 	assert.NoError(t, err)
 	for _, td := range tds {
-		protoBatches, err := ProtoFromTraces(td)
-		assert.NoError(t, err)
+		protoBatches := ProtoFromTraces(td)
 		tdFromPB, err := ProtoToTraces(protoBatches)
 		assert.NoError(t, err)
 		assert.Equal(t, td.SpanCount(), tdFromPB.SpanCount())
@@ -351,7 +347,7 @@ func generateTracesOneSpanNoResourceWithEventAttribute() ptrace.Traces {
 	td := generateTracesOneSpanNoResource()
 	event := td.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0).Events().At(0)
 	event.SetName("must-be-ignorred")
-	event.Attributes().UpsertString("event", "must-be-used-instead-of-event-name")
+	event.Attributes().PutStr("event", "must-be-used-instead-of-event-name")
 	return td
 }
 
@@ -372,25 +368,6 @@ func generateJProtoSpanWithEventAttribute() *model.Span {
 	return span
 }
 
-// generateProtoChildSpanWithErrorTags generates a jaeger span to be used in
-// internal->jaeger translation test. It supposed to be the same as generateProtoChildSpan
-// that used in jaeger->internal, but jaeger->internal translation infers status code from http status if
-// status.code is not set, so the pipeline jaeger->internal->jaeger adds two more tags as the result in that case.
-func generateProtoChildSpanWithErrorTags() *model.Span {
-	span := generateProtoChildSpan()
-	span.Tags = append(span.Tags, model.KeyValue{
-		Key:   conventions.OtelStatusCode,
-		VType: model.ValueType_STRING,
-		VStr:  statusError,
-	})
-	span.Tags = append(span.Tags, model.KeyValue{
-		Key:   tracetranslator.TagError,
-		VBool: true,
-		VType: model.ValueType_BOOL,
-	})
-	return span
-}
-
 func BenchmarkInternalTracesToJaegerProto(b *testing.B) {
 	td := generateTracesTwoSpansChildParent()
 	resource := generateTracesResourceOnly().ResourceSpans().At(0).Resource()
@@ -398,7 +375,7 @@ func BenchmarkInternalTracesToJaegerProto(b *testing.B) {
 
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		_, err := ProtoFromTraces(td)
-		assert.NoError(b, err)
+		batches := ProtoFromTraces(td)
+		assert.NotEmpty(b, batches)
 	}
 }

@@ -1,16 +1,5 @@
-// Copyright 2020 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metricstransformprocessor
 
@@ -22,14 +11,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/processor/processorhelper"
+	"go.opentelemetry.io/collector/processor/processortest"
 	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/metricstransformprocessor/internal/metadata"
 )
 
 type metricsGroupingTest struct {
@@ -37,35 +26,33 @@ type metricsGroupingTest struct {
 	transforms []internalTransform
 }
 
-var (
-	groupingTests = []metricsGroupingTest{
-		{
-			name: "metric_group_by_strict_name",
-			transforms: []internalTransform{
-				{
-					MetricIncludeFilter: internalFilterStrict{include: "foo/metric"},
-					Action:              Group,
-					GroupResourceLabels: map[string]string{"resource.type": "foo"},
-				},
+var groupingTests = []metricsGroupingTest{
+	{
+		name: "metric_group_by_strict_name",
+		transforms: []internalTransform{
+			{
+				MetricIncludeFilter: internalFilterStrict{include: "foo/metric"},
+				Action:              Group,
+				GroupResourceLabels: map[string]string{"resource.type": "foo"},
 			},
 		},
-		{
-			name: "metric_group_regex_multiple_empty_resource",
-			transforms: []internalTransform{
-				{
-					MetricIncludeFilter: internalFilterRegexp{include: regexp.MustCompile("^container.(.*)$")},
-					Action:              Group,
-					GroupResourceLabels: map[string]string{"resource.type": "container"},
-				},
-				{
-					MetricIncludeFilter: internalFilterRegexp{include: regexp.MustCompile("^k8s.pod.(.*)$")},
-					Action:              Group,
-					GroupResourceLabels: map[string]string{"resource.type": "k8s.pod"},
-				},
+	},
+	{
+		name: "metric_group_regex_multiple_empty_resource",
+		transforms: []internalTransform{
+			{
+				MetricIncludeFilter: internalFilterRegexp{include: regexp.MustCompile("^container.(.*)$")},
+				Action:              Group,
+				GroupResourceLabels: map[string]string{"resource.type": "container"},
+			},
+			{
+				MetricIncludeFilter: internalFilterRegexp{include: regexp.MustCompile("^k8s.pod.(.*)$")},
+				Action:              Group,
+				GroupResourceLabels: map[string]string{"resource.type": "k8s.pod"},
 			},
 		},
-	}
-)
+	},
+}
 
 func TestMetricsGrouping(t *testing.T) {
 	for _, useOTLP := range []bool{false, true} {
@@ -79,29 +66,27 @@ func TestMetricsGrouping(t *testing.T) {
 					otlpDataModelGateEnabled: useOTLP,
 				}
 
-				mtp, err := processorhelper.NewMetricsProcessor(
+				mtp, err := processorhelper.NewMetrics(
 					context.Background(),
-					componenttest.NewNopProcessorCreateSettings(),
-					&Config{
-						ProcessorSettings: config.NewProcessorSettings(config.NewComponentID(typeStr)),
-					},
+					processortest.NewNopSettings(metadata.Type),
+					&Config{},
 					next, p.processMetrics, processorhelper.WithCapabilities(consumerCapabilities))
 				require.NoError(t, err)
 
 				caps := mtp.Capabilities()
-				assert.Equal(t, true, caps.MutatesData)
+				assert.True(t, caps.MutatesData)
 
-				input, err := golden.ReadMetrics(filepath.Join("testdata", "operation_group", test.name+"_in.json"))
+				input, err := golden.ReadMetrics(filepath.Join("testdata", "operation_group", test.name+"_in.yaml"))
 				require.NoError(t, err)
-				expected, err := golden.ReadMetrics(filepath.Join("testdata", "operation_group", test.name+"_out.json"))
+				expected, err := golden.ReadMetrics(filepath.Join("testdata", "operation_group", test.name+"_out.yaml"))
 				require.NoError(t, err)
 
 				cErr := mtp.ConsumeMetrics(context.Background(), input)
 				assert.NoError(t, cErr)
 
 				got := next.AllMetrics()
-				require.Equal(t, 1, len(got))
-				require.NoError(t, scrapertest.CompareMetrics(expected, got[0], scrapertest.IgnoreMetricValues()))
+				require.Len(t, got, 1)
+				require.NoError(t, pmetrictest.CompareMetrics(expected, got[0], pmetrictest.IgnoreMetricValues()))
 
 				assert.NoError(t, mtp.Shutdown(context.Background()))
 			})

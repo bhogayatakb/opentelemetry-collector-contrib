@@ -1,23 +1,12 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package awsecscontainermetrics // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsecscontainermetricsreceiver/internal/awsecscontainermetrics"
 
 import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.21.0"
 )
 
 func convertToOTLPMetrics(prefix string, m ECSMetrics, r pcommon.Resource, timestamp pcommon.Timestamp) pmetric.Metrics {
@@ -76,8 +65,7 @@ func convertStoppedContainerDataToOTMetrics(prefix string, containerResource pco
 func appendIntGauge(metricName string, unit string, value int64, ts pcommon.Timestamp, ilm pmetric.ScopeMetrics) {
 	metric := appendMetric(ilm, metricName, unit)
 
-	metric.SetDataType(pmetric.MetricDataTypeGauge)
-	intGauge := metric.Gauge()
+	intGauge := metric.SetEmptyGauge()
 
 	appendIntDataPoint(intGauge.DataPoints(), value, ts)
 }
@@ -85,25 +73,23 @@ func appendIntGauge(metricName string, unit string, value int64, ts pcommon.Time
 func appendIntSum(metricName string, unit string, value int64, ts pcommon.Timestamp, ilm pmetric.ScopeMetrics) {
 	metric := appendMetric(ilm, metricName, unit)
 
-	metric.SetDataType(pmetric.MetricDataTypeSum)
-	intSum := metric.Sum()
-	intSum.SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	intSum := metric.SetEmptySum()
+	intSum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 
 	appendIntDataPoint(intSum.DataPoints(), value, ts)
 }
 
 func appendDoubleGauge(metricName string, unit string, value float64, ts pcommon.Timestamp, ilm pmetric.ScopeMetrics) {
 	metric := appendMetric(ilm, metricName, unit)
-	metric.SetDataType(pmetric.MetricDataTypeGauge)
-	doubleGauge := metric.Gauge()
+	doubleGauge := metric.SetEmptyGauge()
 	dataPoint := doubleGauge.DataPoints().AppendEmpty()
-	dataPoint.SetDoubleVal(value)
+	dataPoint.SetDoubleValue(value)
 	dataPoint.SetTimestamp(ts)
 }
 
 func appendIntDataPoint(dataPoints pmetric.NumberDataPointSlice, value int64, ts pcommon.Timestamp) {
 	dataPoint := dataPoints.AppendEmpty()
-	dataPoint.SetIntVal(value)
+	dataPoint.SetIntValue(value)
 	dataPoint.SetTimestamp(ts)
 }
 

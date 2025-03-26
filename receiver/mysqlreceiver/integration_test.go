@@ -1,142 +1,120 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build integration
-// +build integration
 
 package mysqlreceiver
 
 import (
-	"context"
 	"net"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/consumer/consumertest"
+	"go.opentelemetry.io/collector/component"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/scraperinttest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
 )
 
-func TestMySqlIntegration(t *testing.T) {
-	t.Run("Running mysql version 8.0", func(t *testing.T) {
-		t.Parallel()
-		container := getContainer(t, containerRequest8_0)
-		defer func() {
-			require.NoError(t, container.Terminate(context.Background()))
-		}()
-		hostname, err := container.Host(context.Background())
-		require.NoError(t, err)
+const mysqlPort = "3306"
 
-		f := NewFactory()
-		cfg := f.CreateDefaultConfig().(*Config)
-		cfg.Endpoint = net.JoinHostPort(hostname, "3306")
-		cfg.Username = "otel"
-		cfg.Password = "otel"
-
-		consumer := new(consumertest.MetricsSink)
-		settings := componenttest.NewNopReceiverCreateSettings()
-		rcvr, err := f.CreateMetricsReceiver(context.Background(), settings, cfg, consumer)
-		require.NoError(t, err, "failed creating metrics receiver")
-		require.NoError(t, rcvr.Start(context.Background(), componenttest.NewNopHost()))
-		require.Eventuallyf(t, func() bool {
-			return len(consumer.AllMetrics()) > 0
-		}, 2*time.Minute, 1*time.Second, "failed to receive more than 0 metrics")
-		require.NoError(t, rcvr.Shutdown(context.Background()))
-
-		actualMetrics := consumer.AllMetrics()[0]
-
-		expectedFile := filepath.Join("testdata", "integration", "expected.8_0.json")
-		expectedMetrics, err := golden.ReadMetrics(expectedFile)
-		require.NoError(t, err)
-
-		scrapertest.CompareMetrics(expectedMetrics, actualMetrics, scrapertest.IgnoreMetricValues())
-	})
-
-	t.Run("Running mysql version 5.7", func(t *testing.T) {
-		t.Parallel()
-		container := getContainer(t, containerRequest5_7)
-		defer func() {
-			require.NoError(t, container.Terminate(context.Background()))
-		}()
-		hostname, err := container.Host(context.Background())
-		require.NoError(t, err)
-
-		f := NewFactory()
-		cfg := f.CreateDefaultConfig().(*Config)
-		cfg.Endpoint = net.JoinHostPort(hostname, "3307")
-		cfg.Username = "otel"
-		cfg.Password = "otel"
-
-		consumer := new(consumertest.MetricsSink)
-		settings := componenttest.NewNopReceiverCreateSettings()
-		rcvr, err := f.CreateMetricsReceiver(context.Background(), settings, cfg, consumer)
-		require.NoError(t, err, "failed creating metrics receiver")
-		require.NoError(t, rcvr.Start(context.Background(), componenttest.NewNopHost()))
-		require.Eventuallyf(t, func() bool {
-			return len(consumer.AllMetrics()) > 0
-		}, 2*time.Minute, 1*time.Second, "failed to receive more than 0 metrics")
-		require.NoError(t, rcvr.Shutdown(context.Background()))
-
-		actualMetrics := consumer.AllMetrics()[0]
-
-		expectedFile := filepath.Join("testdata", "integration", "expected.5_7.json")
-		expectedMetrics, err := golden.ReadMetrics(expectedFile)
-		require.NoError(t, err)
-
-		scrapertest.CompareMetrics(expectedMetrics, actualMetrics, scrapertest.IgnoreMetricValues())
-	})
+type MySQLTestConfig struct {
+	name         string
+	containerCmd []string
+	tlsEnabled   bool
+	insecureSkip bool
+	imageVersion string
+	expectedFile string
 }
 
-var (
-	containerRequest5_7 = testcontainers.ContainerRequest{
-		FromDockerfile: testcontainers.FromDockerfile{
-			Context:    filepath.Join("testdata", "integration"),
-			Dockerfile: "Dockerfile.mysql.5_7",
+func TestIntegration(t *testing.T) {
+	testCases := []MySQLTestConfig{
+		{
+			name:         "MySql-8.0.33-WithoutTLS",
+			containerCmd: nil,
+			tlsEnabled:   false,
+			insecureSkip: false,
+			imageVersion: "mysql:8.0.33",
+			expectedFile: "expected-mysql.yaml",
 		},
-		ExposedPorts: []string{"3307:3306"},
-		WaitingFor: wait.ForListeningPort("3306").
-			WithStartupTimeout(2 * time.Minute),
-	}
-	containerRequest8_0 = testcontainers.ContainerRequest{
-		FromDockerfile: testcontainers.FromDockerfile{
-			Context:    filepath.Join("testdata", "integration"),
-			Dockerfile: "Dockerfile.mysql.8_0",
+		{
+			name:         "MySql-8.0.33-WithTLS",
+			containerCmd: []string{"--auto_generate_certs=ON", "--require_secure_transport=ON"},
+			tlsEnabled:   true,
+			insecureSkip: true,
+			imageVersion: "mysql:8.0.33",
+			expectedFile: "expected-mysql.yaml",
 		},
-		ExposedPorts: []string{"3306:3306"},
-		WaitingFor: wait.ForListeningPort("3306").
-			WithStartupTimeout(2 * time.Minute),
+		{
+			name:         "MariaDB-11.6.2",
+			containerCmd: nil,
+			tlsEnabled:   false,
+			insecureSkip: false,
+			imageVersion: "mariadb:11.6.2-ubi9",
+			expectedFile: "expected-mariadb.yaml",
+		},
+		{
+			name:         "MariaDB-10.11.11",
+			containerCmd: nil,
+			tlsEnabled:   false,
+			insecureSkip: false,
+			imageVersion: "mariadb:10.11.11-ubi9",
+			expectedFile: "expected-mariadb.yaml",
+		},
 	}
-)
 
-func getContainer(t *testing.T, req testcontainers.ContainerRequest) testcontainers.Container {
-	require.NoError(t, req.Validate())
-	container, err := testcontainers.GenericContainer(
-		context.Background(),
-		testcontainers.GenericContainerRequest{
-			ContainerRequest: req,
-			Started:          true,
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			scraperinttest.NewIntegrationTest(
+				NewFactory(),
+				scraperinttest.WithContainerRequest(
+					testcontainers.ContainerRequest{
+						Image:        tc.imageVersion,
+						Cmd:          tc.containerCmd,
+						ExposedPorts: []string{mysqlPort},
+						WaitingFor: wait.ForListeningPort(mysqlPort).
+							WithStartupTimeout(2 * time.Minute),
+						Env: map[string]string{
+							"MYSQL_ROOT_PASSWORD": "otel",
+							"MYSQL_DATABASE":      "otel",
+							"MYSQL_USER":          "otel",
+							"MYSQL_PASSWORD":      "otel",
+						},
+						Files: []testcontainers.ContainerFile{
+							{
+								HostFilePath:      filepath.Join("testdata", "integration", "init.sh"),
+								ContainerFilePath: "/docker-entrypoint-initdb.d/init.sh",
+								FileMode:          700,
+							},
+						},
+					}),
+				scraperinttest.WithCustomConfig(
+					func(t *testing.T, cfg component.Config, ci *scraperinttest.ContainerInfo) {
+						rCfg := cfg.(*Config)
+						rCfg.CollectionInterval = time.Second
+						rCfg.Endpoint = net.JoinHostPort(ci.Host(t), ci.MappedPort(t, mysqlPort))
+						rCfg.Username = "otel"
+						rCfg.Password = "otel"
+						if tc.tlsEnabled {
+							rCfg.TLS.InsecureSkipVerify = tc.insecureSkip
+						} else {
+							rCfg.TLS.Insecure = true
+						}
+					}),
+				scraperinttest.WithExpectedFile(
+					filepath.Join("testdata", "integration", tc.expectedFile),
+				),
+				scraperinttest.WithCompareOptions(
+					pmetrictest.IgnoreResourceAttributeValue("mysql.instance.endpoint"),
+					pmetrictest.IgnoreMetricValues(),
+					pmetrictest.IgnoreMetricDataPointsOrder(),
+					pmetrictest.IgnoreStartTimestamp(),
+					pmetrictest.IgnoreTimestamp(),
+				),
+			).Run(t)
 		})
-	require.NoError(t, err)
-
-	code, err := container.Exec(context.Background(), []string{"/setup.sh"})
-	require.NoError(t, err)
-	require.Equal(t, 0, code)
-	return container
+	}
 }

@@ -1,18 +1,6 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
-// nolint:gocritic
 package host // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awscontainerinsightreceiver/internal/host"
 
 import (
@@ -101,16 +89,16 @@ func NewInfo(containerOrchestrator string, refreshInterval time.Duration, logger
 }
 
 func (m *Info) lazyInitEBSVolume(ctx context.Context) {
-	//wait until the instance id is ready
+	// wait until the instance id is ready
 	<-m.instanceIDReadyC
-	//Because ebs volumes only change occasionally, we refresh every 5 collection intervals to reduce ec2 api calls
+	// Because ebs volumes only change occasionally, we refresh every 5 collection intervals to reduce ec2 api calls
 	m.ebsVolume = m.ebsVolumeCreator(ctx, m.awsSession, m.GetInstanceID(), m.GetRegion(),
 		5*m.refreshInterval, m.logger)
 	close(m.ebsVolumeReadyC)
 }
 
 func (m *Info) lazyInitEC2Tags(ctx context.Context) {
-	//wait until the instance id is ready
+	// wait until the instance id is ready
 	<-m.instanceIDReadyC
 	m.ec2Tags = m.ec2TagsCreator(ctx, m.awsSession, m.GetInstanceID(), m.GetRegion(), m.containerOrchestrator, m.refreshInterval, m.logger)
 	close(m.ec2TagsReadyC)

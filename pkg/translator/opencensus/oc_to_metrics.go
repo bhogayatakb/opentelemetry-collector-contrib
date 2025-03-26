@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package opencensus // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/opencensus"
 
@@ -22,9 +11,8 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
-// OCToMetrics converts OC data format to data.MetricData.
-// Deprecated: use pmetric.Metrics instead. OCToMetrics may be used only by OpenCensus
-// receiver and exporter implementations.
+// OCToMetrics converts OC data format to pmetric.Metrics,
+// may be used only by OpenCensus receiver and exporter implementations.
 func OCToMetrics(node *occommon.Node, resource *ocresource.Resource, metrics []*ocmetrics.Metric) pmetric.Metrics {
 	dest := pmetric.NewMetrics()
 	if node == nil && resource == nil && len(metrics) == 0 {
@@ -144,7 +132,7 @@ func ocMetricToMetrics(ocMetric *ocmetrics.Metric, metric pmetric.Metric) {
 	}
 
 	dataType, valType := descriptorTypeToMetrics(ocDescriptor.Type, metric)
-	if dataType == pmetric.MetricDataTypeNone {
+	if dataType == pmetric.MetricTypeEmpty {
 		pmetric.NewMetric().CopyTo(metric)
 		return
 	}
@@ -156,49 +144,46 @@ func ocMetricToMetrics(ocMetric *ocmetrics.Metric, metric pmetric.Metric) {
 	setDataPoints(ocMetric, metric, valType)
 }
 
-func descriptorTypeToMetrics(t ocmetrics.MetricDescriptor_Type, metric pmetric.Metric) (pmetric.MetricDataType, pmetric.NumberDataPointValueType) {
+func descriptorTypeToMetrics(t ocmetrics.MetricDescriptor_Type, metric pmetric.Metric) (pmetric.MetricType, pmetric.NumberDataPointValueType) {
 	switch t {
 	case ocmetrics.MetricDescriptor_GAUGE_INT64:
-		metric.SetDataType(pmetric.MetricDataTypeGauge)
-		return pmetric.MetricDataTypeGauge, pmetric.NumberDataPointValueTypeInt
+		metric.SetEmptyGauge()
+		return pmetric.MetricTypeGauge, pmetric.NumberDataPointValueTypeInt
 	case ocmetrics.MetricDescriptor_GAUGE_DOUBLE:
-		metric.SetDataType(pmetric.MetricDataTypeGauge)
-		return pmetric.MetricDataTypeGauge, pmetric.NumberDataPointValueTypeDouble
+		metric.SetEmptyGauge()
+		return pmetric.MetricTypeGauge, pmetric.NumberDataPointValueTypeDouble
 	case ocmetrics.MetricDescriptor_CUMULATIVE_INT64:
-		metric.SetDataType(pmetric.MetricDataTypeSum)
-		sum := metric.Sum()
+		sum := metric.SetEmptySum()
 		sum.SetIsMonotonic(true)
-		sum.SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
-		return pmetric.MetricDataTypeSum, pmetric.NumberDataPointValueTypeInt
+		sum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+		return pmetric.MetricTypeSum, pmetric.NumberDataPointValueTypeInt
 	case ocmetrics.MetricDescriptor_CUMULATIVE_DOUBLE:
-		metric.SetDataType(pmetric.MetricDataTypeSum)
-		sum := metric.Sum()
+		sum := metric.SetEmptySum()
 		sum.SetIsMonotonic(true)
-		sum.SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
-		return pmetric.MetricDataTypeSum, pmetric.NumberDataPointValueTypeDouble
+		sum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+		return pmetric.MetricTypeSum, pmetric.NumberDataPointValueTypeDouble
 	case ocmetrics.MetricDescriptor_CUMULATIVE_DISTRIBUTION:
-		metric.SetDataType(pmetric.MetricDataTypeHistogram)
-		histo := metric.Histogram()
-		histo.SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
-		return pmetric.MetricDataTypeHistogram, pmetric.NumberDataPointValueTypeNone
+		histo := metric.SetEmptyHistogram()
+		histo.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+		return pmetric.MetricTypeHistogram, pmetric.NumberDataPointValueTypeEmpty
 	case ocmetrics.MetricDescriptor_SUMMARY:
-		metric.SetDataType(pmetric.MetricDataTypeSummary)
+		metric.SetEmptySummary()
 		// no temporality specified for summary metric
-		return pmetric.MetricDataTypeSummary, pmetric.NumberDataPointValueTypeNone
+		return pmetric.MetricTypeSummary, pmetric.NumberDataPointValueTypeEmpty
 	}
-	return pmetric.MetricDataTypeNone, pmetric.NumberDataPointValueTypeNone
+	return pmetric.MetricTypeEmpty, pmetric.NumberDataPointValueTypeEmpty
 }
 
 // setDataPoints converts OC timeseries to internal datapoints based on metric type
 func setDataPoints(ocMetric *ocmetrics.Metric, metric pmetric.Metric, valType pmetric.NumberDataPointValueType) {
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	switch metric.Type() {
+	case pmetric.MetricTypeGauge:
 		fillNumberDataPoint(ocMetric, metric.Gauge().DataPoints(), valType)
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		fillNumberDataPoint(ocMetric, metric.Sum().DataPoints(), valType)
-	case pmetric.MetricDataTypeHistogram:
+	case pmetric.MetricTypeHistogram:
 		fillDoubleHistogramDataPoint(ocMetric, metric.Histogram().DataPoints())
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeSummary:
 		fillDoubleSummaryDataPoint(ocMetric, metric.Summary().DataPoints())
 	}
 }
@@ -215,13 +200,12 @@ func fillAttributesMap(ocLabelsKeys []*ocmetrics.LabelKey, ocLabelValues []*ocme
 		lablesCount = len(ocLabelValues)
 	}
 
-	attributesMap.Clear()
 	attributesMap.EnsureCapacity(lablesCount)
 	for i := 0; i < lablesCount; i++ {
 		if !ocLabelValues[i].GetHasValue() {
 			continue
 		}
-		attributesMap.UpsertString(ocLabelsKeys[i].Key, ocLabelValues[i].Value)
+		attributesMap.PutStr(ocLabelsKeys[i].Key, ocLabelValues[i].Value)
 	}
 }
 
@@ -246,9 +230,9 @@ func fillNumberDataPoint(ocMetric *ocmetrics.Metric, dps pmetric.NumberDataPoint
 			fillAttributesMap(ocLabelsKeys, timeseries.LabelValues, dp.Attributes())
 			switch valType {
 			case pmetric.NumberDataPointValueTypeInt:
-				dp.SetIntVal(point.GetInt64Value())
+				dp.SetIntValue(point.GetInt64Value())
 			case pmetric.NumberDataPointValueTypeDouble:
-				dp.SetDoubleVal(point.GetDoubleValue())
+				dp.SetDoubleValue(point.GetDoubleValue())
 			}
 		}
 	}
@@ -277,8 +261,7 @@ func fillDoubleHistogramDataPoint(ocMetric *ocmetrics.Metric, dps pmetric.Histog
 			dp.SetSum(distributionValue.GetSum())
 			dp.SetCount(uint64(distributionValue.GetCount()))
 			ocHistogramBucketsToMetrics(distributionValue.GetBuckets(), dp)
-			dp.SetExplicitBounds(
-				pcommon.NewImmutableFloat64Slice(distributionValue.GetBucketOptions().GetExplicit().GetBounds()))
+			dp.ExplicitBounds().FromRaw(distributionValue.GetBucketOptions().GetExplicit().GetBounds())
 		}
 	}
 }
@@ -322,7 +305,7 @@ func ocHistogramBucketsToMetrics(ocBuckets []*ocmetrics.DistributionValue_Bucket
 			exemplarToMetrics(ocBuckets[i].GetExemplar(), exemplar)
 		}
 	}
-	dp.SetBucketCounts(pcommon.NewImmutableUInt64Slice(buckets))
+	dp.BucketCounts().FromRaw(buckets)
 }
 
 func ocSummaryPercentilesToMetrics(ocPercentiles []*ocmetrics.SummaryValue_Snapshot_ValueAtPercentile, dp pmetric.SummaryDataPoint) {
@@ -330,7 +313,7 @@ func ocSummaryPercentilesToMetrics(ocPercentiles []*ocmetrics.SummaryValue_Snaps
 		return
 	}
 
-	quantiles := pmetric.NewValueAtQuantileSlice()
+	quantiles := pmetric.NewSummaryDataPointValueAtQuantileSlice()
 	quantiles.EnsureCapacity(len(ocPercentiles))
 
 	for _, percentile := range ocPercentiles {
@@ -347,12 +330,11 @@ func exemplarToMetrics(ocExemplar *ocmetrics.DistributionValue_Exemplar, exempla
 		exemplar.SetTimestamp(pcommon.NewTimestampFromTime(ocExemplar.GetTimestamp().AsTime()))
 	}
 	ocAttachments := ocExemplar.GetAttachments()
-	exemplar.SetDoubleVal(ocExemplar.GetValue())
+	exemplar.SetDoubleValue(ocExemplar.GetValue())
 	filteredAttributes := exemplar.FilteredAttributes()
-	filteredAttributes.Clear()
 	filteredAttributes.EnsureCapacity(len(ocAttachments))
 	for k, v := range ocAttachments {
-		filteredAttributes.UpsertString(k, v)
+		filteredAttributes.PutStr(k, v)
 	}
 }
 

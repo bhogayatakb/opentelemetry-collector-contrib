@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package awsfirehosereceiver
 
@@ -20,37 +9,61 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configtls"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsfirehosereceiver/internal/metadata"
 )
 
 func TestLoadConfig(t *testing.T) {
-	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+	for _, configType := range []string{
+		"cwmetrics", "cwlogs", "otlp_v1",
+	} {
+		t.Run(configType, func(t *testing.T) {
+			fileName := configType + "_config.yaml"
+			cm, err := confmaptest.LoadConf(filepath.Join("testdata", fileName))
+			require.NoError(t, err)
+
+			factory := NewFactory()
+			cfg := factory.CreateDefaultConfig()
+
+			sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "").String())
+			require.NoError(t, err)
+			require.NoError(t, sub.Unmarshal(cfg))
+
+			err = xconfmap.Validate(cfg)
+			assert.NoError(t, err)
+			require.Equal(t, &Config{
+				RecordType: configType,
+				AccessKey:  "some_access_key",
+				ServerConfig: confighttp.ServerConfig{
+					Endpoint: "0.0.0.0:4433",
+					TLSSetting: &configtls.ServerConfig{
+						Config: configtls.Config{
+							CertFile: "server.crt",
+							KeyFile:  "server.key",
+						},
+					},
+				},
+			}, cfg)
+		})
+	}
+}
+
+func TestLoadConfigInvalid(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "invalid_config.yaml"))
 	require.NoError(t, err)
 
 	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
 
-	sub, err := cm.Sub(config.NewComponentIDWithName(typeStr, "").String())
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "").String())
 	require.NoError(t, err)
-	require.NoError(t, config.UnmarshalReceiver(sub, cfg))
+	require.NoError(t, sub.Unmarshal(cfg))
 
-	assert.NoError(t, cfg.Validate())
-
-	require.Equal(t, &Config{
-		ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
-		RecordType:       "cwmetrics",
-		AccessKey:        "some_access_key",
-		HTTPServerSettings: confighttp.HTTPServerSettings{
-			Endpoint: "0.0.0.0:4433",
-			TLSSetting: &configtls.TLSServerSetting{
-				TLSSetting: configtls.TLSSetting{
-					CertFile: "server.crt",
-					KeyFile:  "server.key",
-				},
-			},
-		},
-	}, cfg)
+	err = xconfmap.Validate(cfg)
+	assert.ErrorIs(t, err, errRecordTypeEncodingSet)
 }

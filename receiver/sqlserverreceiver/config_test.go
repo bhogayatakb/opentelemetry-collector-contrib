@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package sqlserverreceiver
 
@@ -18,53 +7,156 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/service/servicetest"
+	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/sqlserverreceiver/internal/metadata"
 )
 
 func TestValidate(t *testing.T) {
 	testCases := []struct {
-		desc string
-		cfg  *Config
+		desc            string
+		cfg             *Config
+		expectedSuccess bool
 	}{
 		{
 			desc: "valid config",
 			cfg: &Config{
-				Metrics: metadata.DefaultMetricsSettings(),
+				MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
+				ControllerConfig:     scraperhelper.NewDefaultControllerConfig(),
 			},
-		}, {
-			desc: "valid config with no metric settings",
-			cfg:  &Config{},
+			expectedSuccess: true,
 		},
 		{
-			desc: "default config is valid",
-			cfg:  createDefaultConfig().(*Config),
+			desc: "valid config with no metric settings",
+			cfg: &Config{
+				ControllerConfig: scraperhelper.NewDefaultControllerConfig(),
+			},
+			expectedSuccess: true,
+		},
+		{
+			desc:            "default config is valid",
+			cfg:             createDefaultConfig().(*Config),
+			expectedSuccess: true,
+		},
+		{
+			desc: "invalid config with partial direct connect settings",
+			cfg: &Config{
+				ControllerConfig: scraperhelper.NewDefaultControllerConfig(),
+				Server:           "0.0.0.0",
+				Username:         "sa",
+			},
+			expectedSuccess: false,
+		},
+		{
+			desc: "valid config with all direct connection settings",
+			cfg: &Config{
+				ControllerConfig: scraperhelper.NewDefaultControllerConfig(),
+				Server:           "0.0.0.0",
+				Username:         "sa",
+				Password:         "password",
+				Port:             1433,
+			},
+			expectedSuccess: true,
+		},
+		{
+			desc: "config with invalid MaxQuerySampleCount value",
+			cfg: &Config{
+				MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
+				ControllerConfig:     scraperhelper.NewDefaultControllerConfig(),
+				TopQueryCollection: TopQueryCollection{
+					MaxQuerySampleCount: 100000,
+				},
+			},
+			expectedSuccess: false,
+		},
+		{
+			desc: "config with invalid TopQueryCount value",
+			cfg: &Config{
+				MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
+				ControllerConfig:     scraperhelper.NewDefaultControllerConfig(),
+				TopQueryCollection: TopQueryCollection{
+					MaxQuerySampleCount: 100,
+					TopQueryCount:       200000,
+				},
+			},
+			expectedSuccess: false,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			actualErr := tc.cfg.Validate()
-			require.NoError(t, actualErr)
+			if tc.expectedSuccess {
+				require.NoError(t, xconfmap.Validate(tc.cfg))
+			} else {
+				require.Error(t, xconfmap.Validate(tc.cfg))
+			}
 		})
 	}
 }
 
 func TestLoadConfig(t *testing.T) {
-	factories, err := componenttest.NopFactories()
-	require.Nil(t, err)
+	t.Run("default", func(t *testing.T) {
+		cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+		require.NoError(t, err)
+		factory := NewFactory()
+		cfg := factory.CreateDefaultConfig()
 
-	factory := NewFactory()
-	factories.Receivers[typeStr] = factory
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
+		sub, err := cm.Sub("sqlserver")
+		require.NoError(t, err)
+		require.NoError(t, sub.Unmarshal(cfg))
 
-	require.Equal(t, len(cfg.Receivers), 1)
+		assert.NoError(t, xconfmap.Validate(cfg))
+		assert.Equal(t, factory.CreateDefaultConfig(), cfg)
+	})
 
-	require.Equal(t, factory.CreateDefaultConfig(), cfg.Receivers[config.NewComponentID("sqlserver")])
+	t.Run("named", func(t *testing.T) {
+		cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+		require.NoError(t, err)
+
+		factory := NewFactory()
+		cfg := factory.CreateDefaultConfig()
+
+		expected := factory.CreateDefaultConfig().(*Config)
+		expected.MetricsBuilderConfig = metadata.MetricsBuilderConfig{
+			Metrics: metadata.DefaultMetricsConfig(),
+			ResourceAttributes: metadata.ResourceAttributesConfig{
+				SqlserverDatabaseName: metadata.ResourceAttributeConfig{
+					Enabled: true,
+				},
+				SqlserverInstanceName: metadata.ResourceAttributeConfig{
+					Enabled: true,
+				},
+				SqlserverComputerName: metadata.ResourceAttributeConfig{
+					Enabled: true,
+				},
+				ServerAddress: metadata.ResourceAttributeConfig{
+					Enabled: true,
+				},
+				ServerPort: metadata.ResourceAttributeConfig{
+					Enabled: true,
+				},
+			},
+		}
+		expected.ComputerName = "CustomServer"
+		expected.InstanceName = "CustomInstance"
+		expected.Enabled = true
+		expected.LookbackTime = 60
+		expected.TopQueryCount = 200
+		expected.TopQueryCollection.MaxQuerySampleCount = 1000
+
+		sub, err := cm.Sub("sqlserver/named")
+		require.NoError(t, err)
+		require.NoError(t, sub.Unmarshal(cfg))
+
+		assert.NoError(t, xconfmap.Validate(cfg))
+		if diff := cmp.Diff(expected, cfg, cmpopts.IgnoreUnexported(metadata.MetricConfig{}), cmpopts.IgnoreUnexported(metadata.ResourceAttributeConfig{})); diff != "" {
+			t.Errorf("Config mismatch (-expected +actual):\n%s", diff)
+		}
+	})
 }

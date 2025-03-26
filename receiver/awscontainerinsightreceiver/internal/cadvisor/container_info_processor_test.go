@@ -1,19 +1,7 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build linux
-// +build linux
 
 package cadvisor
 
@@ -21,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awscontainerinsightreceiver/internal/cadvisor/extractors"
@@ -61,8 +50,7 @@ func TestIsContainerInContainer(t *testing.T) {
 
 func TestProcessContainers(t *testing.T) {
 	// set the metrics extractors for testing
-	originalMetricsExtractors := metricsExtractors
-	metricsExtractors = []extractors.MetricExtractor{}
+	metricsExtractors := []extractors.MetricExtractor{}
 	metricsExtractors = append(metricsExtractors, extractors.NewCPUMetricExtractor(zap.NewNop()))
 	metricsExtractors = append(metricsExtractors, extractors.NewMemMetricExtractor(zap.NewNop()))
 	metricsExtractors = append(metricsExtractors, extractors.NewDiskIOMetricExtractor(zap.NewNop()))
@@ -75,9 +63,10 @@ func TestProcessContainers(t *testing.T) {
 	containerInContainerInfos := testutils.LoadContainerInfo(t, "./extractors/testdata/ContainerInContainer.json")
 	containerInfos = append(containerInfos, containerInContainerInfos...)
 	mInfo := testutils.MockCPUMemInfo{}
-	metrics := processContainers(containerInfos, mInfo, "eks", zap.NewNop())
-	assert.Equal(t, 3, len(metrics))
+	metrics := processContainers(containerInfos, mInfo, "eks", zap.NewNop(), metricsExtractors)
+	assert.Len(t, metrics, 3)
 
-	// restore the original value of metrics extractors
-	metricsExtractors = originalMetricsExtractors
+	for _, e := range metricsExtractors {
+		require.NoError(t, e.Shutdown())
+	}
 }

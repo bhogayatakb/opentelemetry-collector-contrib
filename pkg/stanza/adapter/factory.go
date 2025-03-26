@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package adapter // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/adapter"
 
@@ -18,93 +7,95 @@ import (
 	"context"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/obsreport"
+	"go.opentelemetry.io/collector/featuregate"
+	rcvr "go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/receiverhelper"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/consumerretry"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/pipeline"
+)
+
+var synchronousLogEmitterFeatureGate = featuregate.GlobalRegistry().MustRegister(
+	"stanza.synchronousLogEmitter",
+	featuregate.StageAlpha,
+	featuregate.WithRegisterDescription("Prevents possible data loss in Stanza-based receivers by emitting logs synchronously."),
+	featuregate.WithRegisterFromVersion("v0.122.0"),
+	featuregate.WithRegisterReferenceURL("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/35456"),
 )
 
 // LogReceiverType is the interface used by stanza-based log receivers
 type LogReceiverType interface {
-	Type() config.Type
-	CreateDefaultConfig() config.Receiver
-	BaseConfig(config.Receiver) BaseConfig
-	DecodeInputConfig(config.Receiver) (*operator.Config, error)
+	Type() component.Type
+	CreateDefaultConfig() component.Config
+	BaseConfig(component.Config) BaseConfig
+	InputConfig(component.Config) operator.Config
 }
 
 // NewFactory creates a factory for a Stanza-based receiver
-func NewFactory(logReceiverType LogReceiverType, sl component.StabilityLevel) component.ReceiverFactory {
-	return component.NewReceiverFactory(
+func NewFactory(logReceiverType LogReceiverType, sl component.StabilityLevel) rcvr.Factory {
+	return rcvr.NewFactory(
 		logReceiverType.Type(),
 		logReceiverType.CreateDefaultConfig,
-		component.WithLogsReceiver(createLogsReceiver(logReceiverType), sl),
+		rcvr.WithLogs(createLogsReceiver(logReceiverType), sl),
 	)
 }
 
-func createLogsReceiver(logReceiverType LogReceiverType) component.CreateLogsReceiverFunc {
+func createLogsReceiver(logReceiverType LogReceiverType) rcvr.CreateLogsFunc {
 	return func(
-		ctx context.Context,
-		params component.ReceiverCreateSettings,
-		cfg config.Receiver,
+		_ context.Context,
+		params rcvr.Settings,
+		cfg component.Config,
 		nextConsumer consumer.Logs,
-	) (component.LogsReceiver, error) {
-		inputCfg, err := logReceiverType.DecodeInputConfig(cfg)
-		if err != nil {
-			return nil, err
-		}
-
+	) (rcvr.Logs, error) {
+		inputCfg := logReceiverType.InputConfig(cfg)
 		baseCfg := logReceiverType.BaseConfig(cfg)
-		operatorCfgs, err := baseCfg.DecodeOperatorConfigs()
+
+		operators := append([]operator.Config{inputCfg}, baseCfg.Operators...)
+
+		obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
+			ReceiverID:             params.ID,
+			ReceiverCreateSettings: params,
+		})
 		if err != nil {
 			return nil, err
 		}
-
-		operators := append([]operator.Config{*inputCfg}, operatorCfgs...)
-
-		emitterOpts := []LogEmitterOption{
-			LogEmitterWithLogger(params.Logger.Sugar()),
+		rcv := &receiver{
+			set:       params.TelemetrySettings,
+			id:        params.ID,
+			consumer:  consumerretry.NewLogs(baseCfg.RetryOnFailure, params.Logger, nextConsumer),
+			obsrecv:   obsrecv,
+			storageID: baseCfg.StorageID,
 		}
 
-		if baseCfg.Converter.MaxFlushCount > 0 {
-			emitterOpts = append(emitterOpts, LogEmitterWithMaxBatchSize(baseCfg.Converter.MaxFlushCount))
+		var emitterOpts []helper.EmitterOption
+		if baseCfg.maxBatchSize > 0 {
+			emitterOpts = append(emitterOpts, helper.WithMaxBatchSize(baseCfg.maxBatchSize))
+		}
+		if baseCfg.flushInterval > 0 {
+			emitterOpts = append(emitterOpts, helper.WithFlushInterval(baseCfg.flushInterval))
 		}
 
-		if baseCfg.Converter.FlushInterval > 0 {
-			emitterOpts = append(emitterOpts, LogEmitterWithFlushInterval(baseCfg.Converter.FlushInterval))
+		var emitter helper.LogEmitter
+		if synchronousLogEmitterFeatureGate.IsEnabled() {
+			emitter = helper.NewSynchronousLogEmitter(params.TelemetrySettings, rcv.consumeEntries)
+		} else {
+			emitter = helper.NewBatchingLogEmitter(params.TelemetrySettings, rcv.consumeEntries, emitterOpts...)
 		}
 
-		emitter := NewLogEmitter(emitterOpts...)
 		pipe, err := pipeline.Config{
 			Operators:     operators,
 			DefaultOutput: emitter,
-		}.Build(params.Logger.Sugar())
+		}.Build(params.TelemetrySettings)
 		if err != nil {
 			return nil, err
 		}
 
-		opts := []ConverterOption{
-			WithLogger(params.Logger),
-		}
+		rcv.emitter = emitter
+		rcv.pipe = pipe
 
-		if baseCfg.Converter.WorkerCount > 0 {
-			opts = append(opts, WithWorkerCount(baseCfg.Converter.WorkerCount))
-		}
-		converter := NewConverter(opts...)
-		obsrecv := obsreport.NewReceiver(obsreport.ReceiverSettings{
-			ReceiverID:             cfg.ID(),
-			ReceiverCreateSettings: params,
-		})
-		return &receiver{
-			id:        cfg.ID(),
-			pipe:      pipe,
-			emitter:   emitter,
-			consumer:  nextConsumer,
-			logger:    params.Logger,
-			converter: converter,
-			obsrecv:   obsrecv,
-			storageID: baseCfg.StorageID,
-		}, nil
+		return rcv, nil
 	}
 }

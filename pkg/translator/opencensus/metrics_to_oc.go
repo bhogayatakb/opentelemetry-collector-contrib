@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package opencensus // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/opencensus"
 
@@ -35,9 +24,8 @@ type labelKeysAndType struct {
 	allNumberDataPointValueInt bool
 }
 
-// ResourceMetricsToOC may be used only by OpenCensus receiver and exporter implementations.
-// Deprecated: Use pmetric.Metrics.
-// TODO: move this function to OpenCensus package.
+// ResourceMetricsToOC converts pmetric.ResourceMetrics to OC data format,
+// may be used only by OpenCensus receiver and exporter implementations.
 func ResourceMetricsToOC(rm pmetric.ResourceMetrics) (*occommon.Node, *ocresource.Resource, []*ocmetrics.Metric) {
 	node, resource := internalResourceToOC(rm.Resource())
 	ilms := rm.ScopeMetrics()
@@ -93,14 +81,14 @@ func collectLabelKeysAndValueType(metric pmetric.Metric) *labelKeysAndType {
 	// First, collect a set of all labels present in the metric
 	keySet := make(map[string]struct{})
 	allNumberDataPointValueInt := false
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	switch metric.Type() {
+	case pmetric.MetricTypeGauge:
 		allNumberDataPointValueInt = collectLabelKeysNumberDataPoints(metric.Gauge().DataPoints(), keySet)
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		allNumberDataPointValueInt = collectLabelKeysNumberDataPoints(metric.Sum().DataPoints(), keySet)
-	case pmetric.MetricDataTypeHistogram:
+	case pmetric.MetricTypeHistogram:
 		collectLabelKeysHistogramDataPoints(metric.Histogram().DataPoints(), keySet)
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeSummary:
 		collectLabelKeysSummaryDataPoints(metric.Summary().DataPoints(), keySet)
 	}
 
@@ -161,29 +149,28 @@ func collectLabelKeysSummaryDataPoints(dhdp pmetric.SummaryDataPointSlice, keySe
 }
 
 func addLabelKeys(keySet map[string]struct{}, attributes pcommon.Map) {
-	attributes.Range(func(k string, v pcommon.Value) bool {
+	for k := range attributes.All() {
 		keySet[k] = struct{}{}
-		return true
-	})
+	}
 }
 
 func descriptorTypeToOC(metric pmetric.Metric, allNumberDataPointValueInt bool) ocmetrics.MetricDescriptor_Type {
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	switch metric.Type() {
+	case pmetric.MetricTypeGauge:
 		return gaugeType(allNumberDataPointValueInt)
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		sd := metric.Sum()
-		if sd.IsMonotonic() && sd.AggregationTemporality() == pmetric.MetricAggregationTemporalityCumulative {
+		if sd.IsMonotonic() && sd.AggregationTemporality() == pmetric.AggregationTemporalityCumulative {
 			return cumulativeType(allNumberDataPointValueInt)
 		}
 		return gaugeType(allNumberDataPointValueInt)
-	case pmetric.MetricDataTypeHistogram:
+	case pmetric.MetricTypeHistogram:
 		hd := metric.Histogram()
-		if hd.AggregationTemporality() == pmetric.MetricAggregationTemporalityCumulative {
+		if hd.AggregationTemporality() == pmetric.AggregationTemporalityCumulative {
 			return ocmetrics.MetricDescriptor_CUMULATIVE_DISTRIBUTION
 		}
 		return ocmetrics.MetricDescriptor_GAUGE_DISTRIBUTION
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeSummary:
 		return ocmetrics.MetricDescriptor_SUMMARY
 	}
 	return ocmetrics.MetricDescriptor_UNSPECIFIED
@@ -204,14 +191,14 @@ func cumulativeType(allNumberDataPointValueInt bool) ocmetrics.MetricDescriptor_
 }
 
 func dataPointsToTimeseries(metric pmetric.Metric, labelKeys *labelKeysAndType) []*ocmetrics.TimeSeries {
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	switch metric.Type() {
+	case pmetric.MetricTypeGauge:
 		return numberDataPointsToOC(metric.Gauge().DataPoints(), labelKeys)
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		return numberDataPointsToOC(metric.Sum().DataPoints(), labelKeys)
-	case pmetric.MetricDataTypeHistogram:
+	case pmetric.MetricTypeHistogram:
 		return doubleHistogramPointToOC(metric.Histogram().DataPoints(), labelKeys)
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeSummary:
 		return doubleSummaryPointToOC(metric.Summary().DataPoints(), labelKeys)
 	}
 
@@ -231,11 +218,11 @@ func numberDataPointsToOC(dps pmetric.NumberDataPointSlice, labelKeys *labelKeys
 		switch dp.ValueType() {
 		case pmetric.NumberDataPointValueTypeInt:
 			point.Value = &ocmetrics.Point_Int64Value{
-				Int64Value: dp.IntVal(),
+				Int64Value: dp.IntValue(),
 			}
 		case pmetric.NumberDataPointValueTypeDouble:
 			point.Value = &ocmetrics.Point_DoubleValue{
-				DoubleValue: dp.DoubleVal(),
+				DoubleValue: dp.DoubleValue(),
 			}
 		}
 		ts := &ocmetrics.TimeSeries{
@@ -281,7 +268,7 @@ func doubleHistogramPointToOC(dps pmetric.HistogramDataPointSlice, labelKeys *la
 	return timeseries
 }
 
-func histogramExplicitBoundsToOC(bounds pcommon.ImmutableFloat64Slice) *ocmetrics.DistributionValue_BucketOptions {
+func histogramExplicitBoundsToOC(bounds pcommon.Float64Slice) *ocmetrics.DistributionValue_BucketOptions {
 	if bounds.Len() == 0 {
 		return nil
 	}
@@ -295,7 +282,7 @@ func histogramExplicitBoundsToOC(bounds pcommon.ImmutableFloat64Slice) *ocmetric
 	}
 }
 
-func histogramBucketsToOC(bcts pcommon.ImmutableUInt64Slice) []*ocmetrics.DistributionValue_Bucket {
+func histogramBucketsToOC(bcts pcommon.UInt64Slice) []*ocmetrics.DistributionValue_Bucket {
 	if bcts.Len() == 0 {
 		return nil
 	}
@@ -341,7 +328,7 @@ func doubleSummaryPointToOC(dps pmetric.SummaryDataPointSlice, labelKeys *labelK
 	return timeseries
 }
 
-func summaryPercentilesToOC(qtls pmetric.ValueAtQuantileSlice) []*ocmetrics.SummaryValue_Snapshot_ValueAtPercentile {
+func summaryPercentilesToOC(qtls pmetric.SummaryDataPointValueAtQuantileSlice) []*ocmetrics.SummaryValue_Snapshot_ValueAtPercentile {
 	if qtls.Len() == 0 {
 		return nil
 	}
@@ -357,7 +344,7 @@ func summaryPercentilesToOC(qtls pmetric.ValueAtQuantileSlice) []*ocmetrics.Summ
 	return ocPercentiles
 }
 
-func exemplarsToOC(bounds pcommon.ImmutableFloat64Slice, ocBuckets []*ocmetrics.DistributionValue_Bucket, exemplars pmetric.ExemplarSlice) {
+func exemplarsToOC(bounds pcommon.Float64Slice, ocBuckets []*ocmetrics.DistributionValue_Bucket, exemplars pmetric.ExemplarSlice) {
 	if exemplars.Len() == 0 {
 		return
 	}
@@ -367,9 +354,9 @@ func exemplarsToOC(bounds pcommon.ImmutableFloat64Slice, ocBuckets []*ocmetrics.
 		var val float64
 		switch exemplar.ValueType() {
 		case pmetric.ExemplarValueTypeInt:
-			val = float64(exemplar.IntVal())
+			val = float64(exemplar.IntValue())
 		case pmetric.ExemplarValueTypeDouble:
-			val = exemplar.DoubleVal()
+			val = exemplar.DoubleValue()
 		}
 		pos := 0
 		for ; pos < bounds.Len(); pos++ {
@@ -386,10 +373,9 @@ func exemplarToOC(filteredLabels pcommon.Map, value float64, timestamp pcommon.T
 	var labels map[string]string
 	if filteredLabels.Len() != 0 {
 		labels = make(map[string]string, filteredLabels.Len())
-		filteredLabels.Range(func(k string, v pcommon.Value) bool {
+		for k, v := range filteredLabels.All() {
 			labels[k] = v.AsString()
-			return true
-		})
+		}
 	}
 
 	return &ocmetrics.DistributionValue_Exemplar{
@@ -413,7 +399,7 @@ func attributeValuesToOC(labels pcommon.Map, labelKeys *labelKeysAndType) []*ocm
 	}
 
 	// Visit all defined labels in the point and override defaults with actual values
-	labels.Range(func(k string, v pcommon.Value) bool {
+	for k, v := range labels.All() {
 		// Find the appropriate label value that we need to update
 		keyIndex := labelKeys.keyIndices[k]
 		labelValue := labelValues[keyIndex]
@@ -421,8 +407,7 @@ func attributeValuesToOC(labels pcommon.Map, labelKeys *labelKeysAndType) []*ocm
 		// Update label value
 		labelValue.Value = v.AsString()
 		labelValue.HasValue = true
-		return true
-	})
+	}
 
 	return labelValues
 }

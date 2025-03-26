@@ -1,154 +1,132 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package lokiexporter
 
 import (
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/configopaque"
+	"go.opentelemetry.io/collector/config/configretry"
 	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-	"go.opentelemetry.io/collector/service/servicetest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/lokiexporter/internal/metadata"
 )
 
 func TestLoadConfigNewExporter(t *testing.T) {
-	factories, err := componenttest.NopFactories()
-	assert.Nil(t, err)
-
-	factory := NewFactory()
-	factories.Exporters[typeStr] = factory
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
-
-	require.NoError(t, err)
-	require.NotNil(t, cfg)
-
-	assert.Equal(t, 2, len(cfg.Exporters))
-
-	actualCfg := cfg.Exporters[config.NewComponentIDWithName(typeStr, "allsettings")].(*Config)
-	expectedCfg := Config{
-		ExporterSettings: config.NewExporterSettings(config.NewComponentIDWithName(typeStr, "allsettings")),
-		HTTPClientSettings: confighttp.HTTPClientSettings{
-			Headers: map[string]string{
-				"X-Custom-Header": "loki_rocks",
-			},
-			Endpoint: "https://loki:3100/loki/api/v1/push",
-			TLSSetting: configtls.TLSClientSetting{
-				TLSSetting: configtls.TLSSetting{
-					CAFile:   "/var/lib/mycert.pem",
-					CertFile: "certfile",
-					KeyFile:  "keyfile",
-				},
-				Insecure: true,
-			},
-			ReadBufferSize:  123,
-			WriteBufferSize: 345,
-			Timeout:         time.Second * 10,
-		},
-		RetrySettings: exporterhelper.RetrySettings{
-			Enabled:         true,
-			InitialInterval: 10 * time.Second,
-			MaxInterval:     1 * time.Minute,
-			MaxElapsedTime:  10 * time.Minute,
-		},
-		QueueSettings: exporterhelper.QueueSettings{
-			Enabled:      true,
-			NumConsumers: 2,
-			QueueSize:    10,
-		},
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Headers = map[string]configopaque.String{
+		"X-Custom-Header": "loki_rocks",
 	}
-	require.Equal(t, &expectedCfg, actualCfg)
-}
+	clientConfig.Endpoint = "https://loki:3100/loki/api/v1/push"
+	clientConfig.TLSSetting = configtls.ClientConfig{
+		Config: configtls.Config{
+			CAFile:   "/var/lib/mycert.pem",
+			CertFile: "certfile",
+			KeyFile:  "keyfile",
+		},
+		Insecure: true,
+	}
+	clientConfig.ReadBufferSize = 123
+	clientConfig.WriteBufferSize = 345
+	clientConfig.Timeout = time.Second * 10
+	t.Parallel()
 
-func TestIsLegacy(t *testing.T) {
-	testCases := []struct {
-		desc    string
-		cfg     *Config
-		outcome bool
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+	require.NoError(t, err)
+
+	tests := []struct {
+		id       component.ID
+		expected component.Config
 	}{
 		{
-			// the default mode for an empty config is the new logic
-			desc: "not legacy",
-			cfg: &Config{
-				HTTPClientSettings: confighttp.HTTPClientSettings{
-					Endpoint: "https://loki.example.com",
+			id: component.NewIDWithName(metadata.Type, "allsettings"),
+			expected: &Config{
+				ClientConfig: clientConfig,
+				BackOffConfig: configretry.BackOffConfig{
+					Enabled:             true,
+					InitialInterval:     10 * time.Second,
+					MaxInterval:         1 * time.Minute,
+					MaxElapsedTime:      10 * time.Minute,
+					RandomizationFactor: backoff.DefaultRandomizationFactor,
+					Multiplier:          backoff.DefaultMultiplier,
+				},
+				QueueSettings: exporterhelper.QueueConfig{
+					Enabled:      true,
+					NumConsumers: 2,
+					QueueSize:    10,
+				},
+				DefaultLabelsEnabled: map[string]bool{
+					"exporter": false,
+					"job":      true,
+					"instance": true,
+					"level":    false,
 				},
 			},
-			outcome: false,
-		},
-		{
-			desc: "format is set to body",
-			cfg: &Config{
-				HTTPClientSettings: confighttp.HTTPClientSettings{
-					Endpoint: "https://loki.example.com",
-				},
-				Format: stringp("body"),
-			},
-			outcome: true,
-		},
-		{
-			desc: "a label is specified",
-			cfg: &Config{
-				HTTPClientSettings: confighttp.HTTPClientSettings{
-					Endpoint: "https://loki.example.com",
-				},
-				Labels: &LabelsConfig{
-					Attributes: map[string]string{"some_attribute": "some_value"},
-				},
-			},
-			outcome: true,
-		},
-		{
-			desc: "a tenant is specified",
-			cfg: &Config{
-				HTTPClientSettings: confighttp.HTTPClientSettings{
-					Endpoint: "https://loki.example.com",
-				},
-				Tenant: &Tenant{
-					Source: "static",
-					Value:  "acme",
-				},
-			},
-			outcome: true,
-		},
-		{
-			desc: "a tenant ID is specified",
-			cfg: &Config{
-				HTTPClientSettings: confighttp.HTTPClientSettings{
-					Endpoint: "https://loki.example.com",
-				},
-				TenantID: stringp("acme"),
-			},
-			outcome: true,
 		},
 	}
-	for _, tC := range testCases {
-		t.Run(tC.desc, func(t *testing.T) {
-			assert.Equal(t, tC.outcome, tC.cfg.isLegacy())
 
-			// all configs from this table test are valid:
-			assert.NoError(t, tC.cfg.Validate())
+	for _, tt := range tests {
+		t.Run(tt.id.String(), func(t *testing.T) {
+			factory := NewFactory()
+			cfg := factory.CreateDefaultConfig()
+
+			sub, err := cm.Sub(tt.id.String())
+			require.NoError(t, err)
+			require.NoError(t, sub.Unmarshal(cfg))
+
+			assert.NoError(t, xconfmap.Validate(cfg))
+			assert.Equal(t, tt.expected, cfg)
 		})
 	}
 }
 
-func stringp(str string) *string {
-	return &str
+func TestConfigValidate(t *testing.T) {
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = "https://loki.example.com"
+	testCases := []struct {
+		desc string
+		cfg  *Config
+		err  error
+	}{
+		{
+			desc: "QueueSettings are invalid",
+			cfg:  &Config{QueueSettings: exporterhelper.QueueConfig{QueueSize: -1, Enabled: true}},
+			err:  fmt.Errorf("queue settings has invalid configuration"),
+		},
+		{
+			desc: "Endpoint is invalid",
+			cfg:  &Config{},
+			err:  fmt.Errorf("\"endpoint\" must be a valid URL"),
+		},
+		{
+			desc: "Config is valid",
+			cfg: &Config{
+				ClientConfig: clientConfig,
+			},
+			err: nil,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.desc, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.err != nil {
+				assert.ErrorContains(t, err, tc.err.Error())
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

@@ -1,18 +1,7 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
-// Package Alias is a subset of the interfaces defined by pdata and family
+// Package alias is a subset of the interfaces defined by pdata and family
 // package to allow for higher code reuse without using generics.
 package alias // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/schemaprocessor/internal/alias"
 
@@ -33,12 +22,16 @@ type Resource interface {
 	Resource() pcommon.Resource
 }
 
-// Signal represents a subset of incoming pdata
+// NamedSignal represents a subset of incoming pdata
 // that can be updated using the schema processor
-type Signal interface {
+type NamedSignal interface {
 	Name() string
 
 	SetName(name string)
+}
+
+type Attributed interface {
+	Attributes() pcommon.Map
 }
 
 var (
@@ -46,7 +39,15 @@ var (
 	_ Resource = (*pmetric.ResourceMetrics)(nil)
 	_ Resource = (*ptrace.ResourceSpans)(nil)
 
-	_ Signal = (*pmetric.Metric)(nil)
-	_ Signal = (*ptrace.Span)(nil)
-	_ Signal = (*ptrace.SpanEvent)(nil)
+	_ NamedSignal = (*pmetric.Metric)(nil)
+	_ NamedSignal = (*ptrace.Span)(nil)
+	_ NamedSignal = (*ptrace.SpanEvent)(nil)
 )
+
+// AttributeKey is a type alias of string to help
+// make clear what the strings being stored represent
+type AttributeKey = string
+
+// SignalName is a type alias of a string to help
+// make clear what a type field is being used for.
+type SignalName = string

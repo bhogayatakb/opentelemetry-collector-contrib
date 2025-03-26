@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metadata
 
@@ -40,31 +29,11 @@ type mockItemFilterResolver struct {
 func (r *mockItemFilterResolver) Resolve(string) (filter.ItemFilter, error) {
 	args := r.Called()
 	return args.Get(0).(filter.ItemFilter), args.Error(1)
-
 }
 
 func (r *mockItemFilterResolver) Shutdown() error {
 	args := r.Called()
 	return args.Error(0)
-}
-
-type errorFilter struct {
-}
-
-func (f errorFilter) Filter(_ []*filter.Item) ([]*filter.Item, error) {
-	return nil, errors.New("error on filter")
-}
-
-func (f errorFilter) Shutdown() error {
-	return nil
-}
-
-func (f errorFilter) TotalLimit() int {
-	return 0
-}
-
-func (f errorFilter) LimitByTimestamp() int {
-	return 0
 }
 
 type testData struct {
@@ -85,54 +54,44 @@ func TestNewMetricsFromDataPointBuilder(t *testing.T) {
 
 func TestMetricsFromDataPointBuilder_Build(t *testing.T) {
 	testCases := map[string]struct {
-		metricsDataType pmetric.MetricDataType
-		expectedError   error
+		metricsDataType pmetric.MetricType
 	}{
-		"Gauge":                      {pmetric.MetricDataTypeGauge, nil},
-		"Sum":                        {pmetric.MetricDataTypeSum, nil},
-		"Gauge with filtering error": {pmetric.MetricDataTypeGauge, errors.New("filtering error")},
-		"Sum with filtering error":   {pmetric.MetricDataTypeSum, errors.New("filtering error")},
+		"Gauge":                      {pmetric.MetricTypeGauge},
+		"Sum":                        {pmetric.MetricTypeSum},
+		"Gauge with filtering error": {pmetric.MetricTypeGauge},
+		"Sum with filtering error":   {pmetric.MetricTypeSum},
 	}
 
 	for name, testCase := range testCases {
 		t.Run(name, func(t *testing.T) {
-			testMetricsFromDataPointBuilderBuild(t, testCase.metricsDataType, testCase.expectedError)
+			testMetricsFromDataPointBuilderBuild(t, testCase.metricsDataType)
 		})
 	}
 }
 
-func testMetricsFromDataPointBuilderBuild(t *testing.T, metricDataType pmetric.MetricDataType, expectedError error) {
+func testMetricsFromDataPointBuilderBuild(t *testing.T, metricDataType pmetric.MetricType) {
 	filterResolver := &mockItemFilterResolver{}
 	dataForTesting := generateTestData(metricDataType)
 	builder := &metricsFromDataPointBuilder{filterResolver: filterResolver}
-	defer executeMockedShutdown(t, builder, filterResolver, expectedError)
+	defer executeMockedShutdown(t, builder, filterResolver, nil)
 	expectedGroupingKeysByMetricName := make(map[string]MetricsDataPointKey, len(dataForTesting.expectedGroupingKeys))
 
 	for _, expectedGroupingKey := range dataForTesting.expectedGroupingKeys {
 		expectedGroupingKeysByMetricName[expectedGroupingKey.MetricName] = expectedGroupingKey
 	}
 
-	if expectedError != nil {
-		filterResolver.On("Resolve").Return(errorFilter{}, nil)
-	} else {
-		filterResolver.On("Resolve").Return(filter.NewNopItemCardinalityFilter(), nil)
-	}
+	filterResolver.On("Resolve").Return(filter.NewNopItemCardinalityFilter(), nil)
 
 	metric, err := builder.Build(dataForTesting.dataPoints)
 
 	filterResolver.AssertExpectations(t)
-
-	if expectedError != nil {
-		require.Error(t, err)
-		return
-	}
 	require.NoError(t, err)
 
 	assert.Equal(t, len(dataForTesting.dataPoints), metric.DataPointCount())
 	assert.Equal(t, len(dataForTesting.expectedGroups), metric.MetricCount())
 	assert.Equal(t, 1, metric.ResourceMetrics().At(0).ScopeMetrics().Len())
 	assert.Equal(t, len(dataForTesting.expectedGroups), metric.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().Len())
-	require.Equal(t, instrumentationLibraryName, metric.ResourceMetrics().At(0).ScopeMetrics().At(0).Scope().Name())
+	require.Equal(t, "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver", metric.ResourceMetrics().At(0).ScopeMetrics().At(0).Scope().Name())
 
 	for i := 0; i < len(dataForTesting.expectedGroups); i++ {
 		ilMetric := metric.ResourceMetrics().At(0).ScopeMetrics().At(0).Metrics().At(i)
@@ -142,17 +101,17 @@ func testMetricsFromDataPointBuilderBuild(t *testing.T, metricDataType pmetric.M
 		for dataPointIndex, expectedDataPoint := range expectedDataPoints {
 			assert.Equal(t, expectedDataPoint.metricName, ilMetric.Name())
 			assert.Equal(t, expectedDataPoint.metricValue.Metadata().Unit(), ilMetric.Unit())
-			assert.Equal(t, expectedDataPoint.metricValue.Metadata().DataType().MetricDataType(), ilMetric.DataType())
+			assert.Equal(t, expectedDataPoint.metricValue.Metadata().DataType().MetricType(), ilMetric.Type())
 
 			var dataPoint pmetric.NumberDataPoint
 
-			if metricDataType == pmetric.MetricDataTypeGauge {
+			if metricDataType == pmetric.MetricTypeGauge {
 				assert.NotNil(t, ilMetric.Gauge())
 				assert.Equal(t, len(expectedDataPoints), ilMetric.Gauge().DataPoints().Len())
 				dataPoint = ilMetric.Gauge().DataPoints().At(dataPointIndex)
 			} else {
 				assert.NotNil(t, ilMetric.Sum())
-				assert.Equal(t, pmetric.MetricAggregationTemporalityDelta, ilMetric.Sum().AggregationTemporality())
+				assert.Equal(t, pmetric.AggregationTemporalityDelta, ilMetric.Sum().AggregationTemporality())
 				assert.True(t, ilMetric.Sum().IsMonotonic())
 				assert.Equal(t, len(expectedDataPoints), ilMetric.Sum().DataPoints().Len())
 				dataPoint = ilMetric.Sum().DataPoints().At(dataPointIndex)
@@ -189,11 +148,7 @@ func TestMetricsFromDataPointBuilder_GroupAndFilter(t *testing.T) {
 			defer executeMockedShutdown(t, builder, filterResolver, testCase.expectedError)
 			dataForTesting := generateTestData(metricDataType)
 
-			if testCase.expectedError != nil {
-				filterResolver.On("Resolve").Return(errorFilter{}, nil)
-			} else {
-				filterResolver.On("Resolve").Return(filter.NewNopItemCardinalityFilter(), testCase.expectedError)
-			}
+			filterResolver.On("Resolve").Return(filter.NewNopItemCardinalityFilter(), testCase.expectedError)
 
 			groupedDataPoints, err := builder.groupAndFilter(dataForTesting.dataPoints)
 
@@ -232,7 +187,7 @@ func TestMetricsFromDataPointBuilder_GroupAndFilter_NilDataPoints(t *testing.T) 
 
 	require.NoError(t, err)
 
-	assert.Equal(t, 0, len(groupedDataPoints))
+	assert.Empty(t, groupedDataPoints)
 }
 
 func TestMetricsFromDataPointBuilder_Filter(t *testing.T) {
@@ -252,11 +207,7 @@ func TestMetricsFromDataPointBuilder_Filter(t *testing.T) {
 			}
 			defer executeMockedShutdown(t, builder, filterResolver, testCase.expectedError)
 
-			if testCase.expectedError != nil {
-				filterResolver.On("Resolve").Return(errorFilter{}, testCase.expectedError)
-			} else {
-				filterResolver.On("Resolve").Return(filter.NewNopItemCardinalityFilter(), testCase.expectedError)
-			}
+			filterResolver.On("Resolve").Return(filter.NewNopItemCardinalityFilter(), testCase.expectedError)
 
 			filteredDataPoints, err := builder.filter(metricName1, dataForTesting.dataPoints)
 
@@ -293,7 +244,7 @@ func TestMetricsFromDataPointBuilder_Shutdown(t *testing.T) {
 	}
 }
 
-func generateTestData(metricDataType pmetric.MetricDataType) testData {
+func generateTestData(metricDataType pmetric.MetricType) testData {
 	timestamp1 := time.Now().UTC()
 	timestamp2 := timestamp1.Add(time.Minute)
 	labelValues := allPossibleLabelValues()
@@ -312,14 +263,14 @@ func generateTestData(metricDataType pmetric.MetricDataType) testData {
 
 	expectedGroupingKeys := []MetricsDataPointKey{
 		{
-			MetricName:     metricName1,
-			MetricDataType: metricValues[0].Metadata().DataType(),
-			MetricUnit:     metricValues[0].Metadata().Unit(),
+			MetricName: metricName1,
+			MetricType: metricValues[0].Metadata().DataType(),
+			MetricUnit: metricValues[0].Metadata().Unit(),
 		},
 		{
-			MetricName:     metricName2,
-			MetricDataType: metricValues[0].Metadata().DataType(),
-			MetricUnit:     metricValues[0].Metadata().Unit(),
+			MetricName: metricName2,
+			MetricType: metricValues[0].Metadata().DataType(),
+			MetricUnit: metricValues[0].Metadata().Unit(),
 		},
 	}
 
@@ -355,8 +306,8 @@ func executeShutdown(t *testing.T, metricsBuilder MetricsBuilder, expectError bo
 }
 
 func executeMockedShutdown(t *testing.T, metricsBuilder MetricsBuilder, filterResolver *mockItemFilterResolver,
-	expectedError error) {
-
+	expectedError error,
+) {
 	filterResolver.On("Shutdown").Return(expectedError)
 	_ = metricsBuilder.Shutdown()
 	filterResolver.AssertExpectations(t)

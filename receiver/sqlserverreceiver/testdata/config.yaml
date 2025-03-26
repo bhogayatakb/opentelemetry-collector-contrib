@@ -1,16 +1,21 @@
-receivers:
-  sqlserver:
-    collection_interval: 10s
+sqlserver:
+  collection_interval: 10s
 
-processors:
-  nop:
-
-exporters:
-  nop:
-
-service:
-  pipelines:
-    metrics:
-      receivers: [sqlserver]
-      processors: [nop]
-      exporters: [nop]
+sqlserver/named:
+  collection_interval: 10s
+  computer_name: CustomServer
+  instance_name: CustomInstance
+  resource_attributes:
+    sqlserver.computer.name:
+      enabled: true
+    sqlserver.instance.name:
+      enabled: true
+    server.port:
+      enabled: true
+    server.address:
+      enabled: true
+  top_query_collection:
+    enabled: true
+    lookback_time: 60
+    max_query_sample_count: 1000
+    top_query_count: 200

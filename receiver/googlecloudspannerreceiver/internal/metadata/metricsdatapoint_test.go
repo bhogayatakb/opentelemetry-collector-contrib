@@ -1,20 +1,11 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metadata
 
 import (
+	"hash/fnv"
+	"strconv"
 	"testing"
 	"time"
 
@@ -40,7 +31,7 @@ func TestMetricsDataPoint_GroupingKey(t *testing.T) {
 	assert.NotNil(t, groupingKey)
 	assert.Equal(t, dataPoint.metricName, groupingKey.MetricName)
 	assert.Equal(t, dataPoint.metricValue.Metadata().Unit(), groupingKey.MetricUnit)
-	assert.Equal(t, dataPoint.metricValue.Metadata().DataType(), groupingKey.MetricDataType)
+	assert.Equal(t, dataPoint.metricValue.Metadata().DataType(), groupingKey.MetricType)
 }
 
 func TestMetricsDataPoint_ToItem(t *testing.T) {
@@ -111,6 +102,76 @@ func TestMetricsDataPoint_CopyTo(t *testing.T) {
 	}
 }
 
+func TestMetricsDataPoint_HideLockStatsRowrangestartkeyPII(t *testing.T) {
+	btSliceLabelValueMetadata, _ := NewLabelValueMetadata("row_range_start_key", "byteSliceLabelColumnName", StringValueType)
+	labelValue1 := byteSliceLabelValue{metadata: btSliceLabelValueMetadata, value: "table1.s(23,hello,23+)"}
+	labelValue2 := byteSliceLabelValue{metadata: btSliceLabelValueMetadata, value: "table2(23,hello)"}
+	metricValues := allPossibleMetricValues(metricDataType)
+	labelValues := []LabelValue{labelValue1, labelValue2}
+	timestamp := time.Now().UTC()
+	metricsDataPoint := &MetricsDataPoint{
+		metricName:  metricName,
+		timestamp:   timestamp,
+		databaseID:  databaseID(),
+		labelValues: labelValues,
+		metricValue: metricValues[0],
+	}
+	hashFunction := fnv.New32a()
+	hashFunction.Reset()
+	hashFunction.Write([]byte("23"))
+	hashOf23 := strconv.FormatUint(uint64(hashFunction.Sum32()), 10)
+	hashFunction.Reset()
+	hashFunction.Write([]byte("hello"))
+	hashOfHello := strconv.FormatUint(uint64(hashFunction.Sum32()), 10)
+
+	metricsDataPoint.HideLockStatsRowrangestartkeyPII()
+
+	assert.Len(t, metricsDataPoint.labelValues, 2)
+	assert.Equal(t, metricsDataPoint.labelValues[0].Value(), "table1.s("+hashOf23+","+hashOfHello+","+hashOf23+"+)")
+	assert.Equal(t, metricsDataPoint.labelValues[1].Value(), "table2("+hashOf23+","+hashOfHello+")")
+}
+
+func TestMetricsDataPoint_HideLockStatsRowrangestartkeyPIIWithInvalidLabelValue(t *testing.T) {
+	// We are checking that function HideLockStatsRowrangestartkeyPII() does not panic for invalid label values.
+	btSliceLabelValueMetadata, _ := NewLabelValueMetadata("row_range_start_key", "byteSliceLabelColumnName", StringValueType)
+	labelValue1 := byteSliceLabelValue{metadata: btSliceLabelValueMetadata, value: ""}
+	labelValue2 := byteSliceLabelValue{metadata: btSliceLabelValueMetadata, value: "table22(hello"}
+	labelValue3 := byteSliceLabelValue{metadata: btSliceLabelValueMetadata, value: "table22,hello"}
+	labelValue4 := byteSliceLabelValue{metadata: btSliceLabelValueMetadata, value: "("}
+	metricValues := allPossibleMetricValues(metricDataType)
+	labelValues := []LabelValue{labelValue1, labelValue2, labelValue3, labelValue4}
+	timestamp := time.Now().UTC()
+	metricsDataPoint := &MetricsDataPoint{
+		metricName:  metricName,
+		timestamp:   timestamp,
+		databaseID:  databaseID(),
+		labelValues: labelValues,
+		metricValue: metricValues[0],
+	}
+	metricsDataPoint.HideLockStatsRowrangestartkeyPII()
+	assert.Len(t, metricsDataPoint.labelValues, 4)
+}
+
+func TestMetricsDataPoint_TruncateQueryText(t *testing.T) {
+	strLabelValueMetadata, _ := NewLabelValueMetadata("query_text", "stringLabelColumnName", StringValueType)
+	labelValue1 := stringLabelValue{metadata: strLabelValueMetadata, value: "SELECT 1"}
+	metricValues := allPossibleMetricValues(metricDataType)
+	labelValues := []LabelValue{labelValue1}
+	timestamp := time.Now().UTC()
+	metricsDataPoint := &MetricsDataPoint{
+		metricName:  metricName,
+		timestamp:   timestamp,
+		databaseID:  databaseID(),
+		labelValues: labelValues,
+		metricValue: metricValues[0],
+	}
+
+	metricsDataPoint.TruncateQueryText(6)
+
+	assert.Len(t, metricsDataPoint.labelValues, 1)
+	assert.Equal(t, "SELECT", metricsDataPoint.labelValues[0].Value())
+}
+
 func allPossibleLabelValues() []LabelValue {
 	strLabelValueMetadata, _ := NewLabelValueMetadata("stringLabelName", "stringLabelColumnName", StringValueType)
 	strLabelValue := stringLabelValue{
@@ -153,8 +214,8 @@ func allPossibleLabelValues() []LabelValue {
 	}
 }
 
-func allPossibleMetricValues(metricDataType pmetric.MetricDataType) []MetricValue {
-	dataType := NewMetricDataType(metricDataType, pmetric.MetricAggregationTemporalityDelta, true)
+func allPossibleMetricValues(metricDataType pmetric.MetricType) []MetricValue {
+	dataType := NewMetricType(metricDataType, pmetric.AggregationTemporalityDelta, true)
 	int64Metadata, _ := NewMetricValueMetadata("int64MetricName", "int64MetricColumnName", dataType,
 		metricUnit, IntValueType)
 	float64Metadata, _ := NewMetricValueMetadata("float64MetricName", "float64MetricColumnName", dataType,
@@ -189,33 +250,33 @@ func assertLabelValue(t *testing.T, attributesMap pcommon.Map, labelValue LabelV
 	assert.True(t, exists)
 	switch labelValue.(type) {
 	case stringLabelValue, stringSliceLabelValue, byteSliceLabelValue, lockRequestSliceLabelValue:
-		assert.Equal(t, labelValue.Value(), value.StringVal())
+		assert.Equal(t, labelValue.Value(), value.Str())
 	case boolLabelValue:
-		assert.Equal(t, labelValue.Value(), value.BoolVal())
+		assert.Equal(t, labelValue.Value(), value.Bool())
 	case int64LabelValue:
-		assert.Equal(t, labelValue.Value(), value.IntVal())
+		assert.Equal(t, labelValue.Value(), value.Int())
 	default:
 		assert.Fail(t, "Unknown label value type received")
 	}
 }
 
-func assertStringLabelValue(t *testing.T, attributesMap pcommon.Map, labelName string, expectedValue interface{}) {
+func assertStringLabelValue(t *testing.T, attributesMap pcommon.Map, labelName string, expectedValue any) {
 	value, exists := attributesMap.Get(labelName)
 
 	assert.True(t, exists)
-	assert.Equal(t, expectedValue, value.StringVal())
+	assert.Equal(t, expectedValue, value.Str())
 }
 
 func assertMetricValue(t *testing.T, metricValue MetricValue, dataPoint pmetric.NumberDataPoint) {
 	switch metricValue.(type) {
 	case int64MetricValue:
-		assert.Equal(t, metricValue.Value(), dataPoint.IntVal())
+		assert.Equal(t, metricValue.Value(), dataPoint.IntValue())
 	case float64MetricValue:
-		assert.Equal(t, metricValue.Value(), dataPoint.DoubleVal())
+		assert.Equal(t, metricValue.Value(), dataPoint.DoubleValue())
 	}
 }
 
-func assertLabel(t *testing.T, lbl label, expectedName string, expectedValue interface{}) {
+func assertLabel(t *testing.T, lbl label, expectedName string, expectedValue any) {
 	assert.Equal(t, expectedName, lbl.Name)
 	assert.Equal(t, expectedValue, lbl.Value)
 }

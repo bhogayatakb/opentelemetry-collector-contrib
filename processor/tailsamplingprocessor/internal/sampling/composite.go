@@ -1,20 +1,11 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package sampling // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/tailsamplingprocessor/internal/sampling"
 
 import (
+	"context"
+
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.uber.org/zap"
 )
@@ -28,6 +19,8 @@ type subpolicy struct {
 
 	// spans per second that each subpolicy sampled in this period
 	sampledSPS int64
+
+	name string
 }
 
 // Composite evaluator and its internal data
@@ -44,7 +37,8 @@ type Composite struct {
 	// The time provider (can be different from clock for testing purposes)
 	timeProvider TimeProvider
 
-	logger *zap.Logger
+	logger          *zap.Logger
+	recordSubPolicy bool
 }
 
 var _ PolicyEvaluator = (*Composite)(nil)
@@ -53,6 +47,7 @@ var _ PolicyEvaluator = (*Composite)(nil)
 type SubPolicyEvalParams struct {
 	Evaluator         PolicyEvaluator
 	MaxSpansPerSecond int64
+	Name              string
 }
 
 // NewComposite creates a policy evaluator that samples all subpolicies.
@@ -61,15 +56,15 @@ func NewComposite(
 	maxTotalSpansPerSecond int64,
 	subPolicyParams []SubPolicyEvalParams,
 	timeProvider TimeProvider,
+	recordSubPolicy bool,
 ) PolicyEvaluator {
-
 	var subpolicies []*subpolicy
 
 	for i := 0; i < len(subPolicyParams); i++ {
 		sub := &subpolicy{}
 		sub.evaluator = subPolicyParams[i].Evaluator
 		sub.allocatedSPS = subPolicyParams[i].MaxSpansPerSecond
-
+		sub.name = subPolicyParams[i].Name
 		// We are just starting, so there is no previous input, set it to 0
 		sub.sampledSPS = 0
 
@@ -77,15 +72,16 @@ func NewComposite(
 	}
 
 	return &Composite{
-		maxTotalSPS:  maxTotalSpansPerSecond,
-		subpolicies:  subpolicies,
-		timeProvider: timeProvider,
-		logger:       logger,
+		maxTotalSPS:     maxTotalSpansPerSecond,
+		subpolicies:     subpolicies,
+		timeProvider:    timeProvider,
+		logger:          logger,
+		recordSubPolicy: recordSubPolicy,
 	}
 }
 
 // Evaluate looks at the trace data and returns a corresponding SamplingDecision.
-func (c *Composite) Evaluate(traceID pcommon.TraceID, trace *TraceData) (Decision, error) {
+func (c *Composite) Evaluate(ctx context.Context, traceID pcommon.TraceID, trace *TraceData) (Decision, error) {
 	// Rate limiting works by counting spans that are sampled during each 1 second
 	// time period. Until the total number of spans during a particular second
 	// exceeds the allocated number of spans-per-second the traces are sampled,
@@ -104,7 +100,7 @@ func (c *Composite) Evaluate(traceID pcommon.TraceID, trace *TraceData) (Decisio
 	}
 
 	for _, sub := range c.subpolicies {
-		decision, err := sub.evaluator.Evaluate(traceID, trace)
+		decision, err := sub.evaluator.Evaluate(ctx, traceID, trace)
 		if err != nil {
 			return Unspecified, err
 		}
@@ -120,6 +116,9 @@ func (c *Composite) Evaluate(traceID pcommon.TraceID, trace *TraceData) (Decisio
 				sub.sampledSPS = spansInSecondIfSampled
 
 				// Let the sampling happen
+				if c.recordSubPolicy {
+					SetAttrOnScopeSpans(trace, "tailsampling.composite_policy", sub.name)
+				}
 				return Sampled, nil
 			}
 

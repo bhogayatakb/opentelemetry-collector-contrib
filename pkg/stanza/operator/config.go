@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package operator // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
 
@@ -18,8 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
-	"go.uber.org/zap"
 )
 
 // Config is the configuration of an operator
@@ -27,11 +16,16 @@ type Config struct {
 	Builder
 }
 
+// NewConfig wraps the builder interface in a concrete struct
+func NewConfig(b Builder) Config {
+	return Config{Builder: b}
+}
+
 // Builder is an entity that can build a single operator
 type Builder interface {
 	ID() string
 	Type() string
-	Build(*zap.SugaredLogger) (Operator, error)
+	Build(component.TelemetrySettings) (Operator, error)
 	SetID(string)
 }
 
@@ -63,14 +57,9 @@ func (c *Config) UnmarshalJSON(bytes []byte) error {
 	return nil
 }
 
-// MarshalJSON will marshal a config to JSON.
-func (c Config) MarshalJSON() ([]byte, error) {
-	return json.Marshal(c.Builder)
-}
-
 // UnmarshalYAML will unmarshal a config from YAML.
-func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
-	rawConfig := map[string]interface{}{}
+func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
+	rawConfig := map[string]any{}
 	err := unmarshal(&rawConfig)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal yaml to base config: %w", err)
@@ -100,11 +89,6 @@ func (c *Config) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return nil
 }
 
-// MarshalYAML will marshal a config to YAML.
-func (c Config) MarshalYAML() (interface{}, error) {
-	return c.Builder, nil
-}
-
 func (c *Config) Unmarshal(component *confmap.Conf) error {
 	if !component.IsSet("type") {
 		return fmt.Errorf("missing required field 'type'")
@@ -123,7 +107,7 @@ func (c *Config) Unmarshal(component *confmap.Conf) error {
 	}
 
 	builder := builderFunc()
-	if err := component.UnmarshalExact(builder); err != nil {
+	if err := component.Unmarshal(builder, confmap.WithIgnoreUnused()); err != nil {
 		return fmt.Errorf("unmarshal to %s: %w", typeString, err)
 	}
 

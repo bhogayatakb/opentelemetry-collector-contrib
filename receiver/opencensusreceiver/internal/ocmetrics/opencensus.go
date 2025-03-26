@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package ocmetrics // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/opencensusreceiver/internal/ocmetrics"
 
@@ -23,10 +12,9 @@ import (
 	agentmetricspb "github.com/census-instrumentation/opencensus-proto/gen-go/agent/metrics/v1"
 	ocmetrics "github.com/census-instrumentation/opencensus-proto/gen-go/metrics/v1"
 	resourcepb "github.com/census-instrumentation/opencensus-proto/gen-go/resource/v1"
-	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/obsreport"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/receiver/receiverhelper"
 
 	internaldata "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/opencensus"
 )
@@ -34,25 +22,24 @@ import (
 // Receiver is the type used to handle metrics from OpenCensus exporters.
 type Receiver struct {
 	agentmetricspb.UnimplementedMetricsServiceServer
-	id           config.ComponentID
 	nextConsumer consumer.Metrics
-	obsrecv      *obsreport.Receiver
+	obsrecv      *receiverhelper.ObsReport
 }
 
 // New creates a new ocmetrics.Receiver reference.
-func New(id config.ComponentID, nextConsumer consumer.Metrics, set component.ReceiverCreateSettings) (*Receiver, error) {
-	if nextConsumer == nil {
-		return nil, component.ErrNilNextConsumer
+func New(nextConsumer consumer.Metrics, set receiver.Settings) (*Receiver, error) {
+	obsrecv, err := receiverhelper.NewObsReport(receiverhelper.ObsReportSettings{
+		ReceiverID:             set.ID,
+		Transport:              receiverTransport,
+		LongLivedCtx:           true,
+		ReceiverCreateSettings: set,
+	})
+	if err != nil {
+		return nil, err
 	}
 	ocr := &Receiver{
-		id:           id,
 		nextConsumer: nextConsumer,
-		obsrecv: obsreport.NewReceiver(obsreport.ReceiverSettings{
-			ReceiverID:             id,
-			Transport:              receiverTransport,
-			LongLivedCtx:           true,
-			ReceiverCreateSettings: set,
-		}),
+		obsrecv:      obsrecv,
 	}
 	return ocr, nil
 }

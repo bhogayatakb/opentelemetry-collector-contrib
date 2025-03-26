@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package datasenders // import "github.com/open-telemetry/opentelemetry-collector-contrib/testbed/datasenders"
 
@@ -23,7 +12,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/testbed/testbed"
@@ -99,17 +87,23 @@ func (f *SyslogWriter) GenConfigYAMLStr() string {
       listen_address: "%s"
 `, f.network, f.GetEndpoint())
 }
+
 func (f *SyslogWriter) Send(lr plog.LogRecord) error {
-	ts := time.Unix(int64(lr.Timestamp()/1000000000), int64(lr.Timestamp()%100000000)).Format(time.RFC3339Nano)
+	ts := time.Unix(int64(lr.Timestamp()/1_000_000_000), int64(lr.Timestamp()%1_000_000_000)).Format(time.RFC3339Nano)
 	sdid := strings.Builder{}
-	sdid.WriteString(fmt.Sprintf("%s=\"%s\" ", "trace_id", lr.TraceID().HexString()))
-	sdid.WriteString(fmt.Sprintf("%s=\"%s\" ", "span_id", lr.SpanID().HexString()))
-	sdid.WriteString(fmt.Sprintf("%s=\"%d\" ", "trace_flags", lr.FlagsStruct()))
-	lr.Attributes().Range(func(k string, v pcommon.Value) bool {
-		sdid.WriteString(fmt.Sprintf("%s=\"%s\" ", k, v.StringVal()))
-		return true
-	})
-	msg := fmt.Sprintf("<166> %s localhost - - - [%s] %s\n", ts, sdid.String(), lr.Body().StringVal())
+	if lr.TraceID().String() != "" {
+		sdid.WriteString(fmt.Sprintf("%s=\"%s\" ", "trace_id", lr.TraceID()))
+	}
+	if lr.SpanID().String() != "" {
+		sdid.WriteString(fmt.Sprintf("%s=\"%s\" ", "span_id", lr.SpanID()))
+	}
+	sdid.WriteString(fmt.Sprintf("%s=\"%d\" ", "trace_flags", lr.Flags()))
+	for k, v := range lr.Attributes().All() {
+		if v.Str() != "" {
+			sdid.WriteString(fmt.Sprintf("%s=\"%s\" ", k, v.Str()))
+		}
+	}
+	msg := fmt.Sprintf("<166>1 %s 127.0.0.1 - - - [test@12345 %s] %s\n", ts, strings.TrimSpace(sdid.String()), lr.Body().Str())
 
 	f.buf = append(f.buf, msg)
 	return f.SendCheck()
@@ -127,7 +121,6 @@ func (f *SyslogWriter) SendCheck() error {
 		if err != nil {
 			return nil
 		}
-
 	}
 	return nil
 }

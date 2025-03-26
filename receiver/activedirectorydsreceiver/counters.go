@@ -1,19 +1,7 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build windows
-// +build windows
 
 package activedirectorydsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/activedirectorydsreceiver"
 
@@ -35,9 +23,9 @@ const (
 	draOutboundObjects                     = "DRA Outbound Objects/sec"
 	draInboundProperties                   = "DRA Inbound Properties Total/sec"
 	draOutboundProperties                  = "DRA Outbound Properties/sec"
-	draInboundValuesDNs                    = "DRA Inbound Values (DNs only)/sec"
+	draInboundValuesDNs                    = "DRA Inbound Values (DNs only)/sec" //revive:disable-line:var-naming
 	draInboundValuesTotal                  = "DRA Inbound Values Total/sec"
-	draOutboundValuesDNs                   = "DRA Outbound Values (DNs only)/sec"
+	draOutboundValuesDNs                   = "DRA Outbound Values (DNs only)/sec" //revive:disable-line:var-naming
 	draOutboundValuesTotal                 = "DRA Outbound Values Total/sec"
 	draPendingReplicationOperations        = "DRA Pending Replication Operations"
 	draSyncFailuresSchemaMismatch          = "DRA Sync Failures on Schema Mismatch"
@@ -52,7 +40,7 @@ const (
 	dsNotifyQueueSize                      = "DS Notify Queue Size"
 	dsSecurityDescriptorPropagationsEvents = "DS Security Descriptor Propagations Events"
 	dsSearchSubOperations                  = "DS Search sub-operations/sec"
-	dsSecurityDescripterSubOperations      = "DS Security Descriptor sub-operations/sec"
+	dsSecurityDescriptorSubOperations      = "DS Security Descriptor sub-operations/sec"
 	dsThreadsInUse                         = "DS Threads in Use"
 	ldapClientSessions                     = "LDAP Client Sessions"
 	ldapBindTime                           = "LDAP Bind Time"
@@ -81,7 +69,7 @@ func (w *watchers) Scrape(name string) (float64, error) {
 }
 
 func (w *watchers) Close() error {
-	if w.closed {
+	if w == nil || w.closed {
 		return nil
 	}
 
@@ -93,7 +81,7 @@ func (w *watchers) Close() error {
 	return err
 }
 
-func getWatchers(wc watcherCreater) (*watchers, error) {
+func getWatchers(wc watcherCreator) (*watchers, error) {
 	var err error
 
 	w := &watchers{
@@ -204,7 +192,7 @@ func getWatchers(wc watcherCreater) (*watchers, error) {
 		return nil, err
 	}
 
-	if w.counterNameToWatcher[dsSecurityDescripterSubOperations], err = wc.Create(dsSecurityDescripterSubOperations); err != nil {
+	if w.counterNameToWatcher[dsSecurityDescriptorSubOperations], err = wc.Create(dsSecurityDescriptorSubOperations); err != nil {
 		return nil, err
 	}
 
@@ -231,7 +219,7 @@ func getWatchers(wc watcherCreater) (*watchers, error) {
 	return w, nil
 }
 
-type watcherCreater interface {
+type watcherCreator interface {
 	Create(counterName string) (winperfcounters.PerfCounterWatcher, error)
 }
 
@@ -240,8 +228,8 @@ const (
 	object       = "DirectoryServices"
 )
 
-type defaultWatcherCreater struct{}
+type defaultWatcherCreator struct{}
 
-func (defaultWatcherCreater) Create(counterName string) (winperfcounters.PerfCounterWatcher, error) {
+func (defaultWatcherCreator) Create(counterName string) (winperfcounters.PerfCounterWatcher, error) {
 	return winperfcounters.NewWatcher(object, instanceName, counterName)
 }

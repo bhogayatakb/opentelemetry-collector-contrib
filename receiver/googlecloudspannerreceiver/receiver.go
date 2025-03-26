@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package googlecloudspannerreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver"
 
@@ -21,6 +10,9 @@ import (
 
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/scraper/scrapererror"
+	"go.uber.org/multierr"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver/internal/datasource"
@@ -30,10 +22,10 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver/internal/statsreader"
 )
 
-//go:embed "internal/metadataconfig/metadata.yaml"
+//go:embed "internal/metadataconfig/metrics.yaml"
 var metadataYaml []byte
 
-var _ component.MetricsReceiver = (*googleCloudSpannerReceiver)(nil)
+var _ receiver.Metrics = (*googleCloudSpannerReceiver)(nil)
 
 type googleCloudSpannerReceiver struct {
 	logger         *zap.Logger
@@ -51,18 +43,28 @@ func newGoogleCloudSpannerReceiver(logger *zap.Logger, config *Config) *googleCl
 }
 
 func (r *googleCloudSpannerReceiver) Scrape(ctx context.Context) (pmetric.Metrics, error) {
-	var allMetricsDataPoints []*metadata.MetricsDataPoint
+	var (
+		allMetricsDataPoints []*metadata.MetricsDataPoint
+		err                  error
+	)
 
 	for _, projectReader := range r.projectReaders {
-		dataPoints, err := projectReader.Read(ctx)
-		if err != nil {
-			return pmetric.Metrics{}, err
-		}
-
+		dataPoints, readErr := projectReader.Read(ctx)
 		allMetricsDataPoints = append(allMetricsDataPoints, dataPoints...)
+		if readErr != nil {
+			err = multierr.Append(err, readErr)
+		}
 	}
 
-	return r.metricsBuilder.Build(allMetricsDataPoints)
+	metrics, buildErr := r.metricsBuilder.Build(allMetricsDataPoints)
+	if buildErr != nil {
+		err = multierr.Append(err, buildErr)
+	}
+
+	if err != nil && metrics.DataPointCount() > 0 {
+		err = scrapererror.NewPartialScrapeError(err, len(multierr.Errors(err)))
+	}
+	return metrics, err
 }
 
 func (r *googleCloudSpannerReceiver) Start(ctx context.Context, _ component.Host) error {
@@ -80,6 +82,9 @@ func (r *googleCloudSpannerReceiver) Shutdown(context.Context) error {
 		projectReader.Shutdown()
 	}
 
+	if r.metricsBuilder == nil {
+		return nil
+	}
 	err := r.metricsBuilder.Shutdown()
 	if err != nil {
 		return err
@@ -105,11 +110,13 @@ func (r *googleCloudSpannerReceiver) initialize(ctx context.Context) error {
 }
 
 func (r *googleCloudSpannerReceiver) initializeProjectReaders(ctx context.Context,
-	parsedMetadata []*metadata.MetricsMetadata) error {
-
+	parsedMetadata []*metadata.MetricsMetadata,
+) error {
 	readerConfig := statsreader.ReaderConfig{
-		BackfillEnabled:        r.config.BackfillEnabled,
-		TopMetricsQueryMaxRows: r.config.TopMetricsQueryMaxRows,
+		BackfillEnabled:                   r.config.BackfillEnabled,
+		TopMetricsQueryMaxRows:            r.config.TopMetricsQueryMaxRows,
+		HideTopnLockstatsRowrangestartkey: r.config.HideTopnLockstatsRowrangestartkey,
+		TruncateText:                      r.config.TruncateText,
 	}
 
 	for _, project := range r.config.Projects {
@@ -157,7 +164,8 @@ func (r *googleCloudSpannerReceiver) initializeMetricsBuilder(parsedMetadata []*
 }
 
 func newProjectReader(ctx context.Context, logger *zap.Logger, project Project, parsedMetadata []*metadata.MetricsMetadata,
-	readerConfig statsreader.ReaderConfig) (*statsreader.ProjectReader, error) {
+	readerConfig statsreader.ReaderConfig,
+) (*statsreader.ProjectReader, error) {
 	logger.Debug("Constructing project reader for project", zap.String("project id", project.ID))
 
 	databaseReadersCount := 0

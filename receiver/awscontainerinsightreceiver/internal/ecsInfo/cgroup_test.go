@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package ecsinfo
 
@@ -56,11 +45,10 @@ func TestGetCGroupPathForTask(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			got, err := getCGroupPathForTask(cgroupMount, controller, tt.input, clusterName)
 
 			if tt.err != nil {
-				assert.NotNil(t, err)
+				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.wantRes, got)
@@ -107,11 +95,10 @@ func TestGetCGroupPathFromARN(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			got, err := getTaskCgroupPathFromARN(tt.input)
 
 			if tt.err != nil {
-				assert.NotNil(t, err)
+				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.wantRes, got)
@@ -121,7 +108,6 @@ func TestGetCGroupPathFromARN(t *testing.T) {
 }
 
 func TestGetCGroupMountPoint(t *testing.T) {
-
 	tests := []struct {
 		name    string
 		input   string
@@ -160,22 +146,20 @@ func TestGetCGroupMountPoint(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			got, err := getCGroupMountPoint(tt.input)
 
 			if tt.err != nil {
-				assert.NotNil(t, err)
+				assert.Error(t, err)
 			} else {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.wantRes, got)
 			}
 		})
 	}
-
 }
 
 func TestGetCPUReservedInTask(t *testing.T) {
-	var ctx, cancel = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	taskinfo := &MockTaskInfo{
 		tasks: []ECSTask{},
@@ -228,11 +212,10 @@ func TestGetCPUReservedInTask(t *testing.T) {
 			assert.Equal(t, tt.expectRes, got)
 		})
 	}
-
 }
 
 func TestGetMEMReservedInTask(t *testing.T) {
-	var ctx, cancel = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	taskinfo := &MockTaskInfo{
 		tasks: []ECSTask{},
@@ -286,7 +269,7 @@ func TestGetMEMReservedInTask(t *testing.T) {
 }
 
 func TestGetCPUReservedAndMemReserved(t *testing.T) {
-	var ctx, cancel = context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
 	var tasks []ECSTask
 	var containers []ECSContainer
 
@@ -348,5 +331,4 @@ func TestGetCPUReservedAndMemReserved(t *testing.T) {
 	assert.Equal(t, int64(0), cgroup.getCPUReserved())
 
 	assert.Equal(t, int64(0), cgroup.getMemReserved())
-
 }

@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package flinkmetricsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/flinkmetricsreceiver"
 
@@ -26,9 +15,11 @@ import (
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/receiver/receivertest"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/flinkmetricsreceiver/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/flinkmetricsreceiver/internal/mocks"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/flinkmetricsreceiver/internal/models"
 )
@@ -43,6 +34,18 @@ var (
 )
 
 func TestScraperStart(t *testing.T) {
+	clientConfigNoCA := confighttp.NewDefaultClientConfig()
+	clientConfigNoCA.Endpoint = defaultEndpoint
+	clientConfigNoCA.TLSSetting = configtls.ClientConfig{
+		Config: configtls.Config{
+			CAFile: "/non/existent",
+		},
+	}
+
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.TLSSetting = configtls.ClientConfig{}
+	clientConfig.Endpoint = defaultEndpoint
+
 	testcases := []struct {
 		desc        string
 		scraper     *flinkmetricsScraper
@@ -52,14 +55,7 @@ func TestScraperStart(t *testing.T) {
 			desc: "Bad Config",
 			scraper: &flinkmetricsScraper{
 				cfg: &Config{
-					HTTPClientSettings: confighttp.HTTPClientSettings{
-						Endpoint: defaultEndpoint,
-						TLSSetting: configtls.TLSClientSetting{
-							TLSSetting: configtls.TLSSetting{
-								CAFile: "/non/existent",
-							},
-						},
-					},
+					ClientConfig: clientConfigNoCA,
 				},
 				settings: componenttest.NewNopTelemetrySettings(),
 			},
@@ -69,10 +65,7 @@ func TestScraperStart(t *testing.T) {
 			desc: "Valid Config",
 			scraper: &flinkmetricsScraper{
 				cfg: &Config{
-					HTTPClientSettings: confighttp.HTTPClientSettings{
-						TLSSetting: configtls.TLSClientSetting{},
-						Endpoint:   defaultEndpoint,
-					},
+					ClientConfig: clientConfig,
 				},
 				settings: componenttest.NewNopTelemetrySettings(),
 			},
@@ -161,15 +154,15 @@ func TestScraperScrape(t *testing.T) {
 	}{
 		{
 			desc: "Nil client",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				return nil
 			},
-			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "no_metrics.json"),
+			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "no_metrics.yaml"),
 			expectedErr:        errClientNotInit,
 		},
 		{
 			desc: "API Call Failure on Jobmanagers",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				mockClient := mocks.MockClient{}
 				mockClient.On("GetJobmanagerMetrics", mock.Anything).Return(&models.JobmanagerMetrics{}, errors.New("some api error"))
 				mockClient.On("GetTaskmanagersMetrics", mock.Anything).Return(nil, nil)
@@ -177,12 +170,12 @@ func TestScraperScrape(t *testing.T) {
 				mockClient.On("GetSubtasksMetrics", mock.Anything).Return(nil, nil)
 				return &mockClient
 			},
-			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "no_metrics.json"),
+			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "no_metrics.yaml"),
 			expectedErr:        errors.New(jobmanagerFailedFetch + " some api error"),
 		},
 		{
 			desc: "API Call Failure on Taskmanagers",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				mockClient := mocks.MockClient{}
 				mockClient.On("GetJobmanagerMetrics", mock.Anything).Return(&jobmanagerMetrics, nil)
 				mockClient.On("GetTaskmanagersMetrics", mock.Anything).Return(nil, errors.New("some api error"))
@@ -190,12 +183,12 @@ func TestScraperScrape(t *testing.T) {
 				mockClient.On("GetSubtasksMetrics", mock.Anything).Return(nil, nil)
 				return &mockClient
 			},
-			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "partial_metrics_no_taskmanagers.json"),
+			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "partial_metrics_no_taskmanagers.yaml"),
 			expectedErr:        errors.New(taskmanagerFailedFetch + " some api error"),
 		},
 		{
 			desc: "API Call Failure on Jobs",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				mockClient := mocks.MockClient{}
 				mockClient.On("GetJobmanagerMetrics", mock.Anything).Return(&jobmanagerMetrics, nil)
 				mockClient.On("GetTaskmanagersMetrics", mock.Anything).Return(taskmanagerMetricsInstances, nil)
@@ -203,12 +196,12 @@ func TestScraperScrape(t *testing.T) {
 				mockClient.On("GetSubtasksMetrics", mock.Anything).Return(nil, nil)
 				return &mockClient
 			},
-			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "partial_metrics_no_jobs.json"),
+			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "partial_metrics_no_jobs.yaml"),
 			expectedErr:        errors.New(jobsFailedFetch + " some api error"),
 		},
 		{
 			desc: "API Call Failure on Subtasks",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				mockClient := mocks.MockClient{}
 				mockClient.On("GetJobmanagerMetrics", mock.Anything).Return(&jobmanagerMetrics, nil)
 				mockClient.On("GetTaskmanagersMetrics", mock.Anything).Return(taskmanagerMetricsInstances, nil)
@@ -216,7 +209,7 @@ func TestScraperScrape(t *testing.T) {
 				mockClient.On("GetSubtasksMetrics", mock.Anything).Return(nil, errors.New("some api error"))
 				return &mockClient
 			},
-			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "partial_metrics_no_subtasks.json"),
+			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "partial_metrics_no_subtasks.yaml"),
 			expectedErr:        errors.New(subtasksFailedFetch + " some api error"),
 		},
 		{
@@ -232,12 +225,12 @@ func TestScraperScrape(t *testing.T) {
 				mockClient.On("GetSubtasksMetrics", mock.Anything).Return(subtaskEmptyInstances, nil)
 				return &mockClient
 			},
-			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "metrics_no_jobs_golden.json"),
+			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "metrics_no_jobs_golden.yaml"),
 			expectedErr:        nil,
 		},
 		{
 			desc: "Successful Collection",
-			setupMockClient: func(t *testing.T) client {
+			setupMockClient: func(*testing.T) client {
 				mockClient := mocks.MockClient{}
 
 				// mock client calls
@@ -248,14 +241,14 @@ func TestScraperScrape(t *testing.T) {
 
 				return &mockClient
 			},
-			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "metrics_golden.json"),
+			expectedMetricFile: filepath.Join("testdata", "expected_metrics", "metrics_golden.yaml"),
 			expectedErr:        nil,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.desc, func(t *testing.T) {
-			scraper := newflinkScraper(createDefaultConfig().(*Config), componenttest.NewNopReceiverCreateSettings())
+			scraper := newflinkScraper(createDefaultConfig().(*Config), receivertest.NewNopSettings(metadata.Type))
 			scraper.client = tc.setupMockClient(t)
 			actualMetrics, err := scraper.scrape(context.Background())
 
@@ -268,7 +261,10 @@ func TestScraperScrape(t *testing.T) {
 			expectedMetrics, err := golden.ReadMetrics(tc.expectedMetricFile)
 			require.NoError(t, err)
 
-			require.NoError(t, scrapertest.CompareMetrics(expectedMetrics, actualMetrics))
+			require.NoError(t, pmetrictest.CompareMetrics(expectedMetrics, actualMetrics,
+				pmetrictest.IgnoreMetricDataPointsOrder(),
+				pmetrictest.IgnoreResourceMetricsOrder(),
+				pmetrictest.IgnoreStartTimestamp(), pmetrictest.IgnoreTimestamp()))
 		})
 	}
 }

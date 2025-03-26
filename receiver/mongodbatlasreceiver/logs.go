@@ -1,23 +1,10 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package mongodbatlasreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/mongodbatlasreceiver"
 
 import (
-	"compress/gzip"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -28,11 +15,14 @@ import (
 	"go.mongodb.org/atlas/mongodbatlas"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/consumer"
+	rcvr "go.opentelemetry.io/collector/receiver"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/mongodbatlasreceiver/internal"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/mongodbatlasreceiver/internal/model"
 )
+
+const mongoDBMajorVersion4_2 = "4.2"
 
 type logsReceiver struct {
 	log         *zap.Logger
@@ -45,29 +35,32 @@ type logsReceiver struct {
 	end         time.Time
 }
 
-type ProjectContext struct {
+type projectContext struct {
 	Project mongodbatlas.Project
 	orgName string
 }
 
-// MongoDB Atlas Documentation reccommends a polling interval of 5  minutes: https://www.mongodb.com/docs/atlas/reference/api/logs/#logs
+// MongoDB Atlas Documentation recommends a polling interval of 5 minutes: https://www.mongodb.com/docs/atlas/reference/api/logs/#logs
 const collectionInterval = time.Minute * 5
 
-func newMongoDBAtlasLogsReceiver(settings component.ReceiverCreateSettings, cfg *Config, consumer consumer.Logs) (*logsReceiver, error) {
-	client, err := internal.NewMongoDBAtlasClient(cfg.PublicKey, cfg.PrivateKey, cfg.RetrySettings, settings.Logger)
-	if err != nil {
-		return nil, err
+func newMongoDBAtlasLogsReceiver(settings rcvr.Settings, cfg *Config, consumer consumer.Logs) *logsReceiver {
+	client := internal.NewMongoDBAtlasClient(cfg.PublicKey, string(cfg.PrivateKey), cfg.BackOffConfig, settings.Logger)
+
+	for _, p := range cfg.Logs.Projects {
+		p.populateIncludesAndExcludes()
 	}
+
 	return &logsReceiver{
 		log:         settings.Logger,
 		cfg:         cfg,
 		client:      client,
 		stopperChan: make(chan struct{}),
-		consumer:    consumer}, nil
+		consumer:    consumer,
+	}
 }
 
 // Log receiver logic
-func (s *logsReceiver) Start(ctx context.Context, host component.Host) error {
+func (s *logsReceiver) Start(ctx context.Context, _ component.Host) error {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -90,7 +83,7 @@ func (s *logsReceiver) Start(ctx context.Context, host component.Host) error {
 	return nil
 }
 
-func (s *logsReceiver) Shutdown(ctx context.Context) error {
+func (s *logsReceiver) Shutdown(_ context.Context) error {
 	close(s.stopperChan)
 	s.wg.Wait()
 	return s.client.Shutdown()
@@ -125,7 +118,7 @@ func (s *logsReceiver) collect(ctx context.Context) {
 			s.log.Error("Error retrieving project "+projectCfg.Name+":", zap.Error(err))
 			continue
 		}
-		pc := ProjectContext{Project: *project}
+		pc := projectContext{Project: *project}
 
 		org, err := s.client.GetOrganization(ctx, project.OrgID)
 		if err != nil {
@@ -145,14 +138,55 @@ func (s *logsReceiver) collect(ctx context.Context) {
 	}
 }
 
-func (s *logsReceiver) processClusters(ctx context.Context, projectCfg ProjectConfig, projectID string) ([]mongodbatlas.Cluster, error) {
-	include, exclude := projectCfg.IncludeClusters, projectCfg.ExcludeClusters
+func (s *logsReceiver) processClusters(ctx context.Context, projectCfg LogsProjectConfig, projectID string) ([]mongodbatlas.Cluster, error) {
 	clusters, err := s.client.GetClusters(ctx, projectID)
 	if err != nil {
 		s.log.Error("Failure to collect clusters from project: %w", zap.Error(err))
 		return nil, err
 	}
 
+	return filterClusters(clusters, projectCfg.ProjectConfig)
+}
+
+type clusterInfo struct {
+	ClusterName         string
+	RegionName          string
+	ProviderName        string
+	MongoDBMajorVersion string
+}
+
+func (s *logsReceiver) collectClusterLogs(clusters []mongodbatlas.Cluster, projectCfg LogsProjectConfig, pc projectContext) {
+	for _, cluster := range clusters {
+		c := clusterInfo{
+			ClusterName:         cluster.Name,
+			RegionName:          cluster.ProviderSettings.RegionName,
+			ProviderName:        cluster.ProviderSettings.ProviderName,
+			MongoDBMajorVersion: cluster.MongoDBMajorVersion,
+		}
+
+		hostnames := parseHostNames(cluster.ConnectionStrings.Standard, s.log)
+		for _, hostname := range hostnames {
+			// Defaults to true if not specified
+			if projectCfg.EnableHostLogs == nil || *projectCfg.EnableHostLogs {
+				s.log.Debug("Collecting logs for host", zap.String("hostname", hostname), zap.String("cluster", cluster.Name))
+				s.collectLogs(pc, hostname, "mongodb.gz", c)
+				s.collectLogs(pc, hostname, "mongos.gz", c)
+			}
+
+			// Defaults to false if not specified
+			if projectCfg.EnableAuditLogs {
+				s.log.Debug("Collecting audit logs for host", zap.String("hostname", hostname), zap.String("cluster", cluster.Name))
+				s.collectAuditLogs(pc, hostname, "mongodb-audit-log.gz", c)
+				s.collectAuditLogs(pc, hostname, "mongos-audit-log.gz", c)
+			}
+		}
+	}
+}
+
+func filterClusters(clusters []mongodbatlas.Cluster, projectCfg ProjectConfig) ([]mongodbatlas.Cluster, error) {
+	include, exclude := projectCfg.IncludeClusters, projectCfg.ExcludeClusters
+	var allowed bool
+	var clusterNameSet map[string]struct{}
 	// check to include or exclude clusters
 	switch {
 	// keep all clusters if include and exclude are not specified
@@ -160,75 +194,34 @@ func (s *logsReceiver) processClusters(ctx context.Context, projectCfg ProjectCo
 		return clusters, nil
 	// include is initialized
 	case len(include) > 0 && len(exclude) == 0:
-		return filterClusters(clusters, include, true), nil
+		allowed = true
+		clusterNameSet = projectCfg.includesByClusterName
 	// exclude is initialized
 	case len(exclude) > 0 && len(include) == 0:
-		return filterClusters(clusters, exclude, false), nil
+		allowed = false
+		clusterNameSet = projectCfg.excludesByClusterName
 	// both are initialized
 	default:
 		return nil, errors.New("both Include and Exclude clusters configured")
 	}
-}
-
-func (s *logsReceiver) collectClusterLogs(clusters []mongodbatlas.Cluster, projectCfg ProjectConfig, pc ProjectContext) {
-	for _, cluster := range clusters {
-		hostnames := parseHostNames(cluster.ConnectionStrings.Standard, s.log)
-		for _, hostname := range hostnames {
-			s.collectLogs(pc, hostname, "mongodb.gz", cluster.Name)
-			s.collectLogs(pc, hostname, "mongos.gz", cluster.Name)
-
-			if projectCfg.EnableAuditLogs {
-				s.collectAuditLogs(pc, hostname, "mongodb-audit-log.gz", cluster.Name)
-				s.collectAuditLogs(pc, hostname, "mongos-audit-log.gz", cluster.Name)
-			}
-		}
-	}
-}
-
-func filterClusters(clusters []mongodbatlas.Cluster, clusterNames []string, include bool) []mongodbatlas.Cluster {
-	// Arrange cluster names for quick reference
-	clusterNameSet := map[string]struct{}{}
-	for _, clusterName := range clusterNames {
-		clusterNameSet[clusterName] = struct{}{}
-	}
 
 	var filtered []mongodbatlas.Cluster
 	for _, cluster := range clusters {
-		if _, ok := clusterNameSet[cluster.Name]; (!ok && !include) || (ok && include) {
+		if _, ok := clusterNameSet[cluster.Name]; (!ok && !allowed) || (ok && allowed) {
 			filtered = append(filtered, cluster)
 		}
 	}
-	return filtered
+	return filtered, nil
 }
 
-func (s *logsReceiver) getHostLogs(groupID, hostname, logName string) ([]model.LogEntry, error) {
+func (s *logsReceiver) getHostLogs(groupID, hostname, logName string, clusterMajorVersion string) ([]model.LogEntry, error) {
 	// Get gzip bytes buffer from API
 	buf, err := s.client.GetLogs(context.Background(), groupID, hostname, logName, s.start, s.end)
 	if err != nil {
 		return nil, err
 	}
-	// Pass this into a gzip reader for decoding
-	reader, err := gzip.NewReader(buf)
-	if err != nil {
-		return nil, err
-	}
 
-	// Logs are in JSON format so create a JSON decoder to process them
-	dec := json.NewDecoder(reader)
-
-	var entries []model.LogEntry
-	for {
-		var entry model.LogEntry
-		err := dec.Decode(&entry)
-		if errors.Is(err, io.EOF) {
-			return entries, nil
-		}
-		if err != nil {
-			s.log.Error("Entry could not be decoded into LogEntry", zap.Error(err))
-		}
-
-		entries = append(entries, entry)
-	}
+	return decodeLogs(s.log, clusterMajorVersion, buf)
 }
 
 func (s *logsReceiver) getHostAuditLogs(groupID, hostname, logName string) ([]model.AuditLog, error) {
@@ -237,32 +230,20 @@ func (s *logsReceiver) getHostAuditLogs(groupID, hostname, logName string) ([]mo
 	if err != nil {
 		return nil, err
 	}
-	reader, err := gzip.NewReader(buf)
-	if err != nil {
-		return nil, err
-	}
 
-	dec := json.NewDecoder(reader)
-
-	var entries []model.AuditLog
-	for {
-		var entry model.AuditLog
-		err := dec.Decode(&entry)
-		if errors.Is(err, io.EOF) {
-			return entries, nil
-		}
-		if err != nil {
-			s.log.Error("Entry could not be decoded into LogEntry", zap.Error(err))
-		}
-
-		entries = append(entries, entry)
-	}
+	return decodeAuditJSON(s.log, buf)
 }
 
-func (s *logsReceiver) collectLogs(pc ProjectContext, hostname, logName, clusterName string) {
-	logs, err := s.getHostLogs(pc.Project.ID, hostname, logName)
+func (s *logsReceiver) collectLogs(pc projectContext, hostname, logName string, clusterInfo clusterInfo) {
+	logs, err := s.getHostLogs(pc.Project.ID, hostname, logName, clusterInfo.MongoDBMajorVersion)
 	if err != nil && !errors.Is(err, io.EOF) {
-		s.log.Warn("Failed to retrieve logs from: "+logName, zap.Error(err))
+		s.log.Warn("Failed to retrieve host logs", zap.Error(err), zap.String("hostname", hostname), zap.String("log", logName), zap.Time("startTime", s.start), zap.Time("endTime", s.end))
+		return
+	}
+
+	if len(logs) == 0 {
+		s.log.Warn("Attempted to retrieve host logs but received 0 logs", zap.Error(err), zap.String("log", logName), zap.String("hostname", hostname), zap.Time("startTime", s.start), zap.Time("endTime", s.end))
+		return
 	}
 
 	plog := mongodbEventToLogData(s.log,
@@ -270,14 +251,14 @@ func (s *logsReceiver) collectLogs(pc ProjectContext, hostname, logName, cluster
 		pc,
 		hostname,
 		logName,
-		clusterName)
+		clusterInfo)
 	err = s.consumer.ConsumeLogs(context.Background(), plog)
 	if err != nil {
 		s.log.Error("Failed to consume logs", zap.Error(err))
 	}
 }
 
-func (s *logsReceiver) collectAuditLogs(pc ProjectContext, hostname, logName, clusterName string) {
+func (s *logsReceiver) collectAuditLogs(pc projectContext, hostname, logName string, clusterInfo clusterInfo) {
 	logs, err := s.getHostAuditLogs(
 		pc.Project.ID,
 		hostname,
@@ -285,15 +266,26 @@ func (s *logsReceiver) collectAuditLogs(pc ProjectContext, hostname, logName, cl
 	)
 
 	if err != nil && !errors.Is(err, io.EOF) {
-		s.log.Warn("Failed to retrieve audit logs: "+logName, zap.Error(err))
+		s.log.Warn("Failed to retrieve audit logs", zap.Error(err), zap.String("hostname", hostname), zap.String("log", logName), zap.Time("startTime", s.start), zap.Time("endTime", s.end))
+		return
 	}
 
-	plog := mongodbAuditEventToLogData(s.log,
+	if len(logs) == 0 {
+		s.log.Warn("Attempted to retrieve audit logs but received 0 logs", zap.Error(err), zap.String("hostname", hostname), zap.String("log", logName), zap.Time("startTime", s.start), zap.Time("endTime", s.end))
+		return
+	}
+
+	plog, err := mongodbAuditEventToLogData(s.log,
 		logs,
 		pc,
 		hostname,
 		logName,
-		clusterName)
+		clusterInfo)
+	if err != nil {
+		s.log.Warn("Failed to translate audit logs: "+logName, zap.Error(err))
+		return
+	}
+
 	err = s.consumer.ConsumeLogs(context.Background(), plog)
 	if err != nil {
 		s.log.Error("Failed to consume logs", zap.Error(err))

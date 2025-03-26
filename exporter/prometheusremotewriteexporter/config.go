@@ -1,24 +1,14 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package prometheusremotewriteexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter"
 
 import (
 	"fmt"
 
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/configretry"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/resourcetotelemetry"
@@ -26,9 +16,8 @@ import (
 
 // Config defines configuration for Remote Write exporter.
 type Config struct {
-	config.ExporterSettings        `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct
-	exporterhelper.TimeoutSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
-	exporterhelper.RetrySettings   `mapstructure:"retry_on_failure"`
+	TimeoutSettings           exporterhelper.TimeoutConfig `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+	configretry.BackOffConfig `mapstructure:"retry_on_failure"`
 
 	// prefix attached to each exported metric name
 	// See: https://prometheus.io/docs/practices/naming/#metric-names
@@ -41,7 +30,13 @@ type Config struct {
 	// ExternalLabels defines a map of label keys and values that are allowed to start with reserved prefix "__"
 	ExternalLabels map[string]string `mapstructure:"external_labels"`
 
-	HTTPClientSettings confighttp.HTTPClientSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+	ClientConfig confighttp.ClientConfig `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+
+	// maximum size in bytes of time series batch sent to remote storage
+	MaxBatchSizeBytes int `mapstructure:"max_batch_size_bytes"`
+
+	// maximum amount of parallel requests to do when handling large batch request
+	MaxBatchRequestParallelism *int `mapstructure:"max_batch_request_parallelism"`
 
 	// ResourceToTelemetrySettings is the option for converting resource attributes to telemetry attributes.
 	// "Enabled" - A boolean field to enable/disable this option. Default is `false`.
@@ -51,6 +46,17 @@ type Config struct {
 
 	// TargetInfo allows customizing the target_info metric
 	TargetInfo *TargetInfo `mapstructure:"target_info,omitempty"`
+
+	// AddMetricSuffixes controls whether unit and type suffixes are added to metrics on export
+	AddMetricSuffixes bool `mapstructure:"add_metric_suffixes"`
+
+	// SendMetadata controls whether prometheus metadata will be generated and sent
+	SendMetadata bool `mapstructure:"send_metadata"`
+}
+
+type CreatedMetric struct {
+	// Enabled if true the _created metrics could be exported
+	Enabled bool `mapstructure:"enabled"`
 }
 
 type TargetInfo struct {
@@ -75,10 +81,14 @@ type RemoteWriteQueue struct {
 
 // TODO(jbd): Add capacity, max_samples_per_send to QueueConfig.
 
-var _ config.Exporter = (*Config)(nil)
+var _ component.Config = (*Config)(nil)
 
 // Validate checks if the exporter configuration is valid
 func (cfg *Config) Validate() error {
+	if cfg.MaxBatchRequestParallelism != nil && *cfg.MaxBatchRequestParallelism < 1 {
+		return fmt.Errorf("max_batch_request_parallelism can't be set to below 1")
+	}
+
 	if cfg.RemoteWriteQueue.QueueSize < 0 {
 		return fmt.Errorf("remote write queue size can't be negative")
 	}
@@ -96,5 +106,17 @@ func (cfg *Config) Validate() error {
 			Enabled: true,
 		}
 	}
+	if cfg.MaxBatchSizeBytes < 0 {
+		return fmt.Errorf("max_batch_byte_size must be greater than 0")
+	}
+	if cfg.MaxBatchSizeBytes == 0 {
+		// Defaults to ~2.81MB
+		cfg.MaxBatchSizeBytes = 3000000
+	}
+
+	if len(cfg.ClientConfig.Compression) > 0 && cfg.ClientConfig.Compression != "snappy" {
+		return fmt.Errorf("compression type must be snappy")
+	}
+
 	return nil
 }

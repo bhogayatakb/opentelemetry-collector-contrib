@@ -1,28 +1,13 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package adapter
 
 import (
 	"context"
 	"errors"
-	"time"
 
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/consumer/consumertest"
-	"go.opentelemetry.io/collector/pdata/plog"
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/component"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
@@ -37,7 +22,7 @@ func init() {
 
 // UnstartableConfig is the configuration of an unstartable mock operator
 type UnstartableConfig struct {
-	helper.OutputConfig `yaml:",inline"`
+	helper.OutputConfig `mapstructure:",squash"`
 }
 
 // UnstartableOperator is an operator that will build but not start
@@ -47,20 +32,16 @@ type UnstartableOperator struct {
 	helper.OutputOperator
 }
 
-func newUnstartableParams() map[string]interface{} {
-	return map[string]interface{}{"type": "unstartable_operator"}
-}
-
-// NewUnstartableConfig creates new output config
-func NewUnstartableConfig() *UnstartableConfig {
-	return &UnstartableConfig{
+// newUnstartableConfig creates new output config
+func NewUnstartableConfig() operator.Config {
+	return operator.NewConfig(&UnstartableConfig{
 		OutputConfig: helper.NewOutputConfig("unstartable_operator", "unstartable_operator"),
-	}
+	})
 }
 
 // Build will build an unstartable operator
-func (c *UnstartableConfig) Build(logger *zap.SugaredLogger) (operator.Operator, error) {
-	o, _ := c.OutputConfig.Build(logger)
+func (c *UnstartableConfig) Build(set component.TelemetrySettings) (operator.Operator, error) {
+	o, _ := c.OutputConfig.Build(set)
 	return &UnstartableOperator{OutputOperator: o}, nil
 }
 
@@ -69,61 +50,42 @@ func (o *UnstartableOperator) Start(_ operator.Persister) error {
 	return errors.New("something very unusual happened")
 }
 
-// Process will return nil
-func (o *UnstartableOperator) Process(ctx context.Context, entry *entry.Entry) error {
+func (o *UnstartableOperator) ProcessBatch(_ context.Context, _ []*entry.Entry) error {
 	return nil
 }
 
-type mockLogsRejecter struct {
-	consumertest.LogsSink
+// Process will return nil
+func (o *UnstartableOperator) Process(_ context.Context, _ *entry.Entry) error {
+	return nil
 }
 
-func (m *mockLogsRejecter) ConsumeLogs(ctx context.Context, ld plog.Logs) error {
-	_ = m.LogsSink.ConsumeLogs(ctx, ld)
-	return errors.New("no")
-}
+const testTypeStr = "test"
 
-const testType = "test"
+var testType = component.MustNewType(testTypeStr)
 
 type TestConfig struct {
 	BaseConfig `mapstructure:",squash"`
-	Input      InputConfig `mapstructure:",remain"`
+	Input      operator.Config `mapstructure:",squash"`
 }
 type TestReceiverType struct{}
 
-func (f TestReceiverType) Type() config.Type {
+func (f TestReceiverType) Type() component.Type {
 	return testType
 }
 
-func (f TestReceiverType) CreateDefaultConfig() config.Receiver {
+func (f TestReceiverType) CreateDefaultConfig() component.Config {
 	return &TestConfig{
 		BaseConfig: BaseConfig{
-			ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(testType)),
-			Operators:        OperatorConfigs{},
-			Converter: ConverterConfig{
-				MaxFlushCount: 1,
-				FlushInterval: 100 * time.Millisecond,
-			},
+			Operators: []operator.Config{},
 		},
-		Input: InputConfig{},
+		Input: operator.NewConfig(noop.NewConfig()),
 	}
 }
 
-func (f TestReceiverType) BaseConfig(cfg config.Receiver) BaseConfig {
+func (f TestReceiverType) BaseConfig(cfg component.Config) BaseConfig {
 	return cfg.(*TestConfig).BaseConfig
 }
 
-func (f TestReceiverType) DecodeInputConfig(cfg config.Receiver) (*operator.Config, error) {
-	testConfig := cfg.(*TestConfig)
-
-	// Allow tests to run without implementing input config
-	if testConfig.Input["type"] == nil {
-		return &operator.Config{Builder: noop.NewConfig()}, nil
-	}
-
-	// Allow tests to explicitly prompt a failure
-	if testConfig.Input["type"] == "unknown" {
-		return nil, errors.New("unknown input type")
-	}
-	return &operator.Config{Builder: NewUnstartableConfig()}, nil
+func (f TestReceiverType) InputConfig(cfg component.Config) operator.Config {
+	return cfg.(*TestConfig).Input
 }

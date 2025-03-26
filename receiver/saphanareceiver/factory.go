@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package saphanareceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/saphanareceiver"
 
@@ -20,60 +9,58 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/config/configtls"
 	"go.opentelemetry.io/collector/consumer"
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/saphanareceiver/internal/metadata"
 )
 
 const (
-	typeStr         = "saphana"
-	stability       = component.StabilityLevelInDevelopment
 	defaultEndpoint = "localhost:33015"
 )
 
 // NewFactory creates a factory for SAP HANA receiver.
-func NewFactory() component.ReceiverFactory {
-	return component.NewReceiverFactory(
-		typeStr,
+func NewFactory() receiver.Factory {
+	return receiver.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		component.WithMetricsReceiver(createMetricsReceiver, stability))
+		receiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability))
 }
 
-func createDefaultConfig() config.Receiver {
-	scs := scraperhelper.NewDefaultScraperControllerSettings(typeStr)
+func createDefaultConfig() component.Config {
+	scs := scraperhelper.NewDefaultControllerConfig()
 	scs.CollectionInterval = 10 * time.Second
 	return &Config{
-		TCPAddr: confignet.TCPAddr{
+		TCPAddrConfig: confignet.TCPAddrConfig{
 			Endpoint: defaultEndpoint,
 		},
-		TLSClientSetting: configtls.TLSClientSetting{
+		ClientConfig: configtls.ClientConfig{
 			Insecure: true,
 		},
-		ScraperControllerSettings: scs,
-		Metrics:                   metadata.DefaultMetricsSettings(),
+		ControllerConfig:     scs,
+		MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
 	}
 }
 
 var errConfigNotSAPHANA = errors.New("config was not an sap hana receiver config")
 
 func createMetricsReceiver(
-	ctx context.Context,
-	set component.ReceiverCreateSettings,
-	cfg config.Receiver,
+	_ context.Context,
+	set receiver.Settings,
+	cfg component.Config,
 	consumer consumer.Metrics,
-) (component.MetricsReceiver, error) {
+) (receiver.Metrics, error) {
 	c, ok := cfg.(*Config)
 	if !ok {
 		return nil, errConfigNotSAPHANA
 	}
-	scraper, err := newSapHanaScraper(set, c, &defaultConnectionFactory{})
+	s, err := newSapHanaScraper(set, c, &defaultConnectionFactory{})
 	if err != nil {
 		return nil, err
 	}
 
-	return scraperhelper.NewScraperControllerReceiver(&c.ScraperControllerSettings, set, consumer, scraperhelper.AddScraper(scraper))
+	return scraperhelper.NewMetricsController(&c.ControllerConfig, set, consumer, scraperhelper.AddScraper(metadata.Type, s))
 }

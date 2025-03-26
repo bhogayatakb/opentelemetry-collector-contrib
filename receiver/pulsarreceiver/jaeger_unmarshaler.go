@@ -1,16 +1,5 @@
-// Copyright 2020 The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package pulsarreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/pulsarreceiver"
 
@@ -18,15 +7,14 @@ import (
 	"bytes"
 
 	"github.com/gogo/protobuf/jsonpb"
-	jaegerproto "github.com/jaegertracing/jaeger/model"
+	jaegerproto "github.com/jaegertracing/jaeger-idl/model/v1"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/jaeger"
 )
 
 // copy from kafka receiver
-type jaegerProtoSpanUnmarshaler struct {
-}
+type jaegerProtoSpanUnmarshaler struct{}
 
 var _ TracesUnmarshaler = (*jaegerProtoSpanUnmarshaler)(nil)
 
@@ -43,8 +31,7 @@ func (j jaegerProtoSpanUnmarshaler) Encoding() string {
 	return "jaeger_proto"
 }
 
-type jaegerJSONSpanUnmarshaler struct {
-}
+type jaegerJSONSpanUnmarshaler struct{}
 
 var _ TracesUnmarshaler = (*jaegerJSONSpanUnmarshaler)(nil)
 

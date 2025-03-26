@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package awsecscontainermetrics
 
@@ -19,7 +8,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.21.0"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/ecsutil"
@@ -75,8 +64,8 @@ func TestContainerResourceForStoppedContainer(t *testing.T) {
 	require.NotNil(t, r)
 	attrMap := r.Attributes()
 	getExitCodeAd, found := attrMap.Get(attributeContainerExitCode)
-	require.EqualValues(t, true, found)
-	require.EqualValues(t, 2, getExitCodeAd.IntVal())
+	require.True(t, found)
+	require.EqualValues(t, 2, getExitCodeAd.Int())
 	require.EqualValues(t, 11, attrMap.Len())
 	expected := map[string]string{
 		conventions.AttributeContainerName:      "container-1",
@@ -105,6 +94,7 @@ func TestTaskResource(t *testing.T) {
 		PullStoppedAt:    "2020-10-02T00:43:06.31288465Z",
 		KnownStatus:      "RUNNING",
 		LaunchType:       "EC2",
+		ServiceName:      "MyService",
 	}
 	r := taskResource(tm)
 	require.NotNil(t, r)
@@ -126,6 +116,7 @@ func TestTaskResource(t *testing.T) {
 		conventions.AttributeAWSECSLaunchtype:      conventions.AttributeAWSECSLaunchtypeEC2,
 		conventions.AttributeCloudRegion:           "us-west-2",
 		conventions.AttributeCloudAccountID:        "111122223333",
+		attributeECSServiceName:                    "MyService",
 	}
 
 	verifyAttributeMap(t, expected, attrMap)
@@ -142,6 +133,7 @@ func TestTaskResourceWithClusterARN(t *testing.T) {
 		PullStoppedAt:    "2020-10-02T00:43:06.31288465Z",
 		KnownStatus:      "RUNNING",
 		LaunchType:       "EC2",
+		ServiceName:      "MyService",
 	}
 	r := taskResource(tm)
 	require.NotNil(t, r)
@@ -164,6 +156,7 @@ func TestTaskResourceWithClusterARN(t *testing.T) {
 		conventions.AttributeAWSECSLaunchtype:      conventions.AttributeAWSECSLaunchtypeEC2,
 		conventions.AttributeCloudRegion:           "us-west-2",
 		conventions.AttributeCloudAccountID:        "803860917211",
+		attributeECSServiceName:                    "MyService",
 	}
 
 	verifyAttributeMap(t, expected, attrMap)
@@ -172,9 +165,9 @@ func TestTaskResourceWithClusterARN(t *testing.T) {
 func verifyAttributeMap(t *testing.T, expected map[string]string, found pcommon.Map) {
 	for key, val := range expected {
 		attributeVal, found := found.Get(key)
-		require.EqualValues(t, true, found)
+		require.True(t, found)
 
-		require.EqualValues(t, val, attributeVal.StringVal())
+		require.EqualValues(t, val, attributeVal.Str())
 	}
 }
 
@@ -202,5 +195,4 @@ func TestGetNameFromCluster(t *testing.T) {
 
 	clusterName = getNameFromCluster("")
 	require.LessOrEqual(t, 0, len(clusterName))
-
 }

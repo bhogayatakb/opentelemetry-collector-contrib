@@ -1,19 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-//go:build windows
-// +build windows
+// SPDX-License-Identifier: Apache-2.0
 
 package windows // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/input/windows"
 
@@ -37,6 +23,9 @@ type Buffer struct {
 
 // ReadBytes will read UTF-8 bytes from the buffer, where offset is the number of bytes to be read
 func (b *Buffer) ReadBytes(offset uint32) ([]byte, error) {
+	if offset > uint32(len(b.buffer)) {
+		offset = uint32(len(b.buffer))
+	}
 	utf16 := b.buffer[:offset]
 	utf8, err := unicode.UTF16(unicode.LittleEndian, unicode.UseBOM).NewDecoder().Bytes(utf16)
 	if err != nil {
@@ -86,8 +75,8 @@ func (b *Buffer) FirstByte() *byte {
 }
 
 // NewBuffer creates a new buffer with the default buffer size
-func NewBuffer() Buffer {
-	return Buffer{
+func NewBuffer() *Buffer {
+	return &Buffer{
 		buffer: make([]byte, defaultBufferSize),
 	}
 }

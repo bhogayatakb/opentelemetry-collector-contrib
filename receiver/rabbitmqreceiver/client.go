@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package rabbitmqreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/rabbitmqreceiver"
 
@@ -27,12 +16,19 @@ import (
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/rabbitmqreceiver/internal/models"
 )
 
-// queuePath is the path to queues endpoint
-const queuePath = "/api/queues"
+const (
+	// queuePath is the endpoint for RabbitMQ queues.
+	queuePath = "/api/queues"
+
+	// nodePath is the endpoint for RabbitMQ nodes.
+	nodePath = "/api/nodes"
+)
 
 type client interface {
 	// GetQueues calls "/api/queues" endpoint to get list of queues for the target node
 	GetQueues(ctx context.Context) ([]*models.Queue, error)
+	// GetNodes calls "/api/nodes" endpoint to get list of nodes for the target node
+	GetNodes(ctx context.Context) ([]*models.Node, error)
 }
 
 var _ client = (*rabbitmqClient)(nil)
@@ -49,8 +45,8 @@ type rabbitmqCredentials struct {
 	password string
 }
 
-func newClient(cfg *Config, host component.Host, settings component.TelemetrySettings, logger *zap.Logger) (client, error) {
-	httpClient, err := cfg.ToClient(host, settings)
+func newClient(ctx context.Context, cfg *Config, host component.Host, settings component.TelemetrySettings, logger *zap.Logger) (client, error) {
+	httpClient, err := cfg.ToClient(ctx, host, settings)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP Client: %w", err)
 	}
@@ -60,7 +56,7 @@ func newClient(cfg *Config, host component.Host, settings component.TelemetrySet
 		hostEndpoint: cfg.Endpoint,
 		creds: rabbitmqCredentials{
 			username: cfg.Username,
-			password: cfg.Password,
+			password: string(cfg.Password),
 		},
 		logger: logger,
 	}, nil
@@ -77,7 +73,18 @@ func (c *rabbitmqClient) GetQueues(ctx context.Context) ([]*models.Queue, error)
 	return queues, nil
 }
 
-func (c *rabbitmqClient) get(ctx context.Context, path string, respObj interface{}) error {
+func (c *rabbitmqClient) GetNodes(ctx context.Context) ([]*models.Node, error) {
+	var nodes []*models.Node
+
+	if err := c.get(ctx, nodePath, &nodes); err != nil {
+		c.logger.Debug("Failed to retrieve nodes", zap.Error(err))
+		return nil, err
+	}
+
+	return nodes, nil
+}
+
+func (c *rabbitmqClient) get(ctx context.Context, path string, respObj any) error {
 	// Construct endpoint and create request
 	url := c.hostEndpoint + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)

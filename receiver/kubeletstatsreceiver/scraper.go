@@ -1,118 +1,103 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package kubeletstatsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver"
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
-	"go.opentelemetry.io/collector/service/featuregate"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/scraper"
 	"go.uber.org/zap"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/k8sconfig"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver/internal/kubelet"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kubeletstatsreceiver/internal/metadata"
 )
 
-const (
-	emitMetricsWithDirectionAttributeFeatureGateID    = "receiver.kubeletstatsreceiver.emitMetricsWithDirectionAttribute"
-	emitMetricsWithoutDirectionAttributeFeatureGateID = "receiver.kubeletstatsreceiver.emitMetricsWithoutDirectionAttribute"
-)
-
-var (
-	emitMetricsWithDirectionAttributeFeatureGate = featuregate.Gate{
-		ID:      emitMetricsWithDirectionAttributeFeatureGateID,
-		Enabled: true,
-		Description: "Some kubeletstats metrics reported are transitioning from being reported with a direction " +
-			"attribute to being reported with the direction included in the metric name to adhere to the " +
-			"OpenTelemetry specification. This feature gate controls emitting the old metrics with the direction " +
-			"attribute. For more details, see: " +
-			"https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/kubeletstatsreceiver/README.md#feature-gate-configurations",
-	}
-
-	emitMetricsWithoutDirectionAttributeFeatureGate = featuregate.Gate{
-		ID:      emitMetricsWithoutDirectionAttributeFeatureGateID,
-		Enabled: false,
-		Description: "Some kubeletstats metrics reported are transitioning from being reported with a direction " +
-			"attribute to being reported with the direction included in the metric name to adhere to the " +
-			"OpenTelemetry specification. This feature gate controls emitting the new metrics without the direction " +
-			"attribute. For more details, see: " +
-			"https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/receiver/kubeletstatsreceiver/README.md#feature-gate-configurations",
-	}
-)
-
-func init() {
-	featuregate.GetRegistry().MustRegister(emitMetricsWithDirectionAttributeFeatureGate)
-	featuregate.GetRegistry().MustRegister(emitMetricsWithoutDirectionAttributeFeatureGate)
-}
-
 type scraperOptions struct {
-	id                    config.ComponentID
 	collectionInterval    time.Duration
 	extraMetadataLabels   []kubelet.MetadataLabel
 	metricGroupsToCollect map[kubelet.MetricGroup]bool
 	k8sAPIClient          kubernetes.Interface
 }
 
-type kubletScraper struct {
-	statsProvider                        *kubelet.StatsProvider
-	metadataProvider                     *kubelet.MetadataProvider
-	logger                               *zap.Logger
-	extraMetadataLabels                  []kubelet.MetadataLabel
-	metricGroupsToCollect                map[kubelet.MetricGroup]bool
-	k8sAPIClient                         kubernetes.Interface
-	cachedVolumeLabels                   map[string][]metadata.ResourceMetricsOption
-	mbs                                  *metadata.MetricsBuilders
-	emitMetricsWithDirectionAttribute    bool
-	emitMetricsWithoutDirectionAttribute bool
+type kubeletScraper struct {
+	statsProvider         *kubelet.StatsProvider
+	metadataProvider      *kubelet.MetadataProvider
+	logger                *zap.Logger
+	extraMetadataLabels   []kubelet.MetadataLabel
+	metricGroupsToCollect map[kubelet.MetricGroup]bool
+	k8sAPIClient          kubernetes.Interface
+	cachedVolumeSource    map[string]v1.PersistentVolumeSource
+	mbs                   *metadata.MetricsBuilders
+	needsResources        bool
+	nodeInformer          cache.SharedInformer
+	stopCh                chan struct{}
+	m                     sync.RWMutex
+
+	// A struct that keeps Node's resource capacities
+	nodeLimits *kubelet.NodeCapacity
 }
 
-func newKubletScraper(
+func newKubeletScraper(
 	restClient kubelet.RestClient,
-	set component.ReceiverCreateSettings,
+	set receiver.Settings,
 	rOptions *scraperOptions,
-	metricsConfig metadata.MetricsSettings,
-) (scraperhelper.Scraper, error) {
-	ks := &kubletScraper{
+	metricsConfig metadata.MetricsBuilderConfig,
+	nodeName string,
+) (scraper.Metrics, error) {
+	ks := &kubeletScraper{
 		statsProvider:         kubelet.NewStatsProvider(restClient),
 		metadataProvider:      kubelet.NewMetadataProvider(restClient),
 		logger:                set.Logger,
 		extraMetadataLabels:   rOptions.extraMetadataLabels,
 		metricGroupsToCollect: rOptions.metricGroupsToCollect,
 		k8sAPIClient:          rOptions.k8sAPIClient,
-		cachedVolumeLabels:    make(map[string][]metadata.ResourceMetricsOption),
+		cachedVolumeSource:    make(map[string]v1.PersistentVolumeSource),
 		mbs: &metadata.MetricsBuilders{
-			NodeMetricsBuilder:      metadata.NewMetricsBuilder(metricsConfig, set.BuildInfo),
-			PodMetricsBuilder:       metadata.NewMetricsBuilder(metricsConfig, set.BuildInfo),
-			ContainerMetricsBuilder: metadata.NewMetricsBuilder(metricsConfig, set.BuildInfo),
-			OtherMetricsBuilder:     metadata.NewMetricsBuilder(metricsConfig, set.BuildInfo),
+			NodeMetricsBuilder:      metadata.NewMetricsBuilder(metricsConfig, set),
+			PodMetricsBuilder:       metadata.NewMetricsBuilder(metricsConfig, set),
+			ContainerMetricsBuilder: metadata.NewMetricsBuilder(metricsConfig, set),
+			OtherMetricsBuilder:     metadata.NewMetricsBuilder(metricsConfig, set),
 		},
-		emitMetricsWithDirectionAttribute:    featuregate.GetRegistry().IsEnabled(emitMetricsWithDirectionAttributeFeatureGateID),
-		emitMetricsWithoutDirectionAttribute: featuregate.GetRegistry().IsEnabled(emitMetricsWithoutDirectionAttributeFeatureGateID),
+		needsResources: metricsConfig.Metrics.K8sPodCPULimitUtilization.Enabled ||
+			metricsConfig.Metrics.K8sPodCPURequestUtilization.Enabled ||
+			metricsConfig.Metrics.K8sContainerCPULimitUtilization.Enabled ||
+			metricsConfig.Metrics.K8sContainerCPURequestUtilization.Enabled ||
+			metricsConfig.Metrics.K8sPodMemoryLimitUtilization.Enabled ||
+			metricsConfig.Metrics.K8sPodMemoryRequestUtilization.Enabled ||
+			metricsConfig.Metrics.K8sContainerMemoryLimitUtilization.Enabled ||
+			metricsConfig.Metrics.K8sContainerMemoryRequestUtilization.Enabled,
+		stopCh:     make(chan struct{}),
+		nodeLimits: &kubelet.NodeCapacity{},
 	}
-	return scraperhelper.NewScraper(typeStr, ks.scrape)
+
+	if metricsConfig.Metrics.K8sContainerCPUNodeUtilization.Enabled ||
+		metricsConfig.Metrics.K8sPodCPUNodeUtilization.Enabled ||
+		metricsConfig.Metrics.K8sContainerMemoryNodeUtilization.Enabled ||
+		metricsConfig.Metrics.K8sPodMemoryNodeUtilization.Enabled {
+		ks.nodeInformer = k8sconfig.NewNodeSharedInformer(rOptions.k8sAPIClient, nodeName, 5*time.Minute)
+	}
+
+	return scraper.NewMetrics(
+		ks.scrape,
+		scraper.WithStart(ks.start),
+		scraper.WithShutdown(ks.shutdown),
+	)
 }
 
-func (r *kubletScraper) scrape(context.Context) (pmetric.Metrics, error) {
+func (r *kubeletScraper) scrape(context.Context) (pmetric.Metrics, error) {
 	summary, err := r.statsProvider.StatsSummary()
 	if err != nil {
 		r.logger.Error("call to /stats/summary endpoint failed", zap.Error(err))
@@ -121,7 +106,7 @@ func (r *kubletScraper) scrape(context.Context) (pmetric.Metrics, error) {
 
 	var podsMetadata *v1.PodList
 	// fetch metadata only when extra metadata labels are needed
-	if len(r.extraMetadataLabels) > 0 {
+	if len(r.extraMetadataLabels) > 0 || r.needsResources {
 		podsMetadata, err = r.metadataProvider.Pods()
 		if err != nil {
 			r.logger.Error("call to /pods endpoint failed", zap.Error(err))
@@ -129,8 +114,14 @@ func (r *kubletScraper) scrape(context.Context) (pmetric.Metrics, error) {
 		}
 	}
 
-	metadata := kubelet.NewMetadata(r.extraMetadataLabels, podsMetadata, r.detailedPVCLabelsSetter())
-	mds := kubelet.MetricsData(r.logger, summary, metadata, r.metricGroupsToCollect, r.mbs, r.emitMetricsWithDirectionAttribute, r.emitMetricsWithoutDirectionAttribute)
+	var node kubelet.NodeCapacity
+	if r.nodeInformer != nil {
+		node = r.node()
+	}
+
+	metaD := kubelet.NewMetadata(r.extraMetadataLabels, podsMetadata, node, r.detailedPVCLabelsSetter())
+
+	mds := kubelet.MetricsData(r.logger, summary, metaD, r.metricGroupsToCollect, r.mbs)
 	md := pmetric.NewMetrics()
 	for i := range mds {
 		mds[i].ResourceMetrics().MoveAndAppendTo(md.ResourceMetrics())
@@ -138,34 +129,94 @@ func (r *kubletScraper) scrape(context.Context) (pmetric.Metrics, error) {
 	return md, nil
 }
 
-func (r *kubletScraper) detailedPVCLabelsSetter() func(volCacheID, volumeClaim, namespace string) ([]metadata.ResourceMetricsOption, error) {
-	return func(volCacheID, volumeClaim, namespace string) ([]metadata.ResourceMetricsOption, error) {
+func (r *kubeletScraper) detailedPVCLabelsSetter() func(rb *metadata.ResourceBuilder, volCacheID, volumeClaim, namespace string) error {
+	return func(rb *metadata.ResourceBuilder, volCacheID, volumeClaim, namespace string) error {
 		if r.k8sAPIClient == nil {
-			return nil, nil
+			return nil
 		}
 
-		if r.cachedVolumeLabels[volCacheID] == nil {
+		if _, ok := r.cachedVolumeSource[volCacheID]; !ok {
 			ctx := context.Background()
 			pvc, err := r.k8sAPIClient.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, volumeClaim, metav1.GetOptions{})
 			if err != nil {
-				return nil, err
+				return err
 			}
 
 			volName := pvc.Spec.VolumeName
 			if volName == "" {
-				return nil, fmt.Errorf("PersistentVolumeClaim %s does not have a volume name", pvc.Name)
+				return fmt.Errorf("PersistentVolumeClaim %s does not have a volume name", pvc.Name)
 			}
 
 			pv, err := r.k8sAPIClient.CoreV1().PersistentVolumes().Get(ctx, volName, metav1.GetOptions{})
 			if err != nil {
-				return nil, err
+				return err
 			}
 
-			ro := kubelet.GetPersistentVolumeLabels(pv.Spec.PersistentVolumeSource)
-
-			// Cache collected labels.
-			r.cachedVolumeLabels[volCacheID] = ro
+			// Cache collected source.
+			r.cachedVolumeSource[volCacheID] = pv.Spec.PersistentVolumeSource
 		}
-		return r.cachedVolumeLabels[volCacheID], nil
+		kubelet.SetPersistentVolumeLabels(rb, r.cachedVolumeSource[volCacheID])
+		return nil
+	}
+}
+
+func (r *kubeletScraper) node() kubelet.NodeCapacity {
+	r.m.RLock()
+	defer r.m.RUnlock()
+	return *r.nodeLimits
+}
+
+func (r *kubeletScraper) start(_ context.Context, _ component.Host) error {
+	if r.nodeInformer != nil {
+		_, err := r.nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    r.handleNodeAdd,
+			UpdateFunc: r.handleNodeUpdate,
+		})
+		if err != nil {
+			r.logger.Error("error adding event handler to node informer", zap.Error(err))
+		}
+		go r.nodeInformer.Run(r.stopCh)
+	}
+	return nil
+}
+
+func (r *kubeletScraper) shutdown(_ context.Context) error {
+	r.logger.Debug("executing close")
+	if r.stopCh != nil {
+		close(r.stopCh)
+	}
+	return nil
+}
+
+func (r *kubeletScraper) handleNodeAdd(obj any) {
+	if node, ok := obj.(*v1.Node); ok {
+		r.addOrUpdateNode(node)
+	} else {
+		r.logger.Error("object received was not of type v1.Node", zap.Any("received", obj))
+	}
+}
+
+func (r *kubeletScraper) handleNodeUpdate(_, newNode any) {
+	if node, ok := newNode.(*v1.Node); ok {
+		r.addOrUpdateNode(node)
+	} else {
+		r.logger.Error("object received was not of type v1.Node", zap.Any("received", newNode))
+	}
+}
+
+func (r *kubeletScraper) addOrUpdateNode(node *v1.Node) {
+	r.m.Lock()
+	defer r.m.Unlock()
+
+	if cpu, ok := node.Status.Capacity["cpu"]; ok {
+		if q, err := resource.ParseQuantity(cpu.String()); err == nil {
+			r.nodeLimits.CPUCapacity = float64(q.MilliValue()) / 1000
+		}
+	}
+	if memory, ok := node.Status.Capacity["memory"]; ok {
+		// ie: 32564740Ki
+		if q, err := resource.ParseQuantity(memory.String()); err == nil {
+			r.nodeLimits.MemoryCapacity = float64(q.Value())
+		}
 	}
 }

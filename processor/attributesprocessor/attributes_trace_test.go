@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package attributesprocessor
 
@@ -20,64 +9,48 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
-	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/processor"
+	"go.opentelemetry.io/collector/processor/processortest"
 	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/attraction"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterconfig"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterset"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/testdata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterconfig"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/ptracetest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/processor/attributesprocessor/internal/metadata"
 )
 
 // Common structure for all the Tests
 type testCase struct {
 	name               string
 	serviceName        string
-	inputAttributes    map[string]interface{}
-	expectedAttributes map[string]interface{}
+	inputAttributes    map[string]any
+	expectedAttributes map[string]any
 }
 
 // runIndividualTestCase is the common logic of passing trace data through a configured attributes processor.
-func runIndividualTestCase(t *testing.T, tt testCase, tp component.TracesProcessor) {
+func runIndividualTestCase(t *testing.T, tt testCase, tp processor.Traces) {
 	t.Run(tt.name, func(t *testing.T) {
 		td := generateTraceData(tt.serviceName, tt.name, tt.inputAttributes)
 		assert.NoError(t, tp.ConsumeTraces(context.Background(), td))
-		// Ensure that the modified `td` has the attributes sorted:
-		sortAttributes(td)
-		require.Equal(t, generateTraceData(tt.serviceName, tt.name, tt.expectedAttributes), td)
+		require.NoError(t, ptracetest.CompareTraces(generateTraceData(tt.serviceName, tt.name, tt.expectedAttributes), td))
 	})
 }
 
-func generateTraceData(serviceName, spanName string, attrs map[string]interface{}) ptrace.Traces {
+func generateTraceData(serviceName, spanName string, attrs map[string]any) ptrace.Traces {
 	td := ptrace.NewTraces()
 	rs := td.ResourceSpans().AppendEmpty()
 	if serviceName != "" {
-		rs.Resource().Attributes().UpsertString(conventions.AttributeServiceName, serviceName)
+		rs.Resource().Attributes().PutStr(conventions.AttributeServiceName, serviceName)
 	}
 	span := rs.ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	span.SetName(spanName)
-	pcommon.NewMapFromRaw(attrs).CopyTo(span.Attributes())
-	span.Attributes().Sort()
+	//nolint:errcheck
+	span.Attributes().FromRaw(attrs)
 	return td
-}
-
-func sortAttributes(td ptrace.Traces) {
-	rss := td.ResourceSpans()
-	for i := 0; i < rss.Len(); i++ {
-		rs := rss.At(i)
-		rs.Resource().Attributes().Sort()
-		ilss := rs.ScopeSpans()
-		for j := 0; j < ilss.Len(); j++ {
-			spans := ilss.At(j).Spans()
-			for k := 0; k < spans.Len(); k++ {
-				spans.At(k).Attributes().Sort()
-			}
-		}
-	}
 }
 
 // TestSpanProcessor_Values tests all possible value types.
@@ -118,11 +91,10 @@ func TestSpanProcessor_NilEmptyData(t *testing.T) {
 		{Key: "attribute1", Action: attraction.DELETE},
 	}
 
-	tp, err := factory.CreateTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), oCfg, consumertest.NewNop())
-	require.Nil(t, err)
+	tp, err := factory.CreateTraces(context.Background(), processortest.NewNopSettings(metadata.Type), oCfg, consumertest.NewNop())
+	require.NoError(t, err)
 	require.NotNil(t, tp)
-	for i := range testCases {
-		tt := testCases[i]
+	for _, tt := range testCases {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.NoError(t, tp.ConsumeTraces(context.Background(), tt.input))
 			assert.EqualValues(t, tt.output, tt.input)
@@ -135,18 +107,18 @@ func TestAttributes_FilterSpans(t *testing.T) {
 		{
 			name:            "apply processor",
 			serviceName:     "svcB",
-			inputAttributes: map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{},
+			expectedAttributes: map[string]any{
 				"attribute1": 123,
 			},
 		},
 		{
 			name:        "apply processor with different value for exclude property",
 			serviceName: "svcB",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"NoModification": false,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"attribute1":     123,
 				"NoModification": false,
 			},
@@ -154,16 +126,16 @@ func TestAttributes_FilterSpans(t *testing.T) {
 		{
 			name:               "incorrect name for include property",
 			serviceName:        "noname",
-			inputAttributes:    map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{},
+			inputAttributes:    map[string]any{},
+			expectedAttributes: map[string]any{},
 		},
 		{
 			name:        "attribute match for exclude property",
 			serviceName: "svcB",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"NoModification": true,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"NoModification": true,
 			},
 		},
@@ -185,8 +157,8 @@ func TestAttributes_FilterSpans(t *testing.T) {
 		},
 		Config: *createConfig(filterset.Strict),
 	}
-	tp, err := factory.CreateTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
-	require.Nil(t, err)
+	tp, err := factory.CreateTraces(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
+	require.NoError(t, err)
 	require.NotNil(t, tp)
 
 	for _, tt := range testCases {
@@ -199,18 +171,18 @@ func TestAttributes_FilterSpansByNameStrict(t *testing.T) {
 		{
 			name:            "apply",
 			serviceName:     "svcB",
-			inputAttributes: map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{},
+			expectedAttributes: map[string]any{
 				"attribute1": 123,
 			},
 		},
 		{
 			name:        "apply",
 			serviceName: "svcB",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"NoModification": false,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"attribute1":     123,
 				"NoModification": false,
 			},
@@ -218,22 +190,22 @@ func TestAttributes_FilterSpansByNameStrict(t *testing.T) {
 		{
 			name:               "incorrect_span_name",
 			serviceName:        "svcB",
-			inputAttributes:    map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{},
+			inputAttributes:    map[string]any{},
+			expectedAttributes: map[string]any{},
 		},
 		{
 			name:               "dont_apply",
 			serviceName:        "svcB",
-			inputAttributes:    map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{},
+			inputAttributes:    map[string]any{},
+			expectedAttributes: map[string]any{},
 		},
 		{
 			name:        "incorrect_span_name_with_attr",
 			serviceName: "svcB",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"NoModification": true,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"NoModification": true,
 			},
 		},
@@ -253,8 +225,8 @@ func TestAttributes_FilterSpansByNameStrict(t *testing.T) {
 		SpanNames: []string{"dont_apply"},
 		Config:    *createConfig(filterset.Strict),
 	}
-	tp, err := factory.CreateTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
-	require.Nil(t, err)
+	tp, err := factory.CreateTraces(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
+	require.NoError(t, err)
 	require.NotNil(t, tp)
 
 	for _, tt := range testCases {
@@ -267,18 +239,18 @@ func TestAttributes_FilterSpansByNameRegexp(t *testing.T) {
 		{
 			name:            "apply_to_span_with_no_attrs",
 			serviceName:     "svcB",
-			inputAttributes: map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{},
+			expectedAttributes: map[string]any{
 				"attribute1": 123,
 			},
 		},
 		{
 			name:        "apply_to_span_with_attr",
 			serviceName: "svcB",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"NoModification": false,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"attribute1":     123,
 				"NoModification": false,
 			},
@@ -286,22 +258,22 @@ func TestAttributes_FilterSpansByNameRegexp(t *testing.T) {
 		{
 			name:               "incorrect_span_name",
 			serviceName:        "svcB",
-			inputAttributes:    map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{},
+			inputAttributes:    map[string]any{},
+			expectedAttributes: map[string]any{},
 		},
 		{
 			name:               "apply_dont_apply",
 			serviceName:        "svcB",
-			inputAttributes:    map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{},
+			inputAttributes:    map[string]any{},
+			expectedAttributes: map[string]any{},
 		},
 		{
 			name:        "incorrect_span_name_with_attr",
 			serviceName: "svcB",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"NoModification": true,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"NoModification": true,
 			},
 		},
@@ -321,8 +293,8 @@ func TestAttributes_FilterSpansByNameRegexp(t *testing.T) {
 		SpanNames: []string{".*dont_apply$"},
 		Config:    *createConfig(filterset.Regexp),
 	}
-	tp, err := factory.CreateTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
-	require.Nil(t, err)
+	tp, err := factory.CreateTraces(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
+	require.NoError(t, err)
 	require.NotNil(t, tp)
 
 	for _, tt := range testCases {
@@ -334,38 +306,38 @@ func TestAttributes_Hash(t *testing.T) {
 	testCases := []testCase{
 		{
 			name: "String",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"user.email": "john.doe@example.com",
 			},
-			expectedAttributes: map[string]interface{}{
-				"user.email": "73ec53c4ba1747d485ae2a0d7bfafa6cda80a5a9",
+			expectedAttributes: map[string]any{
+				"user.email": "836f82db99121b3481011f16b49dfa5fbc714a0d1b1b9f784a1ebbbf5b39577f",
 			},
 		},
 		{
 			name: "Int",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"user.id": 10,
 			},
-			expectedAttributes: map[string]interface{}{
-				"user.id": "71aa908aff1548c8c6cdecf63545261584738a25",
+			expectedAttributes: map[string]any{
+				"user.id": "a111f275cc2e7588000001d300a31e76336d15b9d314cd1a1d8f3d3556975eed",
 			},
 		},
 		{
 			name: "Double",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"user.balance": 99.1,
 			},
-			expectedAttributes: map[string]interface{}{
-				"user.balance": "76429edab4855b03073f9429fd5d10313c28655e",
+			expectedAttributes: map[string]any{
+				"user.balance": "05fabd78b01be9692863cb0985f600c99da82979af18db5c55173c2a30adb924",
 			},
 		},
 		{
 			name: "Bool",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"user.authenticated": true,
 			},
-			expectedAttributes: map[string]interface{}{
-				"user.authenticated": "bf8b4530d8d246dd74ac53a13471bba17941dff7",
+			expectedAttributes: map[string]any{
+				"user.authenticated": "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
 			},
 		},
 	}
@@ -380,8 +352,8 @@ func TestAttributes_Hash(t *testing.T) {
 		{Key: "user.authenticated", Action: attraction.HASH},
 	}
 
-	tp, err := factory.CreateTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
-	require.Nil(t, err)
+	tp, err := factory.CreateTraces(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
+	require.NoError(t, err)
 	require.NotNil(t, tp)
 
 	for _, tt := range testCases {
@@ -393,82 +365,82 @@ func TestAttributes_Convert(t *testing.T) {
 	testCases := []testCase{
 		{
 			name: "int to int",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.int": 1,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.int": 1,
 			},
 		},
 		{
 			name: "true to int",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.int": true,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.int": 1,
 			},
 		},
 		{
 			name: "false to int",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.int": false,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.int": 0,
 			},
 		},
 		{
 			name: "String to int (good)",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.int": "123",
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.int": 123,
 			},
 		},
 		{
 			name: "String to int (bad)",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.int": "int-10",
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.int": "int-10",
 			},
 		},
 		{
 			name: "String to double (int-ish)",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.double": "123",
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.double": 123.0,
 			},
 		},
 		{
 			name: "String to double (double-ish)",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.double": "123.6",
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.double": 123.6,
 			},
 		},
 		{
 			name: "String to double (bad)",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.double": "int-10",
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.double": "int-10",
 			},
 		},
 		{
 			name: "Double to string",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"to.string": 99.1,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"to.string": "99.1",
 			},
 		},
@@ -483,8 +455,8 @@ func TestAttributes_Convert(t *testing.T) {
 		{Key: "to.string", Action: attraction.CONVERT, ConvertedType: "string"},
 	}
 
-	tp, err := factory.CreateTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
-	require.Nil(t, err)
+	tp, err := factory.CreateTraces(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
+	require.NoError(t, err)
 	require.NotNil(t, tp)
 
 	for _, tt := range testCases {
@@ -496,25 +468,25 @@ func BenchmarkAttributes_FilterSpansByName(b *testing.B) {
 	testCases := []testCase{
 		{
 			name:            "apply_to_span_with_no_attrs",
-			inputAttributes: map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{},
+			expectedAttributes: map[string]any{
 				"attribute1": 123,
 			},
 		},
 		{
 			name: "apply_to_span_with_attr",
-			inputAttributes: map[string]interface{}{
+			inputAttributes: map[string]any{
 				"NoModification": false,
 			},
-			expectedAttributes: map[string]interface{}{
+			expectedAttributes: map[string]any{
 				"attribute1":     123,
 				"NoModification": false,
 			},
 		},
 		{
 			name:               "dont_apply",
-			inputAttributes:    map[string]interface{}{},
-			expectedAttributes: map[string]interface{}{},
+			inputAttributes:    map[string]any{},
+			expectedAttributes: map[string]any{},
 		},
 	}
 
@@ -527,8 +499,8 @@ func BenchmarkAttributes_FilterSpansByName(b *testing.B) {
 	oCfg.Include = &filterconfig.MatchProperties{
 		SpanNames: []string{"^apply.*"},
 	}
-	tp, err := factory.CreateTracesProcessor(context.Background(), componenttest.NewNopProcessorCreateSettings(), cfg, consumertest.NewNop())
-	require.Nil(b, err)
+	tp, err := factory.CreateTraces(context.Background(), processortest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
+	require.NoError(b, err)
 	require.NotNil(b, tp)
 
 	for _, tt := range testCases {
@@ -540,9 +512,7 @@ func BenchmarkAttributes_FilterSpansByName(b *testing.B) {
 			}
 		})
 
-		// Ensure that the modified `td` has the attributes sorted:
-		sortAttributes(td)
-		require.Equal(b, generateTraceData(tt.serviceName, tt.name, tt.expectedAttributes), td)
+		require.NoError(b, ptracetest.CompareTraces(generateTraceData(tt.serviceName, tt.name, tt.expectedAttributes), td))
 	}
 }
 

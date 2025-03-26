@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package coralogixexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/coralogixexporter"
 
@@ -22,11 +11,14 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/config/configgrpc"
+	"go.opentelemetry.io/collector/config/configopaque"
 	"go.opentelemetry.io/collector/consumer/consumererror"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/pmetric/pmetricotlp"
+	"go.uber.org/zap"
 	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -34,25 +26,24 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func newMetricsExporter(cfg config.Exporter, set component.ExporterCreateSettings) (*exporter, error) {
+func newMetricsExporter(cfg component.Config, set exporter.Settings) (*metricsExporter, error) {
 	oCfg := cfg.(*Config)
 
-	if oCfg.Metrics.Endpoint == "" || oCfg.Metrics.Endpoint == "https://" || oCfg.Metrics.Endpoint == "http://" {
-		return nil, errors.New("coralogix exporter config requires `metrics.endpoint` configuration")
+	if isEmpty(oCfg.Domain) && isEmpty(oCfg.Metrics.Endpoint) {
+		return nil, errors.New("coralogix exporter config requires `domain` or `metrics.endpoint` configuration")
 	}
 	userAgent := fmt.Sprintf("%s/%s (%s/%s)",
 		set.BuildInfo.Description, set.BuildInfo.Version, runtime.GOOS, runtime.GOARCH)
 
-	return &exporter{config: oCfg, settings: set.TelemetrySettings, userAgent: userAgent}, nil
+	return &metricsExporter{config: oCfg, settings: set.TelemetrySettings, userAgent: userAgent}, nil
 }
 
-type exporter struct {
+type metricsExporter struct {
 	// Input configuration.
 	config *Config
 
-	metricExporter pmetricotlp.Client
+	metricExporter pmetricotlp.GRPCClient
 	clientConn     *grpc.ClientConn
-	metadata       metadata.MD
 	callOptions    []grpc.CallOption
 
 	settings component.TelemetrySettings
@@ -61,23 +52,24 @@ type exporter struct {
 	userAgent string
 }
 
-func (e *exporter) start(_ context.Context, host component.Host) (err error) {
-	dialOpts, err := e.config.Metrics.ToDialOptions(host, e.settings)
-	if err != nil {
-		return err
+func (e *metricsExporter) start(ctx context.Context, host component.Host) (err error) {
+	switch {
+	case !isEmpty(e.config.Metrics.Endpoint):
+		if e.clientConn, err = e.config.Metrics.ToClientConn(ctx, host, e.settings, configgrpc.WithGrpcDialOption(grpc.WithUserAgent(e.userAgent))); err != nil {
+			return err
+		}
+	case !isEmpty(e.config.Domain):
+		if e.clientConn, err = e.config.getDomainGrpcSettings().ToClientConn(ctx, host, e.settings, configgrpc.WithGrpcDialOption(grpc.WithUserAgent(e.userAgent))); err != nil {
+			return err
+		}
 	}
-	dialOpts = append(dialOpts, grpc.WithUserAgent(e.userAgent))
 
-	if e.clientConn, err = grpc.Dial(e.config.Metrics.SanitizedEndpoint(), dialOpts...); err != nil {
-		return err
+	e.metricExporter = pmetricotlp.NewGRPCClient(e.clientConn)
+	if e.config.Metrics.Headers == nil {
+		e.config.Metrics.Headers = make(map[string]configopaque.String)
 	}
+	e.config.Metrics.Headers["Authorization"] = configopaque.String("Bearer " + string(e.config.PrivateKey))
 
-	e.metricExporter = pmetricotlp.NewClient(e.clientConn)
-	headers := e.config.Metrics.Headers
-	headers["ApplicationName"] = e.config.AppName
-	headers["ApiName"] = e.config.SubSystem
-	headers["Authorization"] = "Bearer " + e.config.PrivateKey
-	e.metadata = metadata.New(headers)
 	e.callOptions = []grpc.CallOption{
 		grpc.WaitForReady(e.config.Metrics.WaitForReady),
 	}
@@ -85,20 +77,44 @@ func (e *exporter) start(_ context.Context, host component.Host) (err error) {
 	return
 }
 
-func (e *exporter) pushMetrics(ctx context.Context, md pmetric.Metrics) error {
-	req := pmetricotlp.NewRequestFromMetrics(md)
-	_, err := e.metricExporter.Export(e.enhanceContext(ctx), req, e.callOptions...)
-	return processError(err)
+func (e *metricsExporter) pushMetrics(ctx context.Context, md pmetric.Metrics) error {
+	rss := md.ResourceMetrics()
+	for i := 0; i < rss.Len(); i++ {
+		resourceMetric := rss.At(i)
+		appName, subsystem := e.config.getMetadataFromResource(resourceMetric.Resource())
+		resourceMetric.Resource().Attributes().PutStr(cxAppNameAttrName, appName)
+		resourceMetric.Resource().Attributes().PutStr(cxSubsystemNameAttrName, subsystem)
+	}
+
+	resp, err := e.metricExporter.Export(e.enhanceContext(ctx), pmetricotlp.NewExportRequestFromMetrics(md), e.callOptions...)
+	if err != nil {
+		return processError(err)
+	}
+
+	partialSuccess := resp.PartialSuccess()
+	if !(partialSuccess.ErrorMessage() == "" && partialSuccess.RejectedDataPoints() == 0) {
+		e.settings.Logger.Error("Partial success response from Coralogix",
+			zap.String("message", partialSuccess.ErrorMessage()),
+			zap.Int64("rejected_data_points", partialSuccess.RejectedDataPoints()),
+		)
+	}
+
+	return nil
 }
-func (e *exporter) shutdown(context.Context) error {
+
+func (e *metricsExporter) shutdown(context.Context) error {
+	if e.clientConn == nil {
+		return nil
+	}
 	return e.clientConn.Close()
 }
 
-func (e *exporter) enhanceContext(ctx context.Context) context.Context {
-	if e.metadata.Len() > 0 {
-		return metadata.NewOutgoingContext(ctx, e.metadata)
+func (e *metricsExporter) enhanceContext(ctx context.Context) context.Context {
+	md := metadata.New(nil)
+	for k, v := range e.config.Metrics.Headers {
+		md.Set(k, string(v))
 	}
-	return ctx
+	return metadata.NewOutgoingContext(ctx, md)
 }
 
 // Send a trace or metrics request to the server. "perform" function is expected to make

@@ -1,42 +1,66 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package tracking // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/cumulativetodeltaprocessor/internal/tracking"
 
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"math"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.uber.org/zap"
 )
 
 // Allocate a minimum of 64 bytes to the builder initially
 const initialBytes = 64
 
+type InitialValue int
+
+const (
+	InitialValueAuto InitialValue = iota
+	InitialValueKeep
+	InitialValueDrop
+)
+
+func (i *InitialValue) String() string {
+	switch *i {
+	case InitialValueAuto:
+		return "auto"
+	case InitialValueKeep:
+		return "keep"
+	case InitialValueDrop:
+		return "drop"
+	}
+	return "unknown"
+}
+
+func (i *InitialValue) UnmarshalText(text []byte) error {
+	switch string(text) {
+	case "auto":
+		*i = InitialValueAuto
+	case "keep":
+		*i = InitialValueKeep
+	case "drop":
+		*i = InitialValueDrop
+	default:
+		return fmt.Errorf("unknown initial_value: %s", text)
+	}
+	return nil
+}
+
 var identityBufferPool = sync.Pool{
-	New: func() interface{} {
+	New: func() any {
 		return bytes.NewBuffer(make([]byte, initialBytes))
 	},
 }
 
 type State struct {
 	sync.Mutex
-	Identity  MetricIdentity
 	PrevPoint ValuePoint
 }
 
@@ -44,10 +68,16 @@ type DeltaValue struct {
 	StartTimestamp pcommon.Timestamp
 	FloatValue     float64
 	IntValue       int64
+	HistogramValue *HistogramPoint
 }
 
-func NewMetricTracker(ctx context.Context, logger *zap.Logger, maxStaleness time.Duration) *MetricTracker {
-	t := &MetricTracker{logger: logger, maxStaleness: maxStaleness}
+func NewMetricTracker(ctx context.Context, logger *zap.Logger, maxStaleness time.Duration, initalValue InitialValue) *MetricTracker {
+	t := &MetricTracker{
+		logger:       logger,
+		maxStaleness: maxStaleness,
+		initialValue: initalValue,
+		startTime:    pcommon.NewTimestampFromTime(time.Now()),
+	}
 	if maxStaleness > 0 {
 		go t.sweeper(ctx, t.removeStale)
 	}
@@ -58,6 +88,8 @@ type MetricTracker struct {
 	logger       *zap.Logger
 	maxStaleness time.Duration
 	states       sync.Map
+	initialValue InitialValue
+	startTime    pcommon.Timestamp
 }
 
 func (t *MetricTracker) Convert(in MetricPoint) (out DeltaValue, valid bool) {
@@ -80,26 +112,33 @@ func (t *MetricTracker) Convert(in MetricPoint) (out DeltaValue, valid bool) {
 	hashableID := b.String()
 	identityBufferPool.Put(b)
 
-	var s interface{}
-	var ok bool
-	if s, ok = t.states.Load(hashableID); !ok {
-		s, ok = t.states.LoadOrStore(hashableID, &State{
-			Identity:  metricID,
-			PrevPoint: metricPoint,
-		})
-	}
-
+	s, ok := t.states.LoadOrStore(hashableID, &State{
+		PrevPoint: metricPoint,
+	})
 	if !ok {
-		if metricID.MetricIsMonotonic {
-			out = DeltaValue{
-				StartTimestamp: metricPoint.ObservedTimestamp,
-				FloatValue:     metricPoint.FloatValue,
-				IntValue:       metricPoint.IntValue,
+		switch metricID.MetricType {
+		case pmetric.MetricTypeHistogram:
+			val := metricPoint.HistogramValue.Clone()
+			out.HistogramValue = &val
+		case pmetric.MetricTypeSum:
+			out.IntValue = metricPoint.IntValue
+			out.FloatValue = metricPoint.FloatValue
+		case pmetric.MetricTypeEmpty, pmetric.MetricTypeGauge, pmetric.MetricTypeExponentialHistogram, pmetric.MetricTypeSummary:
+		}
+		switch t.initialValue {
+		case InitialValueAuto:
+			if metricID.StartTimestamp < t.startTime || metricPoint.ObservedTimestamp == metricID.StartTimestamp {
+				return
 			}
+			out.StartTimestamp = metricID.StartTimestamp
 			valid = true
+		case InitialValueKeep:
+			valid = true
+		case InitialValueDrop:
 		}
 		return
 	}
+
 	valid = true
 
 	state := s.(*State)
@@ -108,28 +147,55 @@ func (t *MetricTracker) Convert(in MetricPoint) (out DeltaValue, valid bool) {
 
 	out.StartTimestamp = state.PrevPoint.ObservedTimestamp
 
-	if metricID.IsFloatVal() {
-		value := metricPoint.FloatValue
-		prevValue := state.PrevPoint.FloatValue
-		delta := value - prevValue
-
-		// Detect reset on a monotonic counter
-		if metricID.MetricIsMonotonic && value < prevValue {
-			delta = value
+	switch metricID.MetricType {
+	case pmetric.MetricTypeHistogram:
+		value := metricPoint.HistogramValue
+		prevValue := state.PrevPoint.HistogramValue
+		if math.IsNaN(value.Sum) {
+			value.Sum = prevValue.Sum
 		}
 
-		out.FloatValue = delta
-	} else {
-		value := metricPoint.IntValue
-		prevValue := state.PrevPoint.IntValue
-		delta := value - prevValue
-
-		// Detect reset on a monotonic counter
-		if metricID.MetricIsMonotonic && value < prevValue {
-			delta = value
+		if len(value.Buckets) != len(prevValue.Buckets) {
+			valid = false
 		}
 
-		out.IntValue = delta
+		delta := value.Clone()
+
+		// Calculate deltas unless histogram count was reset
+		if valid && delta.Count >= prevValue.Count {
+			delta.Count -= prevValue.Count
+			delta.Sum -= prevValue.Sum
+			for index, prevBucket := range prevValue.Buckets {
+				delta.Buckets[index] -= prevBucket
+			}
+		}
+
+		out.HistogramValue = &delta
+	case pmetric.MetricTypeSum:
+		if metricID.IsFloatVal() {
+			value := metricPoint.FloatValue
+			prevValue := state.PrevPoint.FloatValue
+			delta := value - prevValue
+
+			// Detect reset (non-monotonic sums are not converted)
+			if value < prevValue {
+				valid = false
+			}
+
+			out.FloatValue = delta
+		} else {
+			value := metricPoint.IntValue
+			prevValue := state.PrevPoint.IntValue
+			delta := value - prevValue
+
+			// Detect reset (non-monotonic sums are not converted)
+			if value < prevValue {
+				valid = false
+			}
+
+			out.IntValue = delta
+		}
+	case pmetric.MetricTypeEmpty, pmetric.MetricTypeGauge, pmetric.MetricTypeExponentialHistogram, pmetric.MetricTypeSummary:
 	}
 
 	state.PrevPoint = metricPoint
@@ -137,7 +203,7 @@ func (t *MetricTracker) Convert(in MetricPoint) (out DeltaValue, valid bool) {
 }
 
 func (t *MetricTracker) removeStale(staleBefore pcommon.Timestamp) {
-	t.states.Range(func(key, value interface{}) bool {
+	t.states.Range(func(key, value any) bool {
 		s := value.(*State)
 
 		// There is a known race condition here.

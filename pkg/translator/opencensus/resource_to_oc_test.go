@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package opencensus
 
@@ -83,12 +72,12 @@ func TestResourceToOC(t *testing.T) {
 
 func TestContainerResourceToOC(t *testing.T) {
 	resource := pcommon.NewResource()
-	resource.Attributes().UpsertString(conventions.AttributeK8SClusterName, "cluster1")
-	resource.Attributes().UpsertString(conventions.AttributeK8SPodName, "pod1")
-	resource.Attributes().UpsertString(conventions.AttributeK8SNamespaceName, "namespace1")
-	resource.Attributes().UpsertString(conventions.AttributeContainerName, "container-name1")
-	resource.Attributes().UpsertString(conventions.AttributeCloudAccountID, "proj1")
-	resource.Attributes().UpsertString(conventions.AttributeCloudAvailabilityZone, "zone1")
+	resource.Attributes().PutStr(conventions.AttributeK8SClusterName, "cluster1")
+	resource.Attributes().PutStr(conventions.AttributeK8SPodName, "pod1")
+	resource.Attributes().PutStr(conventions.AttributeK8SNamespaceName, "namespace1")
+	resource.Attributes().PutStr(conventions.AttributeContainerName, "container-name1")
+	resource.Attributes().PutStr(conventions.AttributeCloudAccountID, "proj1")
+	resource.Attributes().PutStr(conventions.AttributeCloudAvailabilityZone, "zone1")
 
 	want := &ocresource.Resource{
 		Type: resourcekeys.ContainerType, // Inferred type
@@ -108,7 +97,7 @@ func TestContainerResourceToOC(t *testing.T) {
 	}
 
 	// Also test that the explicit resource type is preserved if present
-	resource.Attributes().UpsertString(occonventions.AttributeResourceType, "other-type")
+	resource.Attributes().PutStr(occonventions.AttributeResourceType, "other-type")
 	want.Type = "other-type"
 
 	_, ocResource = internalResourceToOC(resource)
@@ -210,24 +199,22 @@ func TestResourceToOCAndBack(t *testing.T) {
 			// Remove opencensus resource type from actual. This will be added during translation.
 			actual.Attributes().Remove(occonventions.AttributeResourceType)
 			assert.Equal(t, expected.Attributes().Len(), actual.Attributes().Len())
-			expected.Attributes().Range(func(k string, v pcommon.Value) bool {
+			for k, v := range expected.Attributes().All() {
 				a, ok := actual.Attributes().Get(k)
 				assert.True(t, ok)
 				switch v.Type() {
 				case pcommon.ValueTypeInt:
 					// conventions.AttributeProcessID is special because we preserve the type for this.
 					if k == conventions.AttributeProcessPID {
-						assert.Equal(t, v.IntVal(), a.IntVal())
+						assert.Equal(t, v.Int(), a.Int())
 					} else {
-						assert.Equal(t, strconv.FormatInt(v.IntVal(), 10), a.StringVal())
+						assert.Equal(t, strconv.FormatInt(v.Int(), 10), a.Str())
 					}
 				case pcommon.ValueTypeMap, pcommon.ValueTypeSlice:
-					assert.Equal(t, a, a)
 				default:
 					assert.Equal(t, v, a)
 				}
-				return true
-			})
+			}
 		})
 	}
 }

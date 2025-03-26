@@ -1,79 +1,101 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package translator
 
 import (
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pcommon"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	conventionsv112 "go.opentelemetry.io/collector/semconv/v1.12.0"
 )
 
 func TestClientSpanWithStatementAttribute(t *testing.T) {
 	attributes := make(map[string]pcommon.Value)
-	attributes[conventions.AttributeDBSystem] = pcommon.NewValueString("mysql")
-	attributes[conventions.AttributeDBName] = pcommon.NewValueString("customers")
-	attributes[conventions.AttributeDBStatement] = pcommon.NewValueString("SELECT * FROM user WHERE user_id = ?")
-	attributes[conventions.AttributeDBUser] = pcommon.NewValueString("readonly_user")
-	attributes[conventions.AttributeDBConnectionString] = pcommon.NewValueString("mysql://db.example.com:3306")
-	attributes[conventions.AttributeNetPeerName] = pcommon.NewValueString("db.example.com")
-	attributes[conventions.AttributeNetPeerPort] = pcommon.NewValueString("3306")
+	attributes[conventionsv112.AttributeDBSystem] = pcommon.NewValueStr("mysql")
+	attributes[conventionsv112.AttributeDBName] = pcommon.NewValueStr("customers")
+	attributes[conventionsv112.AttributeDBStatement] = pcommon.NewValueStr("SELECT * FROM user WHERE user_id = ?")
+	attributes[conventionsv112.AttributeDBUser] = pcommon.NewValueStr("readonly_user")
+	attributes[conventionsv112.AttributeDBConnectionString] = pcommon.NewValueStr("mysql://db.example.com:3306")
+	attributes[conventionsv112.AttributeNetPeerName] = pcommon.NewValueStr("db.example.com")
+	attributes[conventionsv112.AttributeNetPeerPort] = pcommon.NewValueStr("3306")
+	span := constructSQLSpan(attributes)
 
-	filtered, sqlData := makeSQL(attributes)
+	filtered, sqlData := makeSQL(span, attributes)
 
 	assert.NotNil(t, filtered)
 	assert.NotNil(t, sqlData)
 
 	w := testWriters.borrow()
-	if err := w.Encode(sqlData); err != nil {
-		assert.Fail(t, "invalid json")
-	}
+	require.NoError(t, w.Encode(sqlData))
 	jsonStr := w.String()
 	testWriters.release(w)
-	assert.True(t, strings.Contains(jsonStr, "mysql://db.example.com:3306/customers"))
+	assert.Contains(t, jsonStr, "mysql://db.example.com:3306/customers")
 }
 
 func TestClientSpanWithNonSQLDatabase(t *testing.T) {
 	attributes := make(map[string]pcommon.Value)
-	attributes[conventions.AttributeDBSystem] = pcommon.NewValueString("redis")
-	attributes[conventions.AttributeDBName] = pcommon.NewValueString("0")
-	attributes[conventions.AttributeDBStatement] = pcommon.NewValueString("SET key value")
-	attributes[conventions.AttributeDBUser] = pcommon.NewValueString("readonly_user")
-	attributes[conventions.AttributeDBConnectionString] = pcommon.NewValueString("redis://db.example.com:3306")
-	attributes[conventions.AttributeNetPeerName] = pcommon.NewValueString("db.example.com")
-	attributes[conventions.AttributeNetPeerPort] = pcommon.NewValueString("3306")
+	attributes[conventionsv112.AttributeDBSystem] = pcommon.NewValueStr("redis")
+	attributes[conventionsv112.AttributeDBName] = pcommon.NewValueStr("0")
+	attributes[conventionsv112.AttributeDBStatement] = pcommon.NewValueStr("SET key value")
+	attributes[conventionsv112.AttributeDBUser] = pcommon.NewValueStr("readonly_user")
+	attributes[conventionsv112.AttributeDBConnectionString] = pcommon.NewValueStr("redis://db.example.com:3306")
+	attributes[conventionsv112.AttributeNetPeerName] = pcommon.NewValueStr("db.example.com")
+	attributes[conventionsv112.AttributeNetPeerPort] = pcommon.NewValueStr("3306")
+	span := constructSQLSpan(attributes)
 
-	filtered, sqlData := makeSQL(attributes)
+	filtered, sqlData := makeSQL(span, attributes)
 	assert.Nil(t, sqlData)
 	assert.NotNil(t, filtered)
 }
 
 func TestClientSpanWithoutDBurlAttribute(t *testing.T) {
 	attributes := make(map[string]pcommon.Value)
-	attributes[conventions.AttributeDBSystem] = pcommon.NewValueString("postgresql")
-	attributes[conventions.AttributeDBName] = pcommon.NewValueString("customers")
-	attributes[conventions.AttributeDBStatement] = pcommon.NewValueString("SELECT * FROM user WHERE user_id = ?")
-	attributes[conventions.AttributeDBUser] = pcommon.NewValueString("readonly_user")
-	attributes[conventions.AttributeDBConnectionString] = pcommon.NewValueString("")
-	attributes[conventions.AttributeNetPeerName] = pcommon.NewValueString("db.example.com")
-	attributes[conventions.AttributeNetPeerPort] = pcommon.NewValueString("3306")
-	filtered, sqlData := makeSQL(attributes)
+	attributes[conventionsv112.AttributeDBSystem] = pcommon.NewValueStr("postgresql")
+	attributes[conventionsv112.AttributeDBName] = pcommon.NewValueStr("customers")
+	attributes[conventionsv112.AttributeDBStatement] = pcommon.NewValueStr("SELECT * FROM user WHERE user_id = ?")
+	attributes[conventionsv112.AttributeDBUser] = pcommon.NewValueStr("readonly_user")
+	attributes[conventionsv112.AttributeDBConnectionString] = pcommon.NewValueStr("")
+	attributes[conventionsv112.AttributeNetPeerName] = pcommon.NewValueStr("db.example.com")
+	attributes[conventionsv112.AttributeNetPeerPort] = pcommon.NewValueStr("3306")
+	span := constructSQLSpan(attributes)
+
+	filtered, sqlData := makeSQL(span, attributes)
 	assert.NotNil(t, filtered)
 	assert.NotNil(t, sqlData)
 
-	assert.Equal(t, "localhost/customers", *sqlData.URL)
+	assert.Equal(t, "users.findUnique", *sqlData.URL)
+}
+
+func constructSQLSpan(attributes map[string]pcommon.Value) ptrace.Span {
+	endTime := time.Now().Round(time.Second)
+	startTime := endTime.Add(-90 * time.Second)
+
+	// constructSpanAttributes() in segment_test accepts a map of interfaces...
+	interfaceAttributes := make(map[string]any)
+	for k, v := range attributes {
+		interfaceAttributes[k] = v
+	}
+	spanAttributes := constructSpanAttributes(interfaceAttributes)
+
+	span := ptrace.NewSpan()
+	span.SetTraceID(newTraceID())
+	span.SetSpanID(newSegmentID())
+	span.SetParentSpanID(newSegmentID())
+	span.SetName("users.findUnique")
+	span.SetKind(ptrace.SpanKindClient)
+	span.SetStartTimestamp(pcommon.NewTimestampFromTime(startTime))
+	span.SetEndTimestamp(pcommon.NewTimestampFromTime(endTime))
+
+	status := ptrace.NewStatus()
+	status.SetCode(0)
+	status.SetMessage("OK")
+	status.CopyTo(span.Status())
+
+	spanAttributes.CopyTo(span.Attributes())
+	return span
 }

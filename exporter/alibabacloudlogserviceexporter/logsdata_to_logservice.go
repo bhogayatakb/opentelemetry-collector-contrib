@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package alibabacloudlogserviceexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/alibabacloudlogserviceexporter"
 
@@ -24,6 +13,8 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/traceutil"
 )
 
 const (
@@ -92,14 +83,13 @@ func resourceToLogContents(resource pcommon.Resource) []*sls.LogContent {
 		}
 	}
 
-	fields := map[string]interface{}{}
-	attrs.Range(func(k string, v pcommon.Value) bool {
+	fields := map[string]any{}
+	for k, v := range attrs.All() {
 		if k == conventions.AttributeServiceName || k == conventions.AttributeHostName {
-			return true
+			continue
 		}
 		fields[k] = v.AsString()
-		return true
-	})
+	}
 	attributeBuffer, _ := json.Marshal(fields)
 	logContents[2] = &sls.LogContent{
 		Key:   proto.String(slsLogResource),
@@ -124,7 +114,8 @@ func instrumentationScopeToLogContents(instrumentationScope pcommon.Instrumentat
 
 func mapLogRecordToLogService(lr plog.LogRecord,
 	resourceContents,
-	instrumentationLibraryContents []*sls.LogContent) *sls.Log {
+	instrumentationLibraryContents []*sls.LogContent,
+) *sls.Log {
 	if lr.Body().Type() == pcommon.ValueTypeEmpty {
 		return nil
 	}
@@ -153,11 +144,10 @@ func mapLogRecordToLogService(lr plog.LogRecord,
 		Value: proto.String(lr.SeverityText()),
 	})
 
-	fields := map[string]interface{}{}
-	lr.Attributes().Range(func(k string, v pcommon.Value) bool {
+	fields := map[string]any{}
+	for k, v := range lr.Attributes().All() {
 		fields[k] = v.AsString()
-		return true
-	})
+	}
 	attributeBuffer, _ := json.Marshal(fields)
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(slsLogAttribute),
@@ -171,17 +161,17 @@ func mapLogRecordToLogService(lr plog.LogRecord,
 
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(slsLogFlags),
-		Value: proto.String(strconv.FormatUint(uint64(lr.FlagsStruct()), 16)),
+		Value: proto.String(strconv.FormatUint(uint64(lr.Flags()), 16)),
 	})
 
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(traceIDField),
-		Value: proto.String(lr.TraceID().HexString()),
+		Value: proto.String(traceutil.TraceIDToHexOrEmptyString(lr.TraceID())),
 	})
 
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(spanIDField),
-		Value: proto.String(lr.SpanID().HexString()),
+		Value: proto.String(traceutil.SpanIDToHexOrEmptyString(lr.SpanID())),
 	})
 
 	for i := range contentsBuffer {

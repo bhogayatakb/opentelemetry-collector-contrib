@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 package csv
 
 import (
@@ -19,7 +8,7 @@ import (
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper/operatortest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/operatortest"
 )
 
 func TestConfig(t *testing.T) {
@@ -67,6 +56,15 @@ func TestConfig(t *testing.T) {
 				}(),
 			},
 			{
+				Name: "header_delimiter",
+				Expect: func() *Config {
+					p := NewConfig()
+					p.Header = "id\tseverity\tmessage"
+					p.HeaderDelimiter = "\t"
+					return p
+				}(),
+			},
+			{
 				Name: "header_attribute",
 				Expect: func() *Config {
 					p := NewConfig()
@@ -87,6 +85,30 @@ func TestConfig(t *testing.T) {
 					p.TimeParser.ParseFrom = &parseFrom
 					p.TimeParser.LayoutType = "strptime"
 					p.TimeParser.Layout = "%Y-%m-%d"
+					return p
+				}(),
+			},
+			{
+				Name: "parse_to_attributes",
+				Expect: func() *Config {
+					p := NewConfig()
+					p.ParseTo = entry.RootableField{Field: entry.NewAttributeField()}
+					return p
+				}(),
+			},
+			{
+				Name: "parse_to_body",
+				Expect: func() *Config {
+					p := NewConfig()
+					p.ParseTo = entry.RootableField{Field: entry.NewBodyField()}
+					return p
+				}(),
+			},
+			{
+				Name: "parse_to_resource",
+				Expect: func() *Config {
+					p := NewConfig()
+					p.ParseTo = entry.RootableField{Field: entry.NewResourceField()}
 					return p
 				}(),
 			},

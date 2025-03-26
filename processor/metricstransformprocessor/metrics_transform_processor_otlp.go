@@ -1,16 +1,5 @@
-// Copyright 2020 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metricstransformprocessor // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/metricstransformprocessor"
 
@@ -21,22 +10,22 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/aggregateutil"
 )
 
 // extractAndRemoveMatchedMetrics extracts matched metrics from ms metric slice and returns a new slice.
 // Extracted metrics can have reduced number of data point if not all of them match the filter.
 // All matched metrics, including metrics with only a subset of matched data points,
 // are removed from the original ms metric slice.
-func extractAndRemoveMatchedMetrics(f internalFilter, ms pmetric.MetricSlice) pmetric.MetricSlice {
-	extractedMetrics := pmetric.NewMetricSlice()
+func extractAndRemoveMatchedMetrics(dest pmetric.MetricSlice, f internalFilter, ms pmetric.MetricSlice) {
 	ms.RemoveIf(func(metric pmetric.Metric) bool {
 		if extractedMetric := f.extractMatchedMetric(metric); extractedMetric != (pmetric.Metric{}) {
-			extractedMetric.MoveTo(extractedMetrics.AppendEmpty())
+			extractedMetric.MoveTo(dest.AppendEmpty())
 			return true
 		}
 		return false
 	})
-	return extractedMetrics
 }
 
 // matchMetrics returns a slice of metrics matching the filter f. Original metrics slice is not affected.
@@ -102,9 +91,9 @@ func (f internalFilterRegexp) submatches(metric pmetric.Metric) []int {
 	return f.include.FindStringSubmatchIndex(metric.Name())
 }
 
-func (f internalFilterRegexp) expand(metricTempate, metricName string) string {
+func (f internalFilterRegexp) expand(metricTemplate, metricName string) string {
 	if submatches := f.include.FindStringSubmatchIndex(metricName); submatches != nil {
-		return string(f.include.ExpandString([]byte{}, metricTempate, metricName, submatches))
+		return string(f.include.ExpandString([]byte{}, metricTemplate, metricName, submatches))
 	}
 	return ""
 }
@@ -171,21 +160,21 @@ func extractMetricWithMatchingAttrs(metric pmetric.Metric, f internalFilter) pme
 	}
 
 	newMetric := pmetric.NewMetric()
-	newMetric.SetDataType(metric.DataType())
 	newMetric.SetName(metric.Name())
 	newMetric.SetDescription(metric.Description())
 	newMetric.SetUnit(metric.Unit())
 
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
-		newMetric.Gauge().DataPoints().EnsureCapacity(matchedDpsCount)
+	switch metric.Type() {
+	//exhaustive:enforce
+	case pmetric.MetricTypeGauge:
+		newMetric.SetEmptyGauge().DataPoints().EnsureCapacity(matchedDpsCount)
 		for i := 0; i < metric.Gauge().DataPoints().Len(); i++ {
 			if dpsMatches[i] {
 				metric.Gauge().DataPoints().At(i).CopyTo(newMetric.Gauge().DataPoints().AppendEmpty())
 			}
 		}
-	case pmetric.MetricDataTypeSum:
-		newMetric.Sum().DataPoints().EnsureCapacity(matchedDpsCount)
+	case pmetric.MetricTypeSum:
+		newMetric.SetEmptySum().DataPoints().EnsureCapacity(matchedDpsCount)
 		for i := 0; i < metric.Sum().DataPoints().Len(); i++ {
 			if dpsMatches[i] {
 				metric.Sum().DataPoints().At(i).CopyTo(newMetric.Sum().DataPoints().AppendEmpty())
@@ -193,24 +182,24 @@ func extractMetricWithMatchingAttrs(metric pmetric.Metric, f internalFilter) pme
 		}
 		newMetric.Sum().SetAggregationTemporality(metric.Sum().AggregationTemporality())
 		newMetric.Sum().SetIsMonotonic(metric.Sum().IsMonotonic())
-	case pmetric.MetricDataTypeHistogram:
-		newMetric.Histogram().DataPoints().EnsureCapacity(matchedDpsCount)
+	case pmetric.MetricTypeHistogram:
+		newMetric.SetEmptyHistogram().DataPoints().EnsureCapacity(matchedDpsCount)
 		for i := 0; i < metric.Histogram().DataPoints().Len(); i++ {
 			if dpsMatches[i] {
 				metric.Histogram().DataPoints().At(i).CopyTo(newMetric.Histogram().DataPoints().AppendEmpty())
 			}
 		}
 		newMetric.Histogram().SetAggregationTemporality(metric.Histogram().AggregationTemporality())
-	case pmetric.MetricDataTypeExponentialHistogram:
-		newMetric.ExponentialHistogram().DataPoints().EnsureCapacity(matchedDpsCount)
+	case pmetric.MetricTypeExponentialHistogram:
+		newMetric.SetEmptyExponentialHistogram().DataPoints().EnsureCapacity(matchedDpsCount)
 		for i := 0; i < metric.ExponentialHistogram().DataPoints().Len(); i++ {
 			if dpsMatches[i] {
 				metric.ExponentialHistogram().DataPoints().At(i).CopyTo(newMetric.ExponentialHistogram().DataPoints().AppendEmpty())
 			}
 		}
 		newMetric.ExponentialHistogram().SetAggregationTemporality(metric.ExponentialHistogram().AggregationTemporality())
-	case pmetric.MetricDataTypeSummary:
-		newMetric.Summary().DataPoints().EnsureCapacity(matchedDpsCount)
+	case pmetric.MetricTypeSummary:
+		newMetric.SetEmptySummary().DataPoints().EnsureCapacity(matchedDpsCount)
 		for i := 0; i < metric.Summary().DataPoints().Len(); i++ {
 			if dpsMatches[i] {
 				metric.Summary().DataPoints().At(i).CopyTo(newMetric.Summary().DataPoints().AppendEmpty())
@@ -225,7 +214,7 @@ func matchAttrs(attrMatchers map[string]StringMatcher, attrs pcommon.Map) bool {
 	for k, v := range attrMatchers {
 		attrVal, ok := attrs.Get(k)
 		// attribute values doesn't match, drop datapoint
-		if ok && !v.MatchString(attrVal.StringVal()) {
+		if ok && !v.MatchString(attrVal.Str()) {
 			return false
 		}
 
@@ -249,9 +238,9 @@ func (mtp *metricsTransformProcessor) processMetrics(_ context.Context, md pmetr
 			for _, transform := range mtp.transforms {
 				switch transform.Action {
 				case Group:
-					extractedMetrics := extractAndRemoveMatchedMetrics(transform.MetricIncludeFilter, metrics)
-					groupMatchedMetrics(rm.Resource(), sm.Scope(), extractedMetrics,
-						transform).CopyTo(groupedRMs.AppendEmpty())
+					groupedRM := groupedRMs.AppendEmpty()
+					initResourceMetrics(groupedRM, rm.Resource(), sm.Scope(), transform)
+					extractAndRemoveMatchedMetrics(groupedRM.ScopeMetrics().At(0).Metrics(), transform.MetricIncludeFilter, metrics)
 				case Combine:
 					matchedMetrics := matchMetrics(transform.MetricIncludeFilter, metrics)
 					if len(matchedMetrics) == 0 {
@@ -264,15 +253,16 @@ func (mtp *metricsTransformProcessor) processMetrics(_ context.Context, md pmetr
 						continue
 					}
 
-					extractedMetrics := extractAndRemoveMatchedMetrics(transform.MetricIncludeFilter, metrics)
+					extractedMetrics := pmetric.NewMetricSlice()
+					extractAndRemoveMatchedMetrics(extractedMetrics, transform.MetricIncludeFilter, metrics)
 					combinedMetric := combine(transform, extractedMetrics)
 					if transformMetric(combinedMetric, transform) {
 						combinedMetric.MoveTo(metrics.AppendEmpty())
 					}
 				case Insert:
-					newMetrics := pmetric.NewMetricSlice()
-					newMetrics.EnsureCapacity(metrics.Len())
-					for i := 0; i < metrics.Len(); i++ {
+					// Save len, so we don't iterate over the newly generated metrics that are appended at the end.
+					mLen := metrics.Len()
+					for i := 0; i < mLen; i++ {
 						metric := metrics.At(i)
 						newMetric := transform.MetricIncludeFilter.extractMatchedMetric(metric)
 						if newMetric == (pmetric.Metric{}) {
@@ -283,10 +273,9 @@ func (mtp *metricsTransformProcessor) processMetrics(_ context.Context, md pmetr
 							metric.CopyTo(newMetric)
 						}
 						if transformMetric(newMetric, transform) {
-							newMetric.MoveTo(newMetrics.AppendEmpty())
+							newMetric.MoveTo(metrics.AppendEmpty())
 						}
 					}
-					newMetrics.MoveAndAppendTo(metrics)
 				case Update:
 					metrics.RemoveIf(func(metric pmetric.Metric) bool {
 						if !transform.MetricIncludeFilter.matchMetric(metric) {
@@ -310,20 +299,15 @@ func (mtp *metricsTransformProcessor) processMetrics(_ context.Context, md pmetr
 	return md, nil
 }
 
-// groupMatchedMetrics groups matched metrics by moving them from matchedMetrics into a new pmetric.ResourceMetrics.
-func groupMatchedMetrics(resource pcommon.Resource, scope pcommon.InstrumentationScope, metrics pmetric.MetricSlice,
-	transform internalTransform) pmetric.ResourceMetrics {
-	rm := pmetric.NewResourceMetrics()
-	resource.CopyTo(rm.Resource())
+func initResourceMetrics(dest pmetric.ResourceMetrics, resource pcommon.Resource, scope pcommon.InstrumentationScope, transform internalTransform) {
+	resource.CopyTo(dest.Resource())
 
 	for k, v := range transform.GroupResourceLabels {
-		rm.Resource().Attributes().UpsertString(k, v)
+		dest.Resource().Attributes().PutStr(k, v)
 	}
 
-	sm := rm.ScopeMetrics().AppendEmpty()
+	sm := dest.ScopeMetrics().AppendEmpty()
 	scope.CopyTo(sm.Scope())
-	metrics.MoveAndAppendTo(sm.Metrics())
-	return rm
 }
 
 // canBeCombined returns true if all the provided metrics share the same type, unit, and labels
@@ -334,7 +318,7 @@ func canBeCombined(metrics []pmetric.Metric) error {
 
 	var firstMetric pmetric.Metric
 	for _, metric := range metrics {
-		if metric.DataType() == pmetric.MetricDataTypeSummary {
+		if metric.Type() == pmetric.MetricTypeSummary {
 			return fmt.Errorf("Summary metrics cannot be combined: %v ", metric.Name())
 		}
 
@@ -343,9 +327,9 @@ func canBeCombined(metrics []pmetric.Metric) error {
 			continue
 		}
 
-		if firstMetric.DataType() != metric.DataType() {
+		if firstMetric.Type() != metric.Type() {
 			return fmt.Errorf("metrics cannot be combined as they are of different types: %v (%v) and %v (%v)",
-				firstMetric.Name(), firstMetric.DataType(), metric.Name(), metric.DataType())
+				firstMetric.Name(), firstMetric.Type(), metric.Name(), metric.Type())
 		}
 		if firstMetric.Unit() != metric.Unit() {
 			return fmt.Errorf("metrics cannot be combined as they have different units: %v (%v) and %v (%v)",
@@ -366,8 +350,8 @@ func canBeCombined(metrics []pmetric.Metric) error {
 			}
 		}
 
-		switch firstMetric.DataType() {
-		case pmetric.MetricDataTypeSum:
+		switch firstMetric.Type() {
+		case pmetric.MetricTypeSum:
 			if firstMetric.Sum().AggregationTemporality() != metric.Sum().AggregationTemporality() {
 				return fmt.Errorf(
 					"metrics cannot be combined as they have different aggregation temporalities: %v (%v) and %v (%v)",
@@ -378,21 +362,19 @@ func canBeCombined(metrics []pmetric.Metric) error {
 					"metrics cannot be combined as they have different monotonicity: %v (%v) and %v (%v)",
 					firstMetric.Name(), firstMetric.Sum().IsMonotonic(), metric.Name(), metric.Sum().IsMonotonic())
 			}
-		case pmetric.MetricDataTypeHistogram:
+		case pmetric.MetricTypeHistogram:
 			if firstMetric.Histogram().AggregationTemporality() != metric.Histogram().AggregationTemporality() {
 				return fmt.Errorf(
 					"metrics cannot be combined as they have different aggregation temporalities: %v (%v) and %v (%v)",
 					firstMetric.Name(), firstMetric.Histogram().AggregationTemporality(), metric.Name(),
 					metric.Histogram().AggregationTemporality())
-
 			}
-		case pmetric.MetricDataTypeExponentialHistogram:
+		case pmetric.MetricTypeExponentialHistogram:
 			if firstMetric.ExponentialHistogram().AggregationTemporality() != metric.ExponentialHistogram().AggregationTemporality() {
 				return fmt.Errorf(
 					"metrics cannot be combined as they have different aggregation temporalities: %v (%v) and %v (%v)",
 					firstMetric.Name(), firstMetric.ExponentialHistogram().AggregationTemporality(), metric.Name(),
 					metric.ExponentialHistogram().AggregationTemporality())
-
 			}
 		}
 	}
@@ -403,10 +385,9 @@ func canBeCombined(metrics []pmetric.Metric) error {
 func metricAttributeKeys(metric pmetric.Metric) map[string]struct{} {
 	attrKeys := map[string]struct{}{}
 	rangeDataPointAttributes(metric, func(attrs pcommon.Map) bool {
-		attrs.Range(func(k string, _ pcommon.Value) bool {
+		for k := range attrs.All() {
 			attrKeys[k] = struct{}{}
-			return true
-		})
+		}
 		return true
 	})
 	return attrKeys
@@ -445,7 +426,7 @@ func combine(transform internalTransform, metrics pmetric.MetricSlice) pmetric.M
 					submatch := metric.Name()[submatches[2*i]:submatches[2*i+1]]
 					submatch = replaceCaseOfSubmatch(transform.SubmatchCase, submatch)
 					if submatch != "" {
-						m.UpsertString(reAttrKeys[i], submatch)
+						m.PutStr(reAttrKeys[i], submatch)
 					}
 				}
 				return true
@@ -458,54 +439,71 @@ func combine(transform internalTransform, metrics pmetric.MetricSlice) pmetric.M
 	return combinedMetric
 }
 
+// groupMetrics groups all the provided timeseries that will be aggregated together based on all the label values.
+// Returns a map of grouped timeseries and the corresponding selected labels
+// canBeCombined must be called before.
+func groupMetrics(metrics pmetric.MetricSlice, aggType aggregateutil.AggregationType, to pmetric.Metric) {
+	ag := aggregateutil.AggGroups{}
+	for i := 0; i < metrics.Len(); i++ {
+		aggregateutil.GroupDataPoints(metrics.At(i), &ag)
+	}
+	aggregateutil.MergeDataPoints(to, aggType, ag)
+}
+
 func copyMetricDetails(from, to pmetric.Metric) {
 	to.SetName(from.Name())
-	to.SetDataType(from.DataType())
 	to.SetUnit(from.Unit())
-	switch from.DataType() {
-	case pmetric.MetricDataTypeSum:
-		to.Sum().SetAggregationTemporality(from.Sum().AggregationTemporality())
+	to.SetDescription(from.Description())
+	//exhaustive:enforce
+	switch from.Type() {
+	case pmetric.MetricTypeGauge:
+		to.SetEmptyGauge()
+	case pmetric.MetricTypeSum:
+		to.SetEmptySum().SetAggregationTemporality(from.Sum().AggregationTemporality())
 		to.Sum().SetIsMonotonic(from.Sum().IsMonotonic())
-	case pmetric.MetricDataTypeHistogram:
-		to.Histogram().SetAggregationTemporality(from.Histogram().AggregationTemporality())
-	case pmetric.MetricDataTypeExponentialHistogram:
-		to.ExponentialHistogram().SetAggregationTemporality(from.Histogram().AggregationTemporality())
+	case pmetric.MetricTypeHistogram:
+		to.SetEmptyHistogram().SetAggregationTemporality(from.Histogram().AggregationTemporality())
+	case pmetric.MetricTypeExponentialHistogram:
+		to.SetEmptyExponentialHistogram().SetAggregationTemporality(from.ExponentialHistogram().AggregationTemporality())
+	case pmetric.MetricTypeSummary:
+		to.SetEmptySummary()
 	}
 }
 
 // rangeDataPointAttributes calls f sequentially on attributes of every metric data point.
 // The iteration terminates if f returns false.
 func rangeDataPointAttributes(metric pmetric.Metric, f func(pcommon.Map) bool) {
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	//exhaustive:enforce
+	switch metric.Type() {
+	case pmetric.MetricTypeGauge:
 		for i := 0; i < metric.Gauge().DataPoints().Len(); i++ {
 			dp := metric.Gauge().DataPoints().At(i)
 			if !f(dp.Attributes()) {
 				return
 			}
 		}
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		for i := 0; i < metric.Sum().DataPoints().Len(); i++ {
 			dp := metric.Sum().DataPoints().At(i)
 			if !f(dp.Attributes()) {
 				return
 			}
 		}
-	case pmetric.MetricDataTypeHistogram:
+	case pmetric.MetricTypeHistogram:
 		for i := 0; i < metric.Histogram().DataPoints().Len(); i++ {
 			dp := metric.Histogram().DataPoints().At(i)
 			if !f(dp.Attributes()) {
 				return
 			}
 		}
-	case pmetric.MetricDataTypeExponentialHistogram:
+	case pmetric.MetricTypeExponentialHistogram:
 		for i := 0; i < metric.ExponentialHistogram().DataPoints().Len(); i++ {
 			dp := metric.ExponentialHistogram().DataPoints().At(i)
 			if !f(dp.Attributes()) {
 				return
 			}
 		}
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeSummary:
 		for i := 0; i < metric.Summary().DataPoints().Len(); i++ {
 			dp := metric.Summary().DataPoints().At(i)
 			if !f(dp.Attributes()) {
@@ -516,16 +514,17 @@ func rangeDataPointAttributes(metric pmetric.Metric, f func(pcommon.Map) bool) {
 }
 
 func countDataPoints(metric pmetric.Metric) int {
-	switch metric.DataType() {
-	case pmetric.MetricDataTypeGauge:
+	//exhaustive:enforce
+	switch metric.Type() {
+	case pmetric.MetricTypeGauge:
 		return metric.Gauge().DataPoints().Len()
-	case pmetric.MetricDataTypeSum:
+	case pmetric.MetricTypeSum:
 		return metric.Sum().DataPoints().Len()
-	case pmetric.MetricDataTypeHistogram:
+	case pmetric.MetricTypeHistogram:
 		return metric.Histogram().DataPoints().Len()
-	case pmetric.MetricDataTypeExponentialHistogram:
+	case pmetric.MetricTypeExponentialHistogram:
 		return metric.ExponentialHistogram().DataPoints().Len()
-	case pmetric.MetricDataTypeSummary:
+	case pmetric.MetricTypeSummary:
 		return metric.Summary().DataPoints().Len()
 	}
 	return 0
@@ -548,25 +547,31 @@ func transformMetric(metric pmetric.Metric, transform internalTransform) bool {
 
 	for _, op := range transform.Operations {
 		switch op.configOperation.Action {
-		case UpdateLabel:
+		case updateLabel:
 			updateLabelOp(metric, op, transform.MetricIncludeFilter)
-		case AggregateLabels:
+		case aggregateLabels:
 			if canChangeMetric {
-				aggregateLabelsOp(metric, op)
+				attrs := make([]string, 0, len(op.labelSetMap))
+				for k, v := range op.labelSetMap {
+					if v {
+						attrs = append(attrs, k)
+					}
+				}
+				aggregateLabelsOp(metric, attrs, op.configOperation.AggregationType)
 			}
-		case AggregateLabelValues:
+		case aggregateLabelValues:
 			if canChangeMetric {
 				aggregateLabelValuesOp(metric, op)
 			}
-		case ToggleScalarDataType:
+		case toggleScalarDataType:
 			toggleScalarDataTypeOp(metric, transform.MetricIncludeFilter)
-		case ScaleValue:
+		case scaleValue:
 			scaleValueOp(metric, op, transform.MetricIncludeFilter)
-		case AddLabel:
+		case addLabel:
 			if canChangeMetric {
 				addLabelOp(metric, op)
 			}
-		case DeleteLabelValue:
+		case deleteLabelValue:
 			if canChangeMetric {
 				deleteLabelValueOp(metric, op)
 			}

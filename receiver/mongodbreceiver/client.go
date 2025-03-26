@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package mongodbreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/mongodbreceiver"
 
@@ -29,7 +18,7 @@ import (
 
 // client is an interface that exposes functionality towards a mongo environment
 type client interface {
-	ListDatabaseNames(ctx context.Context, filters interface{}, opts ...*options.ListDatabasesOptions) ([]string, error)
+	ListDatabaseNames(ctx context.Context, filters any, opts ...*options.ListDatabasesOptions) ([]string, error)
 	ListCollectionNames(ctx context.Context, DBName string) ([]string, error)
 	Disconnect(context.Context) error
 	GetVersion(context.Context) (*version.Version, error)
@@ -37,6 +26,7 @@ type client interface {
 	DBStats(ctx context.Context, DBName string) (bson.M, error)
 	TopStats(ctx context.Context) (bson.M, error)
 	IndexStats(ctx context.Context, DBName, collectionName string) ([]bson.M, error)
+	RunCommand(ctx context.Context, db string, command bson.M) (bson.M, error)
 }
 
 // mongodbClient is a mongodb metric scraper client
@@ -46,14 +36,13 @@ type mongodbClient struct {
 	*mongo.Client
 }
 
-// NewClient creates a new client to connect and query mongo for the
+// newClient creates a new client to connect and query mongo for the
 // mongodbreceiver
-func NewClient(ctx context.Context, config *Config, logger *zap.Logger) (client, error) {
-	driver, err := mongo.Connect(ctx, config.ClientOptions())
+var newClient = func(ctx context.Context, config *Config, logger *zap.Logger, secondary bool) (client, error) {
+	driver, err := mongo.Connect(ctx, config.ClientOptions(secondary))
 	if err != nil {
 		return nil, err
 	}
-
 	return &mongodbClient{
 		cfg:    config,
 		logger: logger,
@@ -94,7 +83,7 @@ func (c *mongodbClient) TopStats(ctx context.Context) (bson.M, error) {
 // more information can be found here: https://pkg.go.dev/go.mongodb.org/mongo-driver@v1.9.0/mongo#Database.ListCollectionNames
 func (c *mongodbClient) ListCollectionNames(ctx context.Context, database string) ([]string, error) {
 	lcOpts := options.ListCollections().SetAuthorizedCollections(true)
-	return c.Database(database).ListCollectionNames(context.Background(), bson.D{}, lcOpts)
+	return c.Database(database).ListCollectionNames(ctx, bson.D{}, lcOpts)
 }
 
 // IndexStats returns the index stats per collection for a given database

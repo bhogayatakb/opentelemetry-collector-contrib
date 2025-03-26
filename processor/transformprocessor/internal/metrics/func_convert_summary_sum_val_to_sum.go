@@ -1,55 +1,58 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metrics // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/transformprocessor/internal/metrics"
 
 import (
+	"context"
 	"fmt"
 
 	"go.opentelemetry.io/collector/pdata/pmetric"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/telemetryquerylanguage/contexts/tqlmetrics"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/telemetryquerylanguage/tql"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/ottl/contexts/ottldatapoint"
 )
 
-func convertSummarySumValToSum(stringAggTemp string, monotonic bool) (tql.ExprFunc, error) {
-	var aggTemp pmetric.MetricAggregationTemporality
+type convertSummarySumValToSumArguments struct {
+	StringAggTemp string
+	Monotonic     bool
+}
+
+func newConvertSummarySumValToSumFactory() ottl.Factory[ottldatapoint.TransformContext] {
+	return ottl.NewFactory("convert_summary_sum_val_to_sum", &convertSummarySumValToSumArguments{}, createConvertSummarySumValToSumFunction)
+}
+
+func createConvertSummarySumValToSumFunction(_ ottl.FunctionContext, oArgs ottl.Arguments) (ottl.ExprFunc[ottldatapoint.TransformContext], error) {
+	args, ok := oArgs.(*convertSummarySumValToSumArguments)
+
+	if !ok {
+		return nil, fmt.Errorf("convertSummarySumValToSumFactory args must be of type *convertSummarySumValToSumArguments")
+	}
+
+	return convertSummarySumValToSum(args.StringAggTemp, args.Monotonic)
+}
+
+func convertSummarySumValToSum(stringAggTemp string, monotonic bool) (ottl.ExprFunc[ottldatapoint.TransformContext], error) {
+	var aggTemp pmetric.AggregationTemporality
 	switch stringAggTemp {
 	case "delta":
-		aggTemp = pmetric.MetricAggregationTemporalityDelta
+		aggTemp = pmetric.AggregationTemporalityDelta
 	case "cumulative":
-		aggTemp = pmetric.MetricAggregationTemporalityCumulative
+		aggTemp = pmetric.AggregationTemporalityCumulative
 	default:
 		return nil, fmt.Errorf("unknown aggregation temporality: %s", stringAggTemp)
 	}
-	return func(ctx tql.TransformContext) interface{} {
-		mtc, ok := ctx.(tqlmetrics.TransformContext)
-		if !ok {
-			return nil
+	return func(_ context.Context, tCtx ottldatapoint.TransformContext) (any, error) {
+		metric := tCtx.GetMetric()
+		if metric.Type() != pmetric.MetricTypeSummary {
+			return nil, nil
 		}
 
-		metric := mtc.GetMetric()
-		if metric.DataType() != pmetric.MetricDataTypeSummary {
-			return nil
-		}
-
-		sumMetric := mtc.GetMetrics().AppendEmpty()
+		sumMetric := tCtx.GetMetrics().AppendEmpty()
 		sumMetric.SetDescription(metric.Description())
 		sumMetric.SetName(metric.Name() + "_sum")
 		sumMetric.SetUnit(metric.Unit())
-		sumMetric.SetDataType(pmetric.MetricDataTypeSum)
-		sumMetric.Sum().SetAggregationTemporality(aggTemp)
+		sumMetric.SetEmptySum().SetAggregationTemporality(aggTemp)
 		sumMetric.Sum().SetIsMonotonic(monotonic)
 
 		sumDps := sumMetric.Sum().DataPoints()
@@ -58,10 +61,10 @@ func convertSummarySumValToSum(stringAggTemp string, monotonic bool) (tql.ExprFu
 			dp := dps.At(i)
 			sumDp := sumDps.AppendEmpty()
 			dp.Attributes().CopyTo(sumDp.Attributes())
-			sumDp.SetDoubleVal(dp.Sum())
+			sumDp.SetDoubleValue(dp.Sum())
 			sumDp.SetStartTimestamp(dp.StartTimestamp())
 			sumDp.SetTimestamp(dp.Timestamp())
 		}
-		return nil
+		return nil, nil
 	}, nil
 }

@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package basicauthextension
 
@@ -20,35 +9,36 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension/internal/metadata"
 )
 
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		id          config.ComponentID
-		expected    config.Extension
+		id          component.ID
+		expected    component.Config
 		expectedErr bool
 	}{
 		{
-			id:          config.NewComponentID(typeStr),
+			id:          component.NewID(metadata.Type),
 			expectedErr: true,
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "server"),
+			id: component.NewIDWithName(metadata.Type, "server"),
 			expected: &Config{
-				ExtensionSettings: config.NewExtensionSettings(config.NewComponentID(typeStr)),
 				Htpasswd: &HtpasswdSettings{
 					Inline: "username1:password1\nusername2:password2\n",
 				},
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "client"),
+			id: component.NewIDWithName(metadata.Type, "client"),
 			expected: &Config{
-				ExtensionSettings: config.NewExtensionSettings(config.NewComponentID(typeStr)),
 				ClientAuth: &ClientAuthSettings{
 					Username: "username",
 					Password: "password",
@@ -56,7 +46,7 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id:          config.NewComponentIDWithName(typeStr, "both"),
+			id:          component.NewIDWithName(metadata.Type, "both"),
 			expectedErr: true,
 		},
 	}
@@ -68,12 +58,12 @@ func TestLoadConfig(t *testing.T) {
 			cfg := factory.CreateDefaultConfig()
 			sub, err := cm.Sub(tt.id.String())
 			require.NoError(t, err)
-			require.NoError(t, config.UnmarshalExtension(sub, cfg))
+			require.NoError(t, sub.Unmarshal(cfg))
 			if tt.expectedErr {
-				assert.Error(t, cfg.Validate())
+				assert.Error(t, xconfmap.Validate(cfg))
 				return
 			}
-			assert.NoError(t, cfg.Validate())
+			assert.NoError(t, xconfmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}

@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package ecsinfo // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awscontainerinsightreceiver/internal/ecsInfo"
 
@@ -91,18 +80,17 @@ type ecsInfoOption func(*EcsInfo)
 
 // New creates a k8sApiServer which can generate cluster-level metrics
 func NewECSInfo(refreshInterval time.Duration, hostIPProvider hostIPProvider, host component.Host, settings component.TelemetrySettings, options ...ecsInfoOption) (*EcsInfo, error) {
-	setting := confighttp.HTTPClientSettings{
+	setting := confighttp.ClientConfig{
 		Timeout: defaultTimeout,
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 
-	client, err := setting.ToClient(host, settings)
-
+	client, err := setting.ToClient(ctx, host, settings)
 	if err != nil {
 		settings.Logger.Warn("Failed to create a http client for ECS info!")
+		cancel()
 		return nil, err
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
 
 	ecsInfo := &EcsInfo{
 		logger:                       settings.Logger,
@@ -134,7 +122,6 @@ func NewECSInfo(refreshInterval time.Duration, hostIPProvider hostIPProvider, ho
 }
 
 func (e *EcsInfo) initContainerInfo(ctx context.Context) {
-
 	<-e.hostIPProvider.GetInstanceIPReadyC()
 
 	e.logger.Info("instance ip is ready and begin initializing ecs container info")
@@ -144,7 +131,6 @@ func (e *EcsInfo) initContainerInfo(ctx context.Context) {
 }
 
 func (e *EcsInfo) initTaskInfo(ctx context.Context) {
-
 	<-e.hostIPProvider.GetInstanceIPReadyC()
 
 	e.logger.Info("instance ip is ready and begin initializing ecs task info")
@@ -155,7 +141,6 @@ func (e *EcsInfo) initTaskInfo(ctx context.Context) {
 }
 
 func (e *EcsInfo) initCgroupScanner(ctx context.Context) {
-
 	<-e.isContainerInfoReadyC
 	<-e.isTaskInfoReadyC
 

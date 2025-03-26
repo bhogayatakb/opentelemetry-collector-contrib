@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package translator // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsxrayreceiver/internal/translator"
 
@@ -19,7 +8,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
 
 	awsxray "github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/xray"
 )
@@ -28,7 +17,7 @@ import (
 // TODO: Remove this when collector defines this semantic convention.
 const ExceptionEventName = "exception"
 
-func addCause(seg *awsxray.Segment, span *ptrace.Span) {
+func addCause(seg *awsxray.Segment, span ptrace.Span) {
 	if seg.Cause == nil {
 		return
 	}
@@ -66,21 +55,20 @@ func addCause(seg *awsxray.Segment, span *ptrace.Span) {
 			evt := evts.AppendEmpty()
 			evt.SetName(ExceptionEventName)
 			attrs := evt.Attributes()
-			attrs.Clear()
 			attrs.EnsureCapacity(8)
 
 			// ID is a required field
-			attrs.UpsertString(awsxray.AWSXrayExceptionIDAttribute, *excp.ID)
-			addString(excp.Message, conventions.AttributeExceptionMessage, &attrs)
-			addString(excp.Type, conventions.AttributeExceptionType, &attrs)
-			addBool(excp.Remote, awsxray.AWSXrayExceptionRemoteAttribute, &attrs)
-			addInt64(excp.Truncated, awsxray.AWSXrayExceptionTruncatedAttribute, &attrs)
-			addInt64(excp.Skipped, awsxray.AWSXrayExceptionSkippedAttribute, &attrs)
-			addString(excp.Cause, awsxray.AWSXrayExceptionCauseAttribute, &attrs)
+			attrs.PutStr(awsxray.AWSXrayExceptionIDAttribute, *excp.ID)
+			addString(excp.Message, conventions.AttributeExceptionMessage, attrs)
+			addString(excp.Type, conventions.AttributeExceptionType, attrs)
+			addBool(excp.Remote, awsxray.AWSXrayExceptionRemoteAttribute, attrs)
+			addInt64(excp.Truncated, awsxray.AWSXrayExceptionTruncatedAttribute, attrs)
+			addInt64(excp.Skipped, awsxray.AWSXrayExceptionSkippedAttribute, attrs)
+			addString(excp.Cause, awsxray.AWSXrayExceptionCauseAttribute, attrs)
 
 			if len(excp.Stack) > 0 {
 				stackTrace := convertStackFramesToStackTraceStr(excp)
-				attrs.UpsertString(conventions.AttributeExceptionStacktrace, stackTrace)
+				attrs.PutStr(conventions.AttributeExceptionStacktrace, stackTrace)
 			}
 		}
 	}

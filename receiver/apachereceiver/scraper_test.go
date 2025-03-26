@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package apachereceiver
 
@@ -20,57 +9,72 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+	"go.opentelemetry.io/collector/receiver/receivertest"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/scrapertest/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/golden"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/pmetrictest"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/apachereceiver/internal/metadata"
 )
 
 func TestScraper(t *testing.T) {
 	apacheMock := newMockServer(t)
+	defer func() { apacheMock.Close() }()
+
 	cfg := createDefaultConfig().(*Config)
 	cfg.Endpoint = fmt.Sprintf("%s%s", apacheMock.URL, "/server-status?auto")
-	require.NoError(t, cfg.Validate())
+	require.NoError(t, xconfmap.Validate(cfg))
 
-	scraper := newApacheScraper(componenttest.NewNopReceiverCreateSettings(), cfg)
+	serverName, port, err := parseResourceAttributes(cfg.Endpoint)
+	require.NoError(t, err)
+	scraper := newApacheScraper(receivertest.NewNopSettings(metadata.Type), cfg, serverName, port)
 
-	err := scraper.start(context.Background(), componenttest.NewNopHost())
+	err = scraper.start(context.Background(), componenttest.NewNopHost())
 	require.NoError(t, err)
 
 	actualMetrics, err := scraper.scrape(context.Background())
 	require.NoError(t, err)
 
-	expectedFile := filepath.Join("testdata", "scraper", "expected.json")
+	expectedFile := filepath.Join("testdata", "scraper", "expected.yaml")
 	expectedMetrics, err := golden.ReadMetrics(expectedFile)
 	require.NoError(t, err)
+	url, err := url.Parse(apacheMock.URL)
+	require.NoError(t, err)
 
-	require.NoError(t, scrapertest.CompareMetrics(expectedMetrics, actualMetrics))
+	expectedMetrics.ResourceMetrics().At(0).Resource().Attributes().PutStr("apache.server.port", url.Port())
+
+	// The port is random, so we shouldn't check if this value matches.
+	require.NoError(t, pmetrictest.CompareMetrics(expectedMetrics, actualMetrics,
+		pmetrictest.IgnoreMetricDataPointsOrder(), pmetrictest.IgnoreStartTimestamp(), pmetrictest.IgnoreTimestamp()))
 }
 
 func TestScraperFailedStart(t *testing.T) {
-	sc := newApacheScraper(componenttest.NewNopReceiverCreateSettings(), &Config{
-		HTTPClientSettings: confighttp.HTTPClientSettings{
-			Endpoint: "localhost:8080",
-			TLSSetting: configtls.TLSClientSetting{
-				TLSSetting: configtls.TLSSetting{
-					CAFile: "/non/existent",
-				},
-			},
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = "localhost:8080"
+	clientConfig.TLSSetting = configtls.ClientConfig{
+		Config: configtls.Config{
+			CAFile: "/non/existent",
 		},
-	})
+	}
+	sc := newApacheScraper(receivertest.NewNopSettings(metadata.Type), &Config{
+		ClientConfig: clientConfig,
+	},
+		"localhost",
+		"8080")
 	err := sc.start(context.Background(), componenttest.NewNopHost())
 	require.Error(t, err)
 }
 
 func TestParseScoreboard(t *testing.T) {
-
 	t.Run("test freq count", func(t *testing.T) {
 		scoreboard := `S_DD_L_GGG_____W__IIII_C________________W__________________________________.........................____WR______W____W________________________C______________________________________W_W____W______________R_________R________C_________WK_W________K_____W__C__________W___R______.............................................................................................................................`
 		results := parseScoreboard(scoreboard)
@@ -141,11 +145,13 @@ func TestParseStats(t *testing.T) {
 ReqPerSec: 719.771
 IdleWorkers: 227
 ConnsTotal: 110
+BytesPerSec: 73.12
 		`
 		want := map[string]string{
 			"ReqPerSec":   "719.771",
 			"IdleWorkers": "227",
 			"ConnsTotal":  "110",
+			"BytesPerSec": "73.12",
 		}
 		require.EqualValues(t, want, parseStats(got))
 	})
@@ -153,7 +159,7 @@ ConnsTotal: 110
 
 func TestScraperError(t *testing.T) {
 	t.Run("no client", func(t *testing.T) {
-		sc := newApacheScraper(componenttest.NewNopReceiverCreateSettings(), &Config{})
+		sc := newApacheScraper(receivertest.NewNopSettings(metadata.Type), &Config{}, "", "")
 		sc.httpClient = nil
 
 		_, err := sc.scrape(context.Background())
@@ -165,18 +171,27 @@ func TestScraperError(t *testing.T) {
 func newMockServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		if req.URL.String() == "/server-status?auto" {
-			rw.WriteHeader(200)
+			rw.WriteHeader(http.StatusOK)
 			_, err := rw.Write([]byte(`ServerUptimeSeconds: 410
 Total Accesses: 14169
 Total kBytes: 20910
 BusyWorkers: 13
 IdleWorkers: 227
 ConnsTotal: 110
+CPUChildrenSystem: 0.01
+CPUChildrenUser: 0.02
+CPUSystem: 0.03
+CPUUser: 0.04
+CPULoad: 0.66
+Load1: 0.9
+Load5: 0.4
+Load15: 0.3
+Total Duration: 1501
 Scoreboard: S_DD_L_GGG_____W__IIII_C________________W__________________________________.........................____WR______W____W________________________C______________________________________W_W____W______________R_________R________C_________WK_W________K_____W__C__________W___R______.............................................................................................................................
 `))
-			require.NoError(t, err)
+			assert.NoError(t, err)
 			return
 		}
-		rw.WriteHeader(404)
+		rw.WriteHeader(http.StatusNotFound)
 	}))
 }

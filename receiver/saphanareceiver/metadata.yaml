@@ -1,160 +1,208 @@
-name: saphanareceiver
+type: saphana
+
+status:
+  class: receiver
+  stability:
+    alpha: [metrics]
+  distributions: []
+  codeowners:
+    active: [dehaansa]
+
+tests:
+  goleak:
+    ignore:
+      top:
+        - "github.com/SAP/go-hdb/driver.(*metrics).collect"
+
 resource_attributes:
   saphana.host:
     type: string
     description: The SAP HANA host.
+    enabled: true
   db.system:
     type: string
     description: The type of database system.
+    enabled: true
 
 attributes:
   database:
     description: The SAP HANA database.
+    type: string
   system:
     description: The SAP HANA system.
+    type: string
   product:
     description: The SAP HANA product.
+    type: string
   primary_host:
-    value: primary
+    name_override: primary
     description: The primary SAP HANA host in replication.
+    type: string
   secondary_host:
-    value: secondary
+    name_override: secondary
     description: The secondary SAP HANA host in replication.
+    type: string
   port:
     description: The SAP HANA port.
+    type: string
   replication_mode:
-    value: mode
+    name_override: mode
     description: The replication mode.
+    type: string
   component:
     description: The SAP HANA component.
+    type: string
   schema:
     description: The SAP HANA schema.
+    type: string
   service:
     description: The SAP HANA service.
+    type: string
   path:
     description: The SAP HANA disk path.
+    type: string
   disk_usage_type:
-    value: usage_type
+    name_override: usage_type
     description: The SAP HANA disk & volume usage type.
+    type: string
   transaction_type:
-    value: type
+    name_override: type
     description: The transaction type.
+    type: string
     enum:
     - update
     - commit
     - rollback
   connection_status:
-    value: status
+    name_override: status
     description: The connection status.
+    type: string
     enum:
     - running
     - idle
     - queueing
   cpu_type:
-    value: type
+    name_override: type
     description: The type of cpu.
+    type: string
     enum:
     - user
     - system
     - io_wait
     - idle
   alert_rating:
-    value: rating
+    name_override: rating
     description: The alert rating.
+    type: string
   column_memory_type:
-    value: type
+    name_override: type
     description: The type of column store memory.
+    type: string
     enum:
     - main
     - delta
   column_memory_subtype:
-    value: subtype
+    name_override: subtype
     description: The subtype of column store memory.
+    type: string
     enum:
     - data
     - dict
     - index
     - misc
   row_memory_type:
-    value: type
+    name_override: type
     description: The type of row store memory.
+    type: string
     enum:
     - fixed
     - variable
   schema_memory_type:
-    value: type
+    name_override: type
     description: The type of schema memory.
+    type: string
     enum:
     - main
     - delta
     - history_main
     - history_delta
   schema_record_type:
-    value: type
+    name_override: type
     description: The type of schema record.
+    type: string
     enum:
     - main
     - delta
     - history_main
     - history_delta
   memory_state_used_free:
-    value: state
+    name_override: state
     description: The state of memory.
+    type: string
     enum:
     - used
     - free
   disk_state_used_free:
-    value: state
+    name_override: state
     description: The state of the disk storage.
+    type: string
     enum:
     - used
     - free
   host_swap_state:
-    value: state
+    name_override: state
     description: The state of swap data.
+    type: string
     enum:
     - used
     - free
   schema_operation_type:
-    value: type
+    name_override: type
     description: The type of operation.
+    type: string
     enum:
     - read
     - write
     - merge
   service_status:
-    value: status
+    name_override: status
     description: The status of services.
+    type: string
     enum:
     - active
     - inactive
   thread_status:
-    value: status
+    name_override: status
     description: The status of threads.
+    type: string
     enum:
     - active
     - inactive
   service_memory_used_type:
-    value: type
+    name_override: type
     description: The type of service memory.
+    type: string
     enum:
     - logical
     - physical
   volume_operation_type:
-    value: type
+    name_override: type
     description: The type of operation.
+    type: string
     enum:
     - read
     - write
   active_pending_request_state:
-    value: state
+    name_override: state
     description: The state of network request.
+    type: string
     enum:
     - active
     - pending
   internal_external_request_type:
-    value: type
+    name_override: type
     description: The type of network request.
+    type: string
     enum:
     - internal
     - external
@@ -165,7 +213,7 @@ metrics:
     unit: '{connections}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [connection_status]
@@ -175,7 +223,7 @@ metrics:
     unit: ms
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [cpu_type]
@@ -185,7 +233,7 @@ metrics:
     unit: '{alerts}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [alert_rating]
@@ -195,7 +243,7 @@ metrics:
     unit: s
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [system, database]
@@ -205,7 +253,7 @@ metrics:
     unit: us
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [primary_host, secondary_host, port, replication_mode]
@@ -215,7 +263,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [primary_host, secondary_host, port, replication_mode]
@@ -241,7 +289,7 @@ metrics:
     unit: '{transactions}'
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [transaction_type]
@@ -251,7 +299,7 @@ metrics:
     unit: '{transactions}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: []
@@ -266,20 +314,20 @@ metrics:
     enabled: true
   saphana.license.limit:
     description: The allowed product usage as specified by the license (for example, main memory).
-    unit: '1'
+    unit: '{licenses}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [system, product]
     enabled: true
   saphana.license.peak:
     description: The peak product usage value during last 13 months, measured periodically.
-    unit: '1'
+    unit: '{licenses}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [system, product]
@@ -289,7 +337,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [memory_state_used_free]
@@ -299,7 +347,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: []
@@ -309,7 +357,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: []
@@ -319,7 +367,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: []
@@ -329,7 +377,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [memory_state_used_free]
@@ -339,7 +387,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [host_swap_state]
@@ -349,7 +397,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [column_memory_type, column_memory_subtype]
@@ -359,7 +407,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [row_memory_type]
@@ -369,7 +417,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [component]
@@ -379,7 +427,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [schema, schema_memory_type]
@@ -389,7 +437,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [schema]
@@ -399,7 +447,7 @@ metrics:
     unit: '{records}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [schema, schema_record_type]
@@ -409,7 +457,7 @@ metrics:
     unit: '{records}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [schema]
@@ -419,7 +467,7 @@ metrics:
     unit: '{operations}'
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [schema, schema_operation_type]
@@ -429,7 +477,7 @@ metrics:
     unit: '{services}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service_status]
@@ -439,7 +487,7 @@ metrics:
     unit: '{threads}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [thread_status]
@@ -449,7 +497,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service, service_memory_used_type]
@@ -459,7 +507,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service]
@@ -469,7 +517,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service]
@@ -479,7 +527,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service, memory_state_used_free]
@@ -489,7 +537,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service, memory_state_used_free]
@@ -499,7 +547,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service]
@@ -509,7 +557,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service]
@@ -519,7 +567,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service]
@@ -529,7 +577,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [service]
@@ -539,7 +587,7 @@ metrics:
     unit: By
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [path, disk_usage_type, disk_state_used_free]
@@ -549,7 +597,7 @@ metrics:
     unit: '{operations}'
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [path, disk_usage_type, volume_operation_type]
@@ -559,7 +607,7 @@ metrics:
     unit: By
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [path, disk_usage_type, volume_operation_type]
@@ -569,7 +617,7 @@ metrics:
     unit: ms
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [path, disk_usage_type, volume_operation_type]
@@ -579,7 +627,7 @@ metrics:
     unit: '{requests}'
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [active_pending_request_state]
@@ -589,7 +637,7 @@ metrics:
     unit: '{requests}'
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
       input_type: string
     attributes: [internal_external_request_type]

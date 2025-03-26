@@ -8,51 +8,10 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/receiver"
 )
 
-// MetricSettings provides common settings for a particular metric.
-type MetricSettings struct {
-	Enabled bool `mapstructure:"enabled"`
-}
-
-// MetricsSettings provides settings for chrony receiver metrics.
-type MetricsSettings struct {
-	NtpFrequencyOffset MetricSettings `mapstructure:"ntp.frequency.offset"`
-	NtpSkew            MetricSettings `mapstructure:"ntp.skew"`
-	NtpStratum         MetricSettings `mapstructure:"ntp.stratum"`
-	NtpTimeCorrection  MetricSettings `mapstructure:"ntp.time.correction"`
-	NtpTimeLastOffset  MetricSettings `mapstructure:"ntp.time.last_offset"`
-	NtpTimeRmsOffset   MetricSettings `mapstructure:"ntp.time.rms_offset"`
-	NtpTimeRootDelay   MetricSettings `mapstructure:"ntp.time.root_delay"`
-}
-
-func DefaultMetricsSettings() MetricsSettings {
-	return MetricsSettings{
-		NtpFrequencyOffset: MetricSettings{
-			Enabled: false,
-		},
-		NtpSkew: MetricSettings{
-			Enabled: true,
-		},
-		NtpStratum: MetricSettings{
-			Enabled: false,
-		},
-		NtpTimeCorrection: MetricSettings{
-			Enabled: true,
-		},
-		NtpTimeLastOffset: MetricSettings{
-			Enabled: true,
-		},
-		NtpTimeRmsOffset: MetricSettings{
-			Enabled: false,
-		},
-		NtpTimeRootDelay: MetricSettings{
-			Enabled: false,
-		},
-	}
-}
-
-// AttributeLeapStatus specifies the a value leap.status attribute.
+// AttributeLeapStatus specifies the value leap.status attribute.
 type AttributeLeapStatus int
 
 const (
@@ -88,7 +47,7 @@ var MapAttributeLeapStatus = map[string]AttributeLeapStatus{
 
 type metricNtpFrequencyOffset struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -97,19 +56,19 @@ func (m *metricNtpFrequencyOffset) init() {
 	m.data.SetName("ntp.frequency.offset")
 	m.data.SetDescription("The frequency is the rate by which the system s clock would be wrong if chronyd was not correcting it.")
 	m.data.SetUnit("ppm")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricNtpFrequencyOffset) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64, leapStatusAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetDoubleVal(val)
-	dp.Attributes().UpsertString("leap.status", leapStatusAttributeValue)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("leap.status", leapStatusAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -121,16 +80,16 @@ func (m *metricNtpFrequencyOffset) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricNtpFrequencyOffset) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricNtpFrequencyOffset(settings MetricSettings) metricNtpFrequencyOffset {
-	m := metricNtpFrequencyOffset{settings: settings}
-	if settings.Enabled {
+func newMetricNtpFrequencyOffset(cfg MetricConfig) metricNtpFrequencyOffset {
+	m := metricNtpFrequencyOffset{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -139,7 +98,7 @@ func newMetricNtpFrequencyOffset(settings MetricSettings) metricNtpFrequencyOffs
 
 type metricNtpSkew struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -148,17 +107,17 @@ func (m *metricNtpSkew) init() {
 	m.data.SetName("ntp.skew")
 	m.data.SetDescription("This is the estimated error bound on the frequency.")
 	m.data.SetUnit("ppm")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 }
 
 func (m *metricNtpSkew) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetDoubleVal(val)
+	dp.SetDoubleValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -170,16 +129,16 @@ func (m *metricNtpSkew) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricNtpSkew) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricNtpSkew(settings MetricSettings) metricNtpSkew {
-	m := metricNtpSkew{settings: settings}
-	if settings.Enabled {
+func newMetricNtpSkew(cfg MetricConfig) metricNtpSkew {
+	m := metricNtpSkew{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -188,7 +147,7 @@ func newMetricNtpSkew(settings MetricSettings) metricNtpSkew {
 
 type metricNtpStratum struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -197,17 +156,17 @@ func (m *metricNtpStratum) init() {
 	m.data.SetName("ntp.stratum")
 	m.data.SetDescription("The number of hops away from the reference system keeping the reference time")
 	m.data.SetUnit("{count}")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 }
 
 func (m *metricNtpStratum) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -219,16 +178,16 @@ func (m *metricNtpStratum) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricNtpStratum) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricNtpStratum(settings MetricSettings) metricNtpStratum {
-	m := metricNtpStratum{settings: settings}
-	if settings.Enabled {
+func newMetricNtpStratum(cfg MetricConfig) metricNtpStratum {
+	m := metricNtpStratum{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -237,7 +196,7 @@ func newMetricNtpStratum(settings MetricSettings) metricNtpStratum {
 
 type metricNtpTimeCorrection struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -246,19 +205,19 @@ func (m *metricNtpTimeCorrection) init() {
 	m.data.SetName("ntp.time.correction")
 	m.data.SetDescription("The number of seconds difference between the system's clock and the reference clock")
 	m.data.SetUnit("seconds")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricNtpTimeCorrection) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64, leapStatusAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetDoubleVal(val)
-	dp.Attributes().UpsertString("leap.status", leapStatusAttributeValue)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("leap.status", leapStatusAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -270,16 +229,16 @@ func (m *metricNtpTimeCorrection) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricNtpTimeCorrection) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricNtpTimeCorrection(settings MetricSettings) metricNtpTimeCorrection {
-	m := metricNtpTimeCorrection{settings: settings}
-	if settings.Enabled {
+func newMetricNtpTimeCorrection(cfg MetricConfig) metricNtpTimeCorrection {
+	m := metricNtpTimeCorrection{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -288,7 +247,7 @@ func newMetricNtpTimeCorrection(settings MetricSettings) metricNtpTimeCorrection
 
 type metricNtpTimeLastOffset struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -297,19 +256,19 @@ func (m *metricNtpTimeLastOffset) init() {
 	m.data.SetName("ntp.time.last_offset")
 	m.data.SetDescription("The estimated local offset on the last clock update")
 	m.data.SetUnit("seconds")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricNtpTimeLastOffset) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64, leapStatusAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetDoubleVal(val)
-	dp.Attributes().UpsertString("leap.status", leapStatusAttributeValue)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("leap.status", leapStatusAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -321,16 +280,16 @@ func (m *metricNtpTimeLastOffset) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricNtpTimeLastOffset) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricNtpTimeLastOffset(settings MetricSettings) metricNtpTimeLastOffset {
-	m := metricNtpTimeLastOffset{settings: settings}
-	if settings.Enabled {
+func newMetricNtpTimeLastOffset(cfg MetricConfig) metricNtpTimeLastOffset {
+	m := metricNtpTimeLastOffset{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -339,7 +298,7 @@ func newMetricNtpTimeLastOffset(settings MetricSettings) metricNtpTimeLastOffset
 
 type metricNtpTimeRmsOffset struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -348,19 +307,19 @@ func (m *metricNtpTimeRmsOffset) init() {
 	m.data.SetName("ntp.time.rms_offset")
 	m.data.SetDescription("the long term average of the offset value")
 	m.data.SetUnit("seconds")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricNtpTimeRmsOffset) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64, leapStatusAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetDoubleVal(val)
-	dp.Attributes().UpsertString("leap.status", leapStatusAttributeValue)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("leap.status", leapStatusAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -372,16 +331,16 @@ func (m *metricNtpTimeRmsOffset) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricNtpTimeRmsOffset) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricNtpTimeRmsOffset(settings MetricSettings) metricNtpTimeRmsOffset {
-	m := metricNtpTimeRmsOffset{settings: settings}
-	if settings.Enabled {
+func newMetricNtpTimeRmsOffset(cfg MetricConfig) metricNtpTimeRmsOffset {
+	m := metricNtpTimeRmsOffset{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -390,7 +349,7 @@ func newMetricNtpTimeRmsOffset(settings MetricSettings) metricNtpTimeRmsOffset {
 
 type metricNtpTimeRootDelay struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -399,19 +358,19 @@ func (m *metricNtpTimeRootDelay) init() {
 	m.data.SetName("ntp.time.root_delay")
 	m.data.SetDescription("This is the total of the network path delays to the stratum-1 system from which the system is ultimately synchronised.")
 	m.data.SetUnit("seconds")
-	m.data.SetDataType(pmetric.MetricDataTypeGauge)
+	m.data.SetEmptyGauge()
 	m.data.Gauge().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricNtpTimeRootDelay) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val float64, leapStatusAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Gauge().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetDoubleVal(val)
-	dp.Attributes().UpsertString("leap.status", leapStatusAttributeValue)
+	dp.SetDoubleValue(val)
+	dp.Attributes().PutStr("leap.status", leapStatusAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -423,16 +382,16 @@ func (m *metricNtpTimeRootDelay) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricNtpTimeRootDelay) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Gauge().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricNtpTimeRootDelay(settings MetricSettings) metricNtpTimeRootDelay {
-	m := metricNtpTimeRootDelay{settings: settings}
-	if settings.Enabled {
+func newMetricNtpTimeRootDelay(cfg MetricConfig) metricNtpTimeRootDelay {
+	m := metricNtpTimeRootDelay{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -440,13 +399,13 @@ func newMetricNtpTimeRootDelay(settings MetricSettings) metricNtpTimeRootDelay {
 }
 
 // MetricsBuilder provides an interface for scrapers to report metrics while taking care of all the transformations
-// required to produce metric representation defined in metadata and user settings.
+// required to produce metric representation defined in metadata and user config.
 type MetricsBuilder struct {
-	startTime                pcommon.Timestamp   // start time that will be applied to all recorded data points.
-	metricsCapacity          int                 // maximum observed number of metrics per resource.
-	resourceCapacity         int                 // maximum observed number of resource attributes.
-	metricsBuffer            pmetric.Metrics     // accumulates metrics data before emitting.
-	buildInfo                component.BuildInfo // contains version information
+	config                   MetricsBuilderConfig // config of the metrics builder.
+	startTime                pcommon.Timestamp    // start time that will be applied to all recorded data points.
+	metricsCapacity          int                  // maximum observed number of metrics per resource.
+	metricsBuffer            pmetric.Metrics      // accumulates metrics data before emitting.
+	buildInfo                component.BuildInfo  // contains version information.
 	metricNtpFrequencyOffset metricNtpFrequencyOffset
 	metricNtpSkew            metricNtpSkew
 	metricNtpStratum         metricNtpStratum
@@ -456,31 +415,40 @@ type MetricsBuilder struct {
 	metricNtpTimeRootDelay   metricNtpTimeRootDelay
 }
 
-// metricBuilderOption applies changes to default metrics builder.
-type metricBuilderOption func(*MetricsBuilder)
-
-// WithStartTime sets startTime on the metrics builder.
-func WithStartTime(startTime pcommon.Timestamp) metricBuilderOption {
-	return func(mb *MetricsBuilder) {
-		mb.startTime = startTime
-	}
+// MetricBuilderOption applies changes to default metrics builder.
+type MetricBuilderOption interface {
+	apply(*MetricsBuilder)
 }
 
-func NewMetricsBuilder(settings MetricsSettings, buildInfo component.BuildInfo, options ...metricBuilderOption) *MetricsBuilder {
+type metricBuilderOptionFunc func(mb *MetricsBuilder)
+
+func (mbof metricBuilderOptionFunc) apply(mb *MetricsBuilder) {
+	mbof(mb)
+}
+
+// WithStartTime sets startTime on the metrics builder.
+func WithStartTime(startTime pcommon.Timestamp) MetricBuilderOption {
+	return metricBuilderOptionFunc(func(mb *MetricsBuilder) {
+		mb.startTime = startTime
+	})
+}
+func NewMetricsBuilder(mbc MetricsBuilderConfig, settings receiver.Settings, options ...MetricBuilderOption) *MetricsBuilder {
 	mb := &MetricsBuilder{
+		config:                   mbc,
 		startTime:                pcommon.NewTimestampFromTime(time.Now()),
 		metricsBuffer:            pmetric.NewMetrics(),
-		buildInfo:                buildInfo,
-		metricNtpFrequencyOffset: newMetricNtpFrequencyOffset(settings.NtpFrequencyOffset),
-		metricNtpSkew:            newMetricNtpSkew(settings.NtpSkew),
-		metricNtpStratum:         newMetricNtpStratum(settings.NtpStratum),
-		metricNtpTimeCorrection:  newMetricNtpTimeCorrection(settings.NtpTimeCorrection),
-		metricNtpTimeLastOffset:  newMetricNtpTimeLastOffset(settings.NtpTimeLastOffset),
-		metricNtpTimeRmsOffset:   newMetricNtpTimeRmsOffset(settings.NtpTimeRmsOffset),
-		metricNtpTimeRootDelay:   newMetricNtpTimeRootDelay(settings.NtpTimeRootDelay),
+		buildInfo:                settings.BuildInfo,
+		metricNtpFrequencyOffset: newMetricNtpFrequencyOffset(mbc.Metrics.NtpFrequencyOffset),
+		metricNtpSkew:            newMetricNtpSkew(mbc.Metrics.NtpSkew),
+		metricNtpStratum:         newMetricNtpStratum(mbc.Metrics.NtpStratum),
+		metricNtpTimeCorrection:  newMetricNtpTimeCorrection(mbc.Metrics.NtpTimeCorrection),
+		metricNtpTimeLastOffset:  newMetricNtpTimeLastOffset(mbc.Metrics.NtpTimeLastOffset),
+		metricNtpTimeRmsOffset:   newMetricNtpTimeRmsOffset(mbc.Metrics.NtpTimeRmsOffset),
+		metricNtpTimeRootDelay:   newMetricNtpTimeRootDelay(mbc.Metrics.NtpTimeRootDelay),
 	}
+
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 	return mb
 }
@@ -490,32 +458,45 @@ func (mb *MetricsBuilder) updateCapacity(rm pmetric.ResourceMetrics) {
 	if mb.metricsCapacity < rm.ScopeMetrics().At(0).Metrics().Len() {
 		mb.metricsCapacity = rm.ScopeMetrics().At(0).Metrics().Len()
 	}
-	if mb.resourceCapacity < rm.Resource().Attributes().Len() {
-		mb.resourceCapacity = rm.Resource().Attributes().Len()
-	}
 }
 
 // ResourceMetricsOption applies changes to provided resource metrics.
-type ResourceMetricsOption func(pmetric.ResourceMetrics)
+type ResourceMetricsOption interface {
+	apply(pmetric.ResourceMetrics)
+}
+
+type resourceMetricsOptionFunc func(pmetric.ResourceMetrics)
+
+func (rmof resourceMetricsOptionFunc) apply(rm pmetric.ResourceMetrics) {
+	rmof(rm)
+}
+
+// WithResource sets the provided resource on the emitted ResourceMetrics.
+// It's recommended to use ResourceBuilder to create the resource.
+func WithResource(res pcommon.Resource) ResourceMetricsOption {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
+		res.CopyTo(rm.Resource())
+	})
+}
 
 // WithStartTimeOverride overrides start time for all the resource metrics data points.
 // This option should be only used if different start time has to be set on metrics coming from different resources.
 func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
 		var dps pmetric.NumberDataPointSlice
 		metrics := rm.ScopeMetrics().At(0).Metrics()
 		for i := 0; i < metrics.Len(); i++ {
-			switch metrics.At(i).DataType() {
-			case pmetric.MetricDataTypeGauge:
+			switch metrics.At(i).Type() {
+			case pmetric.MetricTypeGauge:
 				dps = metrics.At(i).Gauge().DataPoints()
-			case pmetric.MetricDataTypeSum:
+			case pmetric.MetricTypeSum:
 				dps = metrics.At(i).Sum().DataPoints()
 			}
 			for j := 0; j < dps.Len(); j++ {
 				dps.At(j).SetStartTimestamp(start)
 			}
 		}
-	}
+	})
 }
 
 // EmitForResource saves all the generated metrics under a new resource and updates the internal state to be ready for
@@ -523,11 +504,10 @@ func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
 // needs to emit metrics from several resources. Otherwise calling this function is not required,
 // just `Emit` function can be called instead.
 // Resource attributes should be provided as ResourceMetricsOption arguments.
-func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
+func (mb *MetricsBuilder) EmitForResource(options ...ResourceMetricsOption) {
 	rm := pmetric.NewResourceMetrics()
-	rm.Resource().Attributes().EnsureCapacity(mb.resourceCapacity)
 	ils := rm.ScopeMetrics().AppendEmpty()
-	ils.Scope().SetName("otelcol/chrony receiver")
+	ils.Scope().SetName(ScopeName)
 	ils.Scope().SetVersion(mb.buildInfo.Version)
 	ils.Metrics().EnsureCapacity(mb.metricsCapacity)
 	mb.metricNtpFrequencyOffset.emit(ils.Metrics())
@@ -537,9 +517,11 @@ func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
 	mb.metricNtpTimeLastOffset.emit(ils.Metrics())
 	mb.metricNtpTimeRmsOffset.emit(ils.Metrics())
 	mb.metricNtpTimeRootDelay.emit(ils.Metrics())
-	for _, op := range rmo {
-		op(rm)
+
+	for _, op := range options {
+		op.apply(rm)
 	}
+
 	if ils.Metrics().Len() > 0 {
 		mb.updateCapacity(rm)
 		rm.MoveTo(mb.metricsBuffer.ResourceMetrics().AppendEmpty())
@@ -548,11 +530,11 @@ func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
 
 // Emit returns all the metrics accumulated by the metrics builder and updates the internal state to be ready for
 // recording another set of metrics. This function will be responsible for applying all the transformations required to
-// produce metric representation defined in metadata and user settings, e.g. delta or cumulative.
-func (mb *MetricsBuilder) Emit(rmo ...ResourceMetricsOption) pmetric.Metrics {
-	mb.EmitForResource(rmo...)
-	metrics := pmetric.NewMetrics()
-	mb.metricsBuffer.MoveTo(metrics)
+// produce metric representation defined in metadata and user config, e.g. delta or cumulative.
+func (mb *MetricsBuilder) Emit(options ...ResourceMetricsOption) pmetric.Metrics {
+	mb.EmitForResource(options...)
+	metrics := mb.metricsBuffer
+	mb.metricsBuffer = pmetric.NewMetrics()
 	return metrics
 }
 
@@ -593,9 +575,9 @@ func (mb *MetricsBuilder) RecordNtpTimeRootDelayDataPoint(ts pcommon.Timestamp, 
 
 // Reset resets metrics builder to its initial state. It should be used when external metrics source is restarted,
 // and metrics builder should update its startTime and reset it's internal state accordingly.
-func (mb *MetricsBuilder) Reset(options ...metricBuilderOption) {
+func (mb *MetricsBuilder) Reset(options ...MetricBuilderOption) {
 	mb.startTime = pcommon.NewTimestampFromTime(time.Now())
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 }

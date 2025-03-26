@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package entry // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
 
@@ -33,11 +22,16 @@ type Field struct {
 	FieldInterface
 }
 
+// RootableField is a Field that may refer directly to "attributes" or "resource"
+type RootableField struct {
+	Field
+}
+
 // FieldInterface is a field on an entry.
 type FieldInterface interface {
-	Get(*Entry) (interface{}, bool)
-	Set(entry *Entry, value interface{}) error
-	Delete(entry *Entry) (interface{}, bool)
+	Get(*Entry) (any, bool)
+	Set(entry *Entry, value any) error
+	Delete(entry *Entry) (any, bool)
 	String() string
 }
 
@@ -52,14 +46,38 @@ func (f *Field) UnmarshalJSON(raw []byte) error {
 	return err
 }
 
+// UnmarshalJSON will unmarshal a field from JSON
+func (r *RootableField) UnmarshalJSON(raw []byte) error {
+	var s string
+	err := json.Unmarshal(raw, &s)
+	if err != nil {
+		return err
+	}
+	field, err := newField(s, true)
+	*r = RootableField{Field: field}
+	return err
+}
+
 // UnmarshalYAML will unmarshal a field from YAML
-func (f *Field) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (f *Field) UnmarshalYAML(unmarshal func(any) error) error {
 	var s string
 	err := unmarshal(&s)
 	if err != nil {
 		return err
 	}
 	*f, err = NewField(s)
+	return err
+}
+
+// UnmarshalYAML will unmarshal a field from YAML
+func (r *RootableField) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	err := unmarshal(&s)
+	if err != nil {
+		return err
+	}
+	field, err := newField(s, true)
+	*r = RootableField{Field: field}
 	return err
 }
 
@@ -70,7 +88,18 @@ func (f *Field) UnmarshalText(text []byte) error {
 	return err
 }
 
+// UnmarshalText will unmarshal a field from text
+func (r *RootableField) UnmarshalText(text []byte) error {
+	field, err := newField(string(text), true)
+	*r = RootableField{Field: field}
+	return err
+}
+
 func NewField(s string) (Field, error) {
+	return newField(s, false)
+}
+
+func newField(s string, rootable bool) (Field, error) {
 	keys, err := fromJSONDot(s)
 	if err != nil {
 		return Field{}, fmt.Errorf("splitting field: %w", err)
@@ -78,12 +107,12 @@ func NewField(s string) (Field, error) {
 
 	switch keys[0] {
 	case AttributesPrefix:
-		if len(keys) == 1 {
+		if !rootable && len(keys) == 1 {
 			return Field{}, fmt.Errorf("attributes cannot be referenced without subfield")
 		}
 		return NewAttributeField(keys[1:]...), nil
 	case ResourcePrefix:
-		if len(keys) == 1 {
+		if !rootable && len(keys) == 1 {
 			return Field{}, fmt.Errorf("resource cannot be referenced without subfield")
 		}
 		return NewResourceField(keys[1:]...), nil
@@ -92,16 +121,6 @@ func NewField(s string) (Field, error) {
 	default:
 		return Field{}, fmt.Errorf("unrecognized prefix")
 	}
-}
-
-// MarshalJSON will marshal a field into JSON
-func (f Field) MarshalJSON() ([]byte, error) {
-	return []byte(fmt.Sprintf(`"%s"`, f.String())), nil
-}
-
-// MarshalYAML will marshal a field into YAML
-func (f Field) MarshalYAML() (interface{}, error) {
-	return f.String(), nil
 }
 
 type splitState uint
@@ -185,6 +204,8 @@ func fromJSONDot(s string) ([]string, error) {
 		return nil, fmt.Errorf("found unclosed single quote")
 	case InUnbracketedToken:
 		fields = append(fields, s[tokenStart:])
+	case Begin, OutBracket:
+		// shouldn't be possible
 	}
 
 	if len(fields) == 0 {
@@ -230,15 +251,15 @@ func toJSONDot(prefix string, keys []string) string {
 
 // getNestedMap will get a nested map assigned to a key.
 // If the map does not exist, it will create and return it.
-func getNestedMap(currentMap map[string]interface{}, key string) map[string]interface{} {
+func getNestedMap(currentMap map[string]any, key string) map[string]any {
 	currentValue, ok := currentMap[key]
 	if !ok {
-		currentMap[key] = map[string]interface{}{}
+		currentMap[key] = map[string]any{}
 	}
 
-	nextMap, ok := currentValue.(map[string]interface{})
+	nextMap, ok := currentValue.(map[string]any)
 	if !ok {
-		nextMap = map[string]interface{}{}
+		nextMap = map[string]any{}
 		currentMap[key] = nextMap
 	}
 

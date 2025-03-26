@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package logzioexporter
 
@@ -30,13 +19,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/configcompression"
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/exporter/exportertest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	"go.opentelemetry.io/collector/pdata/testdata"
+	conventions "go.opentelemetry.io/collector/semconv/v1.27.0"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/logzioexporter/internal/metadata"
 )
 
 const (
@@ -46,21 +38,10 @@ const (
 )
 
 var (
-	resourceAttributes1  = map[string]interface{}{"resource-attr": "resource-attr-val-1"}
 	TestLogTime          = time.Now()
 	TestLogTimeUnixMilli = TestLogTime.UnixMilli()
 	TestLogTimestamp     = pcommon.NewTimestampFromTime(TestLogTime)
 )
-
-// Resource Attributes
-func initResourceAttributes1(dest pcommon.Map) {
-	pcommon.NewMapFromRaw(resourceAttributes1).CopyTo(dest)
-}
-
-// Resources
-func initResource1(r pcommon.Resource) {
-	initResourceAttributes1(r.Attributes())
-}
 
 // Logs
 
@@ -69,21 +50,19 @@ func fillLogOne(log plog.LogRecord) {
 	log.SetDroppedAttributesCount(1)
 	log.SetSeverityNumber(plog.SeverityNumberInfo)
 	log.SetSeverityText("Info")
-	log.SetSpanID(pcommon.NewSpanID([8]byte{0x01, 0x02, 0x04, 0x08}))
-	log.SetTraceID(pcommon.NewTraceID([16]byte{0x08, 0x04, 0x02, 0x01}))
-
+	log.SetSpanID([8]byte{0x01, 0x02, 0x04, 0x08})
+	log.SetTraceID([16]byte{0x08, 0x04, 0x02, 0x01})
 	attrs := log.Attributes()
-	attrs.UpsertString("app", "server")
-	attrs.UpsertDouble("instance_num", 1)
-
+	attrs.PutStr("app", "server")
+	attrs.PutDouble("instance_num", 1)
 	// nested body map
-	attMap := log.Body().SetEmptyMapVal()
-	attMap.UpsertDouble("23", 45)
-	attMap.UpsertString("foo", "bar")
-	attMap.UpsertString("message", "hello there")
-	attNestedMap := attMap.UpsertEmptyMap("nested")
-	attNestedMap.UpsertString("string", "v1")
-	attNestedMap.UpsertDouble("number", 499)
+	attMap := log.Body().SetEmptyMap()
+	attMap.PutDouble("23", 45)
+	attMap.PutStr("foo", "bar")
+	attMap.PutStr("message", "hello there")
+	attNestedMap := attMap.PutEmptyMap("nested")
+	attNestedMap.PutStr("string", "v1")
+	attNestedMap.PutDouble("number", 499)
 }
 
 func fillLogTwo(log plog.LogRecord) {
@@ -91,78 +70,38 @@ func fillLogTwo(log plog.LogRecord) {
 	log.SetDroppedAttributesCount(1)
 	log.SetSeverityNumber(plog.SeverityNumberInfo)
 	log.SetSeverityText("Info")
-
 	attrs := log.Attributes()
-	attrs.UpsertString("customer", "acme")
-	attrs.UpsertDouble("number", 64)
-	attrs.UpsertBool("bool", true)
-	attrs.UpsertString("env", "dev")
-	log.Body().SetStringVal("something happened")
+	attrs.PutStr("customer", "acme")
+	attrs.PutDouble("number", 64)
+	attrs.PutBool("bool", true)
+	attrs.PutStr("env", "dev")
+	log.Body().SetStr("something happened")
 }
+
 func fillLogNoTimestamp(log plog.LogRecord) {
 	log.SetDroppedAttributesCount(1)
 	log.SetSeverityNumber(plog.SeverityNumberInfo)
 	log.SetSeverityText("Info")
-
 	attrs := log.Attributes()
-	attrs.UpsertString("customer", "acme")
-	attrs.UpsertDouble("number", 64)
-	attrs.UpsertBool("bool", true)
-	attrs.UpsertString("env", "dev")
-	log.Body().SetStringVal("something happened")
+	attrs.PutStr("customer", "acme")
+	attrs.PutDouble("number", 64)
+	attrs.PutBool("bool", true)
+	attrs.PutStr("env", "dev")
+	log.Body().SetStr("something happened")
 }
 
-func GenerateLogsOneEmptyTimestamp() plog.Logs {
-	ld := GenerateLogsOneEmptyLogRecord()
+func generateLogsOneEmptyTimestamp() plog.Logs {
+	ld := testdata.GenerateLogs(1)
 	logs := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
+	ld.ResourceLogs().At(0).ScopeLogs().At(0).Scope().SetName("logScopeName")
 	fillLogOne(logs.At(0))
 	fillLogNoTimestamp(logs.AppendEmpty())
 	return ld
 }
 
-func GenerateLogsOneEmptyResourceLogs() plog.Logs {
-	ld := plog.NewLogs()
-	ld.ResourceLogs().AppendEmpty()
-	return ld
-}
-
-func GenerateLogsNoLogRecords() plog.Logs {
-	ld := GenerateLogsOneEmptyResourceLogs()
-	initResource1(ld.ResourceLogs().At(0).Resource())
-	return ld
-}
-
-func GenerateLogsOneEmptyLogRecord() plog.Logs {
-	ld := GenerateLogsNoLogRecords()
-	rs0 := ld.ResourceLogs().At(0)
-	rs0.ScopeLogs().AppendEmpty().LogRecords().AppendEmpty()
-	return ld
-}
-
-func GenerateLogsManyLogRecordsSameResource(count int) plog.Logs {
-	ld := GenerateLogsOneEmptyLogRecord()
-	logs := ld.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords()
-	logs.EnsureCapacity(count)
-	for i := 0; i < count; i++ {
-		var l plog.LogRecord
-		if i < logs.Len() {
-			l = logs.At(i)
-		} else {
-			l = logs.AppendEmpty()
-		}
-
-		if i%2 == 0 {
-			fillLogOne(l)
-		} else {
-			fillLogTwo(l)
-		}
-	}
-	return ld
-}
-
-func testLogsExporter(ld plog.Logs, t *testing.T, cfg *Config) error {
+func testLogsExporter(t *testing.T, ld plog.Logs, cfg *Config) error {
 	var err error
-	params := componenttest.NewNopExporterCreateSettings()
+	params := exportertest.NewNopSettings(metadata.Type)
 	exporter, err := createLogsExporter(context.Background(), params, cfg)
 	if err != nil {
 		return err
@@ -189,10 +128,10 @@ func newTestTracesWithAttributes() ptrace.Traces {
 	for i := 0; i < 10; i++ {
 		s := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 		s.SetName(fmt.Sprintf("%s-%d", testOperation, i))
-		s.SetTraceID(pcommon.NewTraceID([16]byte{byte(i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}))
-		s.SetSpanID(pcommon.NewSpanID([8]byte{byte(i), 0, 0, 0, 0, 0, 0, 2}))
+		s.SetTraceID(pcommon.TraceID([16]byte{byte(i), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}))
+		s.SetSpanID(pcommon.SpanID([8]byte{byte(i), 0, 0, 0, 0, 0, 0, 2}))
 		for j := 0; j < 5; j++ {
-			s.Attributes().UpsertString(fmt.Sprintf("k%d", j), fmt.Sprintf("v%d", j))
+			s.Attributes().PutStr(fmt.Sprintf("k%d", j), fmt.Sprintf("v%d", j))
 		}
 		s.SetKind(ptrace.SpanKindServer)
 	}
@@ -203,14 +142,14 @@ func newTestTraces() ptrace.Traces {
 	td := ptrace.NewTraces()
 	s := td.ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans().AppendEmpty()
 	s.SetName(testOperation)
-	s.SetTraceID(pcommon.NewTraceID([16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}))
-	s.SetSpanID(pcommon.NewSpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 2}))
+	s.SetTraceID([16]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+	s.SetSpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 2})
 	s.SetKind(ptrace.SpanKindServer)
 	return td
 }
 
-func testTracesExporter(td ptrace.Traces, t *testing.T, cfg *Config) error {
-	params := componenttest.NewNopExporterCreateSettings()
+func testTracesExporter(t *testing.T, td ptrace.Traces, cfg *Config) error {
+	params := exportertest.NewNopSettings(metadata.Type)
 	exporter, err := createTracesExporter(context.Background(), params, cfg)
 	if err != nil {
 		return err
@@ -236,7 +175,7 @@ func TestExportErrors(tester *testing.T) {
 	type ExportErrorsTest struct {
 		status int
 	}
-	var ExportErrorsTests = []ExportErrorsTest{
+	ExportErrorsTests := []ExportErrorsTest{
 		{http.StatusUnauthorized},
 		{http.StatusBadGateway},
 		{http.StatusInternalServerError},
@@ -246,60 +185,48 @@ func TestExportErrors(tester *testing.T) {
 		{http.StatusBadRequest},
 	}
 	for _, test := range ExportErrorsTests {
-		server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, _ *http.Request) {
 			rw.WriteHeader(test.status)
 		}))
+		clientConfig := confighttp.NewDefaultClientConfig()
+		clientConfig.Endpoint = server.URL
+
 		cfg := &Config{
-			Region:           "",
-			Token:            "token",
-			ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-			HTTPClientSettings: confighttp.HTTPClientSettings{
-				Endpoint: server.URL,
-			},
+			Region:       "",
+			Token:        "token",
+			ClientConfig: clientConfig,
 		}
 		td := newTestTracesWithAttributes()
-		ld := GenerateLogsManyLogRecordsSameResource(10)
-		err := testTracesExporter(td, tester, cfg)
+		ld := testdata.GenerateLogs(10)
+		err := testTracesExporter(tester, td, cfg)
 		fmt.Println(err.Error())
 		require.Error(tester, err)
-		err = testLogsExporter(ld, tester, cfg)
+		err = testLogsExporter(tester, ld, cfg)
 		fmt.Println(err.Error())
 		server.Close()
 		require.Error(tester, err)
 	}
-
 }
 
 func TestNullTracesExporterConfig(tester *testing.T) {
-	params := componenttest.NewNopExporterCreateSettings()
+	params := exportertest.NewNopSettings(metadata.Type)
 	_, err := newLogzioTracesExporter(nil, params)
 	assert.Error(tester, err, "Null exporter config should produce error")
 }
 
 func TestNullExporterConfig(tester *testing.T) {
-	params := componenttest.NewNopExporterCreateSettings()
+	params := exportertest.NewNopSettings(metadata.Type)
 	_, err := newLogzioExporter(nil, params)
 	assert.Error(tester, err, "Null exporter config should produce error")
 }
 
-func TestNullTokenConfig(tester *testing.T) {
-	cfg := Config{
-		Region: "eu",
-	}
-	params := componenttest.NewNopExporterCreateSettings()
-	_, err := createTracesExporter(context.Background(), params, &cfg)
-	assert.Error(tester, err, "Empty token should produce error")
-}
-
 func gUnzipData(data []byte) (resData []byte, err error) {
 	b := bytes.NewBuffer(data)
-
 	var r io.Reader
 	r, err = gzip.NewReader(b)
 	if err != nil {
 		return
 	}
-
 	var resB bytes.Buffer
 	_, err = resB.ReadFrom(r)
 	if err != nil {
@@ -315,21 +242,20 @@ func TestPushTraceData(tester *testing.T) {
 		recordedRequests, _ = io.ReadAll(req.Body)
 		rw.WriteHeader(http.StatusOK)
 	}))
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = server.URL
+	clientConfig.Compression = configcompression.TypeGzip
 	cfg := Config{
-		ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-		Token:            "token",
-		Region:           "",
-		HTTPClientSettings: confighttp.HTTPClientSettings{
-			Endpoint:    server.URL,
-			Compression: configcompression.Gzip,
-		},
+		Token:        "token",
+		Region:       "",
+		ClientConfig: clientConfig,
 	}
 	defer server.Close()
 	td := newTestTraces()
 	res := td.ResourceSpans().At(0).Resource()
-	res.Attributes().UpsertString(conventions.AttributeServiceName, testService)
-	res.Attributes().UpsertString(conventions.AttributeHostName, testHost)
-	err := testTracesExporter(td, tester, &cfg)
+	res.Attributes().PutStr(conventions.AttributeServiceName, testService)
+	res.Attributes().PutStr(conventions.AttributeHostName, testHost)
+	err := testTracesExporter(tester, td, &cfg)
 	require.NoError(tester, err)
 	var newSpan logzioSpan
 	decoded, _ := gUnzipData(recordedRequests)
@@ -349,27 +275,60 @@ func TestPushLogsData(tester *testing.T) {
 		recordedRequests, _ = io.ReadAll(req.Body)
 		rw.WriteHeader(http.StatusOK)
 	}))
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = server.URL
+	clientConfig.Compression = configcompression.TypeGzip
 	cfg := Config{
-		ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-		Token:            "token",
-		Region:           "",
-		HTTPClientSettings: confighttp.HTTPClientSettings{
-			Endpoint:    server.URL,
-			Compression: configcompression.Gzip,
-		},
+		Token:        "token",
+		Region:       "",
+		ClientConfig: clientConfig,
 	}
 	defer server.Close()
-	ld := GenerateLogsManyLogRecordsSameResource(2)
+	ld := generateLogsOneEmptyTimestamp()
 	res := ld.ResourceLogs().At(0).Resource()
-	res.Attributes().UpsertString(conventions.AttributeServiceName, testService)
-	res.Attributes().UpsertString(conventions.AttributeHostName, testHost)
-	err := testLogsExporter(ld, tester, &cfg)
+	res.Attributes().PutStr(conventions.AttributeServiceName, testService)
+	res.Attributes().PutStr(conventions.AttributeHostName, testHost)
+	err := testLogsExporter(tester, ld, &cfg)
 	require.NoError(tester, err)
-	var jsonLog map[string]interface{}
+	var jsonLog map[string]any
 	decoded, _ := gUnzipData(recordedRequests)
 	requests := strings.Split(string(decoded), "\n")
 	assert.NoError(tester, json.Unmarshal([]byte(requests[0]), &jsonLog))
 	assert.Equal(tester, testHost, jsonLog["host.name"])
 	assert.Equal(tester, testService, jsonLog["service.name"])
+	assert.Equal(tester, "server", jsonLog["app"])
+	assert.Equal(tester, 1.0, jsonLog["instance_num"])
+	assert.Equal(tester, "logScopeName", jsonLog["scopeName"])
+	assert.Equal(tester, "hello there", jsonLog["message"])
+	assert.Equal(tester, "bar", jsonLog["foo"])
+	assert.Equal(tester, 45.0, jsonLog["23"])
+}
 
+func TestMergeMapEntries(tester *testing.T) {
+	firstMap := pcommon.NewMap()
+	secondMap := pcommon.NewMap()
+	expectedMap := pcommon.NewMap()
+	firstMap.PutStr("name", "exporter")
+	firstMap.PutStr("host", "localhost")
+	firstMap.PutStr("instanceNum", "1")
+	firstMap.PutInt("id", 4)
+	secondMap.PutStr("tag", "test")
+	secondMap.PutStr("host", "ec2")
+	secondMap.PutInt("instanceNum", 3)
+	secondMap.PutEmptyMap("id").PutInt("instance_a", 1)
+	expectedMap.PutStr("name", "exporter")
+	expectedMap.PutStr("tag", "test")
+	slice := expectedMap.PutEmptySlice("host")
+	slice.AppendEmpty().SetStr("localhost")
+	slice.AppendEmpty().SetStr("ec2")
+	slice = expectedMap.PutEmptySlice("instanceNum")
+	val := slice.AppendEmpty()
+	val.SetStr("1")
+	val = slice.AppendEmpty()
+	val.SetInt(3)
+	slice = expectedMap.PutEmptySlice("id")
+	slice.AppendEmpty().SetInt(4)
+	slice.AppendEmpty().SetEmptyMap().PutInt("instance_a", 1)
+	mergedMap := mergeMapEntries(firstMap, secondMap)
+	assert.Equal(tester, expectedMap.AsRaw(), mergedMap.AsRaw())
 }

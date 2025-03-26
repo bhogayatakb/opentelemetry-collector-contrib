@@ -1,18 +1,11 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package cwmetricstream // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsfirehosereceiver/internal/unmarshaler/cwmetricstream"
+
+import (
+	jsoniter "github.com/json-iterator/go"
+)
 
 // The cWMetric is the format for the CloudWatch metric stream records.
 //
@@ -37,7 +30,7 @@ type cWMetric struct {
 	Timestamp int64 `json:"timestamp"`
 	// Value is the cWMetricValue, which has the min, max,
 	// sum, and count.
-	Value *cWMetricValue `json:"value"`
+	Value cWMetricValue `json:"value"`
 	// Unit is the unit for the metric.
 	//
 	// More details can be found at:
@@ -47,6 +40,8 @@ type cWMetric struct {
 
 // The cWMetricValue is the actual values of the CloudWatch metric.
 type cWMetricValue struct {
+	isSet bool
+
 	// Max is the highest value observed.
 	Max float64 `json:"max"`
 	// Min is the lowest value observed.
@@ -55,4 +50,13 @@ type cWMetricValue struct {
 	Sum float64 `json:"sum"`
 	// Count is the number of data points.
 	Count float64 `json:"count"`
+}
+
+func (v *cWMetricValue) UnmarshalJSON(data []byte) error {
+	type valueType cWMetricValue
+	if err := jsoniter.ConfigFastest.Unmarshal(data, (*valueType)(v)); err != nil {
+		return err
+	}
+	v.isSet = true
+	return nil
 }

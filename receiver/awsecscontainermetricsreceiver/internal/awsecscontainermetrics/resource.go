@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package awsecscontainermetrics // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsecscontainermetricsreceiver/internal/awsecscontainermetrics"
 
@@ -18,7 +7,7 @@ import (
 	"strings"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.21.0"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/ecsutil"
@@ -33,20 +22,20 @@ func containerResource(cm ecsutil.ContainerMetadata, logger *zap.Logger) pcommon
 		docker.LogParseError(err, cm.Image, logger)
 	}
 
-	resource.Attributes().UpsertString(conventions.AttributeContainerName, cm.ContainerName)
-	resource.Attributes().UpsertString(conventions.AttributeContainerID, cm.DockerID)
-	resource.Attributes().UpsertString(attributeECSDockerName, cm.DockerName)
-	resource.Attributes().UpsertString(conventions.AttributeContainerImageName, image.Repository)
-	resource.Attributes().UpsertString(attributeContainerImageID, cm.ImageID)
-	resource.Attributes().UpsertString(conventions.AttributeContainerImageTag, image.Tag)
-	resource.Attributes().UpsertString(attributeContainerCreatedAt, cm.CreatedAt)
-	resource.Attributes().UpsertString(attributeContainerStartedAt, cm.StartedAt)
+	resource.Attributes().PutStr(conventions.AttributeContainerName, cm.ContainerName)
+	resource.Attributes().PutStr(conventions.AttributeContainerID, cm.DockerID)
+	resource.Attributes().PutStr(attributeECSDockerName, cm.DockerName)
+	resource.Attributes().PutStr(conventions.AttributeContainerImageName, image.Repository)
+	resource.Attributes().PutStr(attributeContainerImageID, cm.ImageID)
+	resource.Attributes().PutStr(conventions.AttributeContainerImageTag, image.Tag)
+	resource.Attributes().PutStr(attributeContainerCreatedAt, cm.CreatedAt)
+	resource.Attributes().PutStr(attributeContainerStartedAt, cm.StartedAt)
 	if cm.FinishedAt != "" {
-		resource.Attributes().UpsertString(attributeContainerFinishedAt, cm.FinishedAt)
+		resource.Attributes().PutStr(attributeContainerFinishedAt, cm.FinishedAt)
 	}
-	resource.Attributes().UpsertString(attributeContainerKnownStatus, cm.KnownStatus)
+	resource.Attributes().PutStr(attributeContainerKnownStatus, cm.KnownStatus)
 	if cm.ExitCode != nil {
-		resource.Attributes().UpsertInt(attributeContainerExitCode, *cm.ExitCode)
+		resource.Attributes().PutInt(attributeContainerExitCode, *cm.ExitCode)
 	}
 	return resource
 }
@@ -54,33 +43,33 @@ func containerResource(cm ecsutil.ContainerMetadata, logger *zap.Logger) pcommon
 func taskResource(tm ecsutil.TaskMetadata) pcommon.Resource {
 	resource := pcommon.NewResource()
 	region, accountID, taskID := getResourceFromARN(tm.TaskARN)
-	resource.Attributes().UpsertString(attributeECSCluster, getNameFromCluster(tm.Cluster))
-	resource.Attributes().UpsertString(conventions.AttributeAWSECSTaskARN, tm.TaskARN)
-	resource.Attributes().UpsertString(attributeECSTaskID, taskID)
-	resource.Attributes().UpsertString(conventions.AttributeAWSECSTaskFamily, tm.Family)
+	resource.Attributes().PutStr(attributeECSCluster, getNameFromCluster(tm.Cluster))
+	resource.Attributes().PutStr(conventions.AttributeAWSECSTaskARN, tm.TaskARN)
+	resource.Attributes().PutStr(attributeECSTaskID, taskID)
+	resource.Attributes().PutStr(conventions.AttributeAWSECSTaskFamily, tm.Family)
 
 	// Task revision: aws.ecs.task.version and aws.ecs.task.revision
-	resource.Attributes().UpsertString(attributeECSTaskRevision, tm.Revision)
-	resource.Attributes().UpsertString(conventions.AttributeAWSECSTaskRevision, tm.Revision)
+	resource.Attributes().PutStr(attributeECSTaskRevision, tm.Revision)
+	resource.Attributes().PutStr(conventions.AttributeAWSECSTaskRevision, tm.Revision)
 
-	resource.Attributes().UpsertString(attributeECSServiceName, "undefined")
+	resource.Attributes().PutStr(attributeECSServiceName, tm.ServiceName)
 
-	resource.Attributes().UpsertString(conventions.AttributeCloudAvailabilityZone, tm.AvailabilityZone)
-	resource.Attributes().UpsertString(attributeECSTaskPullStartedAt, tm.PullStartedAt)
-	resource.Attributes().UpsertString(attributeECSTaskPullStoppedAt, tm.PullStoppedAt)
-	resource.Attributes().UpsertString(attributeECSTaskKnownStatus, tm.KnownStatus)
+	resource.Attributes().PutStr(conventions.AttributeCloudAvailabilityZone, tm.AvailabilityZone)
+	resource.Attributes().PutStr(attributeECSTaskPullStartedAt, tm.PullStartedAt)
+	resource.Attributes().PutStr(attributeECSTaskPullStoppedAt, tm.PullStoppedAt)
+	resource.Attributes().PutStr(attributeECSTaskKnownStatus, tm.KnownStatus)
 
 	// Task launchtype: aws.ecs.task.launch_type (raw string) and aws.ecs.launchtype (lowercase)
-	resource.Attributes().UpsertString(attributeECSTaskLaunchType, tm.LaunchType)
+	resource.Attributes().PutStr(attributeECSTaskLaunchType, tm.LaunchType)
 	switch lt := strings.ToLower(tm.LaunchType); lt {
 	case "ec2":
-		resource.Attributes().UpsertString(conventions.AttributeAWSECSLaunchtype, conventions.AttributeAWSECSLaunchtypeEC2)
+		resource.Attributes().PutStr(conventions.AttributeAWSECSLaunchtype, conventions.AttributeAWSECSLaunchtypeEC2)
 	case "fargate":
-		resource.Attributes().UpsertString(conventions.AttributeAWSECSLaunchtype, conventions.AttributeAWSECSLaunchtypeFargate)
+		resource.Attributes().PutStr(conventions.AttributeAWSECSLaunchtype, conventions.AttributeAWSECSLaunchtypeFargate)
 	}
 
-	resource.Attributes().UpsertString(conventions.AttributeCloudRegion, region)
-	resource.Attributes().UpsertString(conventions.AttributeCloudAccountID, accountID)
+	resource.Attributes().PutStr(conventions.AttributeCloudRegion, region)
+	resource.Attributes().PutStr(conventions.AttributeCloudAccountID, accountID)
 
 	return resource
 }

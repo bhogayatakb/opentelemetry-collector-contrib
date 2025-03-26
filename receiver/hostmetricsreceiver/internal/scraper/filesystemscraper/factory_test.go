@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package filesystemscraper
 
@@ -19,30 +8,32 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/scraper/scrapertest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/filesystemscraper/internal/metadata"
 )
 
 func TestCreateDefaultConfig(t *testing.T) {
-	factory := &Factory{}
+	factory := NewFactory()
 	cfg := factory.CreateDefaultConfig()
 	assert.IsType(t, &Config{}, cfg)
 }
 
-func TestCreateMetricsScraper(t *testing.T) {
-	factory := &Factory{}
+func TestCreateMetrics(t *testing.T) {
+	factory := NewFactory()
 	cfg := &Config{}
 
-	scraper, err := factory.CreateMetricsScraper(context.Background(), componenttest.NewNopReceiverCreateSettings(), cfg)
+	scraper, err := factory.CreateMetrics(context.Background(), scrapertest.NewNopSettings(metadata.Type), cfg)
 
 	assert.NoError(t, err)
 	assert.NotNil(t, scraper)
 }
 
-func TestCreateMetricsScraper_Error(t *testing.T) {
-	factory := &Factory{}
+func TestCreateMetrics_Error(t *testing.T) {
+	factory := NewFactory()
 	cfg := &Config{IncludeDevices: DeviceMatchConfig{Devices: []string{""}}}
 
-	_, err := factory.CreateMetricsScraper(context.Background(), componenttest.NewNopReceiverCreateSettings(), cfg)
+	_, err := factory.CreateMetrics(context.Background(), scrapertest.NewNopSettings(metadata.Type), cfg)
 
 	assert.Error(t, err)
 }

@@ -1,28 +1,28 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package prometheusremotewriteexporter
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sort"
 	"testing"
 	"time"
 
+	"github.com/gogo/protobuf/proto"
+	"github.com/golang/snappy"
 	"github.com/prometheus/prometheus/prompb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/exporter/exportertest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter/internal/metadata"
 )
 
 func doNothingExportSink(_ context.Context, reqL []*prompb.WriteRequest) error {
@@ -32,16 +32,14 @@ func doNothingExportSink(_ context.Context, reqL []*prompb.WriteRequest) error {
 
 func TestWALCreation_nilConfig(t *testing.T) {
 	config := (*WALConfig)(nil)
-	pwal, err := newWAL(config, doNothingExportSink)
-	require.Equal(t, err, errNilConfig)
+	pwal := newWAL(config, doNothingExportSink)
 	require.Nil(t, pwal)
 }
 
 func TestWALCreation_nonNilConfig(t *testing.T) {
 	config := &WALConfig{Directory: t.TempDir()}
-	pwal, err := newWAL(config, doNothingExportSink)
+	pwal := newWAL(config, doNothingExportSink)
 	require.NotNil(t, pwal)
-	assert.Nil(t, err)
 	assert.NoError(t, pwal.stop())
 }
 
@@ -91,18 +89,15 @@ func TestWALStopManyTimes(t *testing.T) {
 		TruncateFrequency: 60 * time.Microsecond,
 		BufferSize:        1,
 	}
-	pwal, err := newWAL(config, doNothingExportSink)
-	require.Nil(t, err)
+	pwal := newWAL(config, doNothingExportSink)
 	require.NotNil(t, pwal)
 
 	// Ensure that invoking .stop() multiple times doesn't cause a panic, but actually
 	// First close should NOT return an error.
-	err = pwal.stop()
-	require.Nil(t, err)
+	require.NoError(t, pwal.stop())
 	for i := 0; i < 4; i++ {
 		// Every invocation to .stop() should return an errAlreadyClosed.
-		err = pwal.stop()
-		require.Equal(t, err, errAlreadyClosed)
+		require.ErrorIs(t, pwal.stop(), errAlreadyClosed)
 	}
 }
 
@@ -110,8 +105,8 @@ func TestWAL_persist(t *testing.T) {
 	// Unit tests that requests written to the WAL persist.
 	config := &WALConfig{Directory: t.TempDir()}
 
-	pwal, err := newWAL(config, doNothingExportSink)
-	require.Nil(t, err)
+	pwal := newWAL(config, doNothingExportSink)
+	require.NotNil(t, pwal)
 
 	// 1. Write out all the entries.
 	reqL := []*prompb.WriteRequest{
@@ -138,27 +133,25 @@ func TestWAL_persist(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	err = pwal.retrieveWALIndices()
-	require.Nil(t, err)
+	require.NoError(t, pwal.retrieveWALIndices())
 	t.Cleanup(func() {
 		assert.NoError(t, pwal.stop())
 	})
 
-	err = pwal.persistToWAL(reqL)
-	require.Nil(t, err)
+	require.NoError(t, pwal.persistToWAL(reqL))
 
 	// 2. Read all the entries from the WAL itself, guided by the indices available,
 	// and ensure that they are exactly in order as we'd expect them.
 	wal := pwal.wal
 	start, err := wal.FirstIndex()
-	require.Nil(t, err)
+	require.NoError(t, err)
 	end, err := wal.LastIndex()
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	var reqLFromWAL []*prompb.WriteRequest
 	for i := start; i <= end; i++ {
 		req, err := pwal.readPrompbFromWAL(ctx, i)
-		require.Nil(t, err)
+		require.NoError(t, err)
 		reqLFromWAL = append(reqLFromWAL, req)
 	}
 
@@ -166,4 +159,62 @@ func TestWAL_persist(t *testing.T) {
 	orderByLabelValueForEach(reqLFromWAL)
 	require.Equal(t, reqLFromWAL[0], reqL[0])
 	require.Equal(t, reqLFromWAL[1], reqL[1])
+}
+
+func TestExportWithWALEnabled(t *testing.T) {
+	cfg := &Config{
+		WAL: &WALConfig{
+			Directory: t.TempDir(),
+		},
+		TargetInfo: &TargetInfo{}, // Declared just to avoid nil pointer dereference.
+	}
+	buildInfo := component.BuildInfo{
+		Description: "OpenTelemetry Collector",
+		Version:     "1.0",
+	}
+	set := exportertest.NewNopSettings(metadata.Type)
+	set.BuildInfo = buildInfo
+
+	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		assert.NoError(t, err)
+		assert.NotNil(t, body)
+		// Receives the http requests and unzip, unmarshalls, and extracts TimeSeries
+		writeReq := &prompb.WriteRequest{}
+		var unzipped []byte
+
+		dest, err := snappy.Decode(unzipped, body)
+		assert.NoError(t, err)
+
+		ok := proto.Unmarshal(dest, writeReq)
+		assert.NoError(t, ok)
+
+		assert.Len(t, writeReq.Timeseries, 1)
+	}))
+	defer server.Close()
+
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = server.URL
+	cfg.ClientConfig = clientConfig
+
+	prwe, err := newPRWExporter(cfg, set)
+	assert.NoError(t, err)
+	assert.NotNil(t, prwe)
+	err = prwe.Start(context.Background(), componenttest.NewNopHost())
+	require.NoError(t, err)
+	assert.NotNil(t, prwe.client)
+
+	metrics := map[string]*prompb.TimeSeries{
+		"test_metric": {
+			Labels:  []prompb.Label{{Name: "__name__", Value: "test_metric"}},
+			Samples: []prompb.Sample{{Value: 1, Timestamp: 100}},
+		},
+	}
+	err = prwe.handleExport(context.Background(), metrics, nil)
+	assert.NoError(t, err)
+
+	// While on Unix systems, t.TempDir() would easily close the WAL files,
+	// on Windows, it doesn't. So we need to close it manually to avoid flaky tests.
+	err = prwe.Shutdown(context.Background())
+	assert.NoError(t, err)
 }

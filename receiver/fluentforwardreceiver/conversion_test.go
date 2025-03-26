@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package fluentforwardreceiver
 
@@ -19,10 +8,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinylib/msgp/msgp"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatatest/plogtest"
 )
 
 func TestMessageEventConversion(t *testing.T) {
@@ -31,24 +21,21 @@ func TestMessageEventConversion(t *testing.T) {
 
 	var event MessageEventLogRecord
 	err := event.DecodeMsg(reader)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
-	le := event.LogRecords().At(0)
-	le.Attributes().Sort()
-
-	expected := Logs(
+	expectedLog := logConstructor(
 		Log{
 			Timestamp: 1593031012000000000,
-			Body:      pcommon.NewValueString("..."),
-			Attributes: map[string]interface{}{
+			Body:      pcommon.NewValueStr("..."),
+			Attributes: map[string]any{
 				"container_id":   "b00a67eb645849d6ab38ff8beb4aad035cc7e917bf123c3e9057c7e89fc73d2d",
 				"container_name": "/unruffled_cannon",
 				"fluent.tag":     "b00a67eb6458",
 				"source":         "stdout",
 			},
 		},
-	)
-	require.EqualValues(t, expected.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0), le)
+	).ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+	require.NoError(t, plogtest.CompareLogRecord(expectedLog, event.LogRecords().At(0)))
 }
 
 func TestAttributeTypeConversion(t *testing.T) {
@@ -99,16 +86,15 @@ func TestAttributeTypeConversion(t *testing.T) {
 
 	var event MessageEventLogRecord
 	err = event.DecodeMsg(reader)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	le := event.LogRecords().At(0)
-	le.Attributes().Sort()
 
-	require.EqualValues(t, Logs(
+	require.NoError(t, plogtest.CompareLogRecord(logConstructor(
 		Log{
 			Timestamp: 5000000000000,
 			Body:      pcommon.NewValueEmpty(),
-			Attributes: map[string]interface{}{
+			Attributes: map[string]any{
 				"a":          5.0,
 				"b":          6.0,
 				"c":          true,
@@ -123,12 +109,12 @@ func TestAttributeTypeConversion(t *testing.T) {
 				"k":          -1,
 				"l":          "(0+0i)",
 				"m":          "\001e\002",
-				"n":          []interface{}{"first", "second"},
+				"n":          []any{"first", "second"},
 				"o":          "cde",
 				"p":          nil,
 			},
 		},
-	).ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0), le)
+	).ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0), le))
 }
 
 func TestEventMode(t *testing.T) {
@@ -143,7 +129,7 @@ func TestEventMode(t *testing.T) {
 
 func TestTimeFromTimestampBadType(t *testing.T) {
 	_, err := timeFromTimestamp("bad")
-	require.NotNil(t, err)
+	require.Error(t, err)
 }
 
 func TestMessageEventConversionWithErrors(t *testing.T) {
@@ -162,7 +148,7 @@ func TestMessageEventConversionWithErrors(t *testing.T) {
 
 			var event MessageEventLogRecord
 			err := event.DecodeMsg(reader)
-			require.NotNil(t, err)
+			require.Error(t, err)
 		})
 	}
 }
@@ -176,7 +162,7 @@ func TestForwardEventConversionWithErrors(t *testing.T) {
 
 			var event ForwardEventLogRecords
 			err := event.DecodeMsg(reader)
-			require.NotNil(t, err)
+			require.Error(t, err)
 		})
 	}
 }
@@ -190,7 +176,7 @@ func TestPackedForwardEventConversionWithErrors(t *testing.T) {
 
 			var event PackedForwardEventLogRecords
 			err := event.DecodeMsg(reader)
-			require.NotNil(t, err)
+			require.Error(t, err)
 		})
 	}
 
@@ -202,8 +188,7 @@ func TestPackedForwardEventConversionWithErrors(t *testing.T) {
 
 		var event PackedForwardEventLogRecords
 		err := event.DecodeMsg(reader)
-		require.NotNil(t, err)
-		require.Contains(t, err.Error(), "gzip")
+		require.ErrorContains(t, err, "gzip")
 		fmt.Println(err.Error())
 	})
 }
@@ -236,31 +221,27 @@ func TestBodyConversion(t *testing.T) {
 
 	var event MessageEventLogRecord
 	err = event.DecodeMsg(reader)
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	le := event.LogRecords().At(0)
-	le.Attributes().Sort()
 
 	body := pcommon.NewValueMap()
-	body.MapVal().UpsertString("a", "value")
+	body.Map().PutStr("a", "value")
 
-	bv := body.MapVal().UpsertEmptySlice("b")
-	bv.AppendEmpty().SetStringVal("first")
-	bv.AppendEmpty().SetStringVal("second")
+	bv := body.Map().PutEmptySlice("b")
+	bv.AppendEmpty().SetStr("first")
+	bv.AppendEmpty().SetStr("second")
 
-	cv := body.MapVal().UpsertEmptyMap("c")
-	cv.UpsertInt("d", 24)
+	cv := body.Map().PutEmptyMap("c")
+	cv.PutInt("d", 24)
 
-	// Sort the map, sometimes may get in a different order.
-	require.Equal(t, pcommon.ValueTypeMap, le.Body().Type())
-	le.Body().MapVal().Sort()
-	assert.EqualValues(t, Logs(
+	require.NoError(t, plogtest.CompareLogRecord(logConstructor(
 		Log{
 			Timestamp: 5000000000000,
 			Body:      body,
-			Attributes: map[string]interface{}{
+			Attributes: map[string]any{
 				"fluent.tag": "my-tag",
 			},
 		},
-	).ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0), le)
+	).ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0), le))
 }

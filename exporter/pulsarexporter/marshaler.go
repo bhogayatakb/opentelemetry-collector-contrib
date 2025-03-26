@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package pulsarexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/pulsarexporter"
 
@@ -50,8 +39,8 @@ type LogsMarshaler interface {
 
 // tracesMarshalers returns map of supported encodings with TracesMarshaler.
 func tracesMarshalers() map[string]TracesMarshaler {
-	otlpProto := newPdataTracesMarshaler(ptrace.NewProtoMarshaler(), defaultEncoding)
-	otlpJSON := newPdataTracesMarshaler(ptrace.NewJSONMarshaler(), "otlp_json")
+	otlpProto := newPdataTracesMarshaler(&ptrace.ProtoMarshaler{}, defaultEncoding)
+	otlpJSON := newPdataTracesMarshaler(&ptrace.JSONMarshaler{}, "otlp_json")
 	jaegerProto := jaegerMarshaler{marshaler: jaegerProtoBatchMarshaler{}}
 	jaegerJSON := jaegerMarshaler{marshaler: newJaegerJSONMarshaler()}
 	return map[string]TracesMarshaler{
@@ -64,8 +53,8 @@ func tracesMarshalers() map[string]TracesMarshaler {
 
 // metricsMarshalers returns map of supported encodings and MetricsMarshaler
 func metricsMarshalers() map[string]MetricsMarshaler {
-	proto := newPdataMetricsMarshaler(pmetric.NewProtoMarshaler(), defaultEncoding)
-	json := newPdataMetricsMarshaler(pmetric.NewJSONMarshaler(), "otlp_json")
+	proto := newPdataMetricsMarshaler(&pmetric.ProtoMarshaler{}, defaultEncoding)
+	json := newPdataMetricsMarshaler(&pmetric.JSONMarshaler{}, "otlp_json")
 	return map[string]MetricsMarshaler{
 		proto.Encoding(): proto,
 		json.Encoding():  json,
@@ -74,8 +63,8 @@ func metricsMarshalers() map[string]MetricsMarshaler {
 
 // logsMarshalers returns map of supported encodings and LogsMarshaler
 func logsMarshalers() map[string]LogsMarshaler {
-	proto := newPdataLogsMarshaler(plog.NewProtoMarshaler(), defaultEncoding)
-	json := newPdataLogsMarshaler(plog.NewJSONMarshaler(), "otlp_json")
+	proto := newPdataLogsMarshaler(&plog.ProtoMarshaler{}, defaultEncoding)
+	json := newPdataLogsMarshaler(&plog.JSONMarshaler{}, "otlp_json")
 	return map[string]LogsMarshaler{
 		proto.Encoding(): proto,
 		json.Encoding():  json,

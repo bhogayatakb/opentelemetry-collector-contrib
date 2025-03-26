@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package asapauthextension
 
@@ -20,22 +9,19 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configtest"
+	"go.opentelemetry.io/collector/extension/extensiontest"
 )
 
 func TestCreateDefaultConfig(t *testing.T) {
 	// prepare and test
-	expected := &Config{
-		ExtensionSettings: config.NewExtensionSettings(config.NewComponentID(typeStr)),
-	}
+	expected := &Config{}
 
 	// test
 	cfg := createDefaultConfig()
 
 	// verify
 	assert.Equal(t, expected, cfg)
-	assert.NoError(t, configtest.CheckConfigStruct(cfg))
+	assert.NoError(t, componenttest.CheckConfigStruct(cfg))
 }
 
 func TestNewFactory(t *testing.T) {
@@ -43,7 +29,7 @@ func TestNewFactory(t *testing.T) {
 	assert.NotNil(t, f)
 }
 
-func TestCreateExtension(t *testing.T) {
+func TestCreate(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	testKey := privateKey
 
@@ -86,11 +72,11 @@ func TestCreateExtension(t *testing.T) {
 			cfg.PrivateKey = testcase.settings.PrivateKey
 
 			// validate extension creation
-			ext, err := createExtension(context.Background(), componenttest.NewNopExtensionCreateSettings(), cfg)
+			ext, err := createExtension(context.Background(), extensiontest.NewNopSettings(extensiontest.NopType), cfg)
 			if testcase.shouldError {
 				assert.Error(t, err)
 			} else {
-				assert.Nil(t, err)
+				assert.NoError(t, err)
 				assert.NotNil(t, ext)
 			}
 		})

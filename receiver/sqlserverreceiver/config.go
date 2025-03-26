@@ -1,27 +1,70 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package sqlserverreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/sqlserverreceiver"
 
 import (
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
+	"errors"
+
+	"go.opentelemetry.io/collector/config/configopaque"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/sqlserverreceiver/internal/metadata"
 )
 
+type TopQueryCollection struct {
+	// Enabled enables the collection of the top queries by the execution time.
+	// It will collect the top N queries based on totalElapsedTimeDiffs during the last collection interval.
+	// The query statement will also be reported, hence, it is not ideal to send it as a metric. Hence
+	// we are reporting them as logs.
+	// The `N` is configured via `TopQueryCount`
+	Enabled             bool `mapstructure:"enabled"`
+	LookbackTime        uint `mapstructure:"lookback_time"`
+	MaxQuerySampleCount uint `mapstructure:"max_query_sample_count"`
+	TopQueryCount       uint `mapstructure:"top_query_count"`
+}
+
 // Config defines configuration for a sqlserver receiver.
 type Config struct {
-	scraperhelper.ScraperControllerSettings `mapstructure:",squash"`
-	Metrics                                 metadata.MetricsSettings `mapstructure:"metrics"`
+	scraperhelper.ControllerConfig `mapstructure:",squash"`
+	metadata.MetricsBuilderConfig  `mapstructure:",squash"`
+	// EnableTopQueryCollection enables the collection of the top queries by the execution time.
+	// It will collect the top N queries based on totalElapsedTimeDiffs during the last collection interval.
+	// The query statement will also be reported, hence, it is not ideal to send it as a metric. Hence
+	// we are reporting them as logs.
+	// The `N` is configured via `TopQueryCount`
+	TopQueryCollection `mapstructure:"top_query_collection"`
+
+	InstanceName string `mapstructure:"instance_name"`
+	ComputerName string `mapstructure:"computer_name"`
+
+	// The following options currently do nothing. Functionality will be added in a future PR.
+	Password configopaque.String `mapstructure:"password"`
+	Port     uint                `mapstructure:"port"`
+	Server   string              `mapstructure:"server"`
+	Username string              `mapstructure:"username"`
+}
+
+func (cfg *Config) Validate() error {
+	err := cfg.validateInstanceAndComputerName()
+	if err != nil {
+		return err
+	}
+
+	if cfg.TopQueryCollection.MaxQuerySampleCount > 10000 {
+		return errors.New("`max_query_sample_count` must be between 0 and 10000")
+	}
+
+	if cfg.TopQueryCount > cfg.TopQueryCollection.MaxQuerySampleCount {
+		return errors.New("`top_query_count` must be less than or equal to `max_query_sample_count`")
+	}
+
+	if !directDBConnectionEnabled(cfg) {
+		if cfg.Server != "" || cfg.Username != "" || string(cfg.Password) != "" {
+			return errors.New("Found one or more of the following configuration options set: [server, port, username, password]. " +
+				"All of these options must be configured to directly connect to a SQL Server instance.")
+		}
+	}
+
+	return nil
 }

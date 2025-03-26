@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package prometheusexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter"
 
@@ -19,43 +8,37 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter/internal/metadata"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/resourcetotelemetry"
 )
 
-const (
-	// The value of "type" key in configuration.
-	typeStr = "prometheus"
-	// The stability level of the exporter.
-	stability = component.StabilityLevelBeta
-)
-
 // NewFactory creates a new Prometheus exporter factory.
-func NewFactory() component.ExporterFactory {
-	return component.NewExporterFactory(
-		typeStr,
+func NewFactory() exporter.Factory {
+	return exporter.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		component.WithMetricsExporter(createMetricsExporter, stability))
+		exporter.WithMetrics(createMetricsExporter, metadata.MetricsStability))
 }
 
-func createDefaultConfig() config.Exporter {
+func createDefaultConfig() component.Config {
 	return &Config{
-		ExporterSettings:  config.NewExporterSettings(config.NewComponentID(typeStr)),
 		ConstLabels:       map[string]string{},
 		SendTimestamps:    false,
 		MetricExpiration:  time.Minute * 5,
 		EnableOpenMetrics: false,
+		AddMetricSuffixes: true,
 	}
 }
 
 func createMetricsExporter(
 	ctx context.Context,
-	set component.ExporterCreateSettings,
-	cfg config.Exporter,
-) (component.MetricsExporter, error) {
+	set exporter.Settings,
+	cfg component.Config,
+) (exporter.Metrics, error) {
 	pcfg := cfg.(*Config)
 
 	prometheus, err := newPrometheusExporter(pcfg, set)
@@ -63,26 +46,26 @@ func createMetricsExporter(
 		return nil, err
 	}
 
-	exporter, err := exporterhelper.NewMetricsExporter(
+	exporter, err := exporterhelper.NewMetrics(
 		ctx,
 		set,
 		cfg,
 		prometheus.ConsumeMetrics,
-		exporterhelper.WithCapabilities(consumer.Capabilities{MutatesData: false}),
 		exporterhelper.WithStart(prometheus.Start),
 		exporterhelper.WithShutdown(prometheus.Shutdown),
+		exporterhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	return &wrapMetricsExporter{
-		MetricsExporter: resourcetotelemetry.WrapMetricsExporter(pcfg.ResourceToTelemetrySettings, exporter),
-		exporter:        prometheus,
+		Metrics:  resourcetotelemetry.WrapMetricsExporter(pcfg.ResourceToTelemetrySettings, exporter),
+		exporter: prometheus,
 	}, nil
 }
 
 type wrapMetricsExporter struct {
-	component.MetricsExporter
+	exporter.Metrics
 	exporter *prometheusExporter
 }

@@ -1,31 +1,24 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package cloudfoundryreceiver
 
 import (
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/configtls"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/cloudfoundryreceiver/internal/metadata"
 )
 
 func TestLoadConfig(t *testing.T) {
@@ -34,27 +27,27 @@ func TestLoadConfig(t *testing.T) {
 	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
 	require.NoError(t, err)
 
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = "https://log-stream.sys.example.internal"
+	clientConfig.TLSSetting = configtls.ClientConfig{
+		InsecureSkipVerify: true,
+	}
+	clientConfig.Timeout = time.Second * 20
+
 	tests := []struct {
-		id           config.ComponentID
-		expected     config.Receiver
+		id           component.ID
+		expected     component.Config
 		errorMessage string
 	}{
 		{
-			id: config.NewComponentIDWithName(typeStr, "one"),
+			id: component.NewIDWithName(metadata.Type, "one"),
 			expected: &Config{
-				ReceiverSettings: config.NewReceiverSettings(config.NewComponentID(typeStr)),
 				RLPGateway: RLPGatewayConfig{
-					HTTPClientSettings: confighttp.HTTPClientSettings{
-						Endpoint: "https://log-stream.sys.example.internal",
-						TLSSetting: configtls.TLSClientSetting{
-							InsecureSkipVerify: true,
-						},
-						Timeout: time.Second * 20,
-					},
-					ShardID: "otel-test",
+					ClientConfig: clientConfig,
+					ShardID:      "otel-test",
 				},
 				UAA: UAAConfig{
-					LimitedHTTPClientSettings: LimitedHTTPClientSettings{
+					LimitedClientConfig: LimitedClientConfig{
 						Endpoint: "https://uaa.sys.example.internal",
 						TLSSetting: LimitedTLSClientSetting{
 							InsecureSkipVerify: true,
@@ -66,12 +59,31 @@ func TestLoadConfig(t *testing.T) {
 			},
 		},
 		{
-			id:           config.NewComponentIDWithName(typeStr, "empty"),
+			id:           component.NewIDWithName(metadata.Type, "empty"),
 			errorMessage: "UAA password not specified",
 		},
 		{
-			id:           config.NewComponentIDWithName(typeStr, "invalid"),
+			id:           component.NewIDWithName(metadata.Type, "invalid"),
 			errorMessage: "failed to parse rlp_gateway.endpoint as url: parse \"https://[invalid\": missing ']' in host",
+		},
+		{
+			id: component.NewIDWithName(metadata.Type, "shardidnotdefined"),
+			expected: &Config{
+				RLPGateway: RLPGatewayConfig{
+					ClientConfig: clientConfig,
+					ShardID:      "opentelemetry",
+				},
+				UAA: UAAConfig{
+					LimitedClientConfig: LimitedClientConfig{
+						Endpoint: "https://uaa.sys.example.internal",
+						TLSSetting: LimitedTLSClientSetting{
+							InsecureSkipVerify: true,
+						},
+					},
+					Username: "admin",
+					Password: "test",
+				},
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -81,13 +93,13 @@ func TestLoadConfig(t *testing.T) {
 
 			sub, err := cm.Sub(tt.id.String())
 			require.NoError(t, err)
-			require.NoError(t, config.UnmarshalReceiver(sub, cfg))
+			require.NoError(t, sub.Unmarshal(cfg))
 
 			if tt.expected == nil {
-				assert.EqualError(t, cfg.Validate(), tt.errorMessage)
+				assert.EqualError(t, xconfmap.Validate(cfg), tt.errorMessage)
 				return
 			}
-			assert.NoError(t, cfg.Validate())
+			assert.NoError(t, xconfmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}
@@ -107,32 +119,36 @@ func TestInvalidConfigValidation(t *testing.T) {
 	require.Error(t, configuration.Validate())
 
 	configuration = loadSuccessfulConfig(t)
+	configuration.RLPGateway.ShardID = ""
+	require.Error(t, configuration.Validate())
+
+	configuration = loadSuccessfulConfig(t)
 	configuration.UAA.Endpoint = "https://[invalid"
 	require.Error(t, configuration.Validate())
 }
 
 func TestHTTPConfigurationStructConsistency(t *testing.T) {
-	// LimitedHTTPClientSettings must have the same structure as HTTPClientSettings, but without the fields that the UAA
+	// LimitedClientConfig must have the same structure as ClientConfig, but without the fields that the UAA
 	// library does not support.
-	checkTypeFieldMatch(t, "Endpoint", reflect.TypeOf(LimitedHTTPClientSettings{}), reflect.TypeOf(confighttp.HTTPClientSettings{}))
-	checkTypeFieldMatch(t, "TLSSetting", reflect.TypeOf(LimitedHTTPClientSettings{}), reflect.TypeOf(confighttp.HTTPClientSettings{}))
-	checkTypeFieldMatch(t, "InsecureSkipVerify", reflect.TypeOf(LimitedTLSClientSetting{}), reflect.TypeOf(configtls.TLSClientSetting{}))
+	checkTypeFieldMatch(t, "Endpoint", reflect.TypeOf(LimitedClientConfig{}), reflect.TypeOf(confighttp.NewDefaultClientConfig()))
+	checkTypeFieldMatch(t, "TLSSetting", reflect.TypeOf(LimitedClientConfig{}), reflect.TypeOf(confighttp.NewDefaultClientConfig()))
+	checkTypeFieldMatch(t, "InsecureSkipVerify", reflect.TypeOf(LimitedTLSClientSetting{}), reflect.TypeOf(configtls.ClientConfig{}))
 }
 
 func loadSuccessfulConfig(t *testing.T) *Config {
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Endpoint = "https://log-stream.sys.example.internal"
+	clientConfig.Timeout = time.Second * 20
+	clientConfig.TLSSetting = configtls.ClientConfig{
+		InsecureSkipVerify: true,
+	}
 	configuration := &Config{
 		RLPGateway: RLPGatewayConfig{
-			HTTPClientSettings: confighttp.HTTPClientSettings{
-				Endpoint: "https://log-stream.sys.example.internal",
-				Timeout:  time.Second * 20,
-				TLSSetting: configtls.TLSClientSetting{
-					InsecureSkipVerify: true,
-				},
-			},
-			ShardID: "otel-test",
+			ClientConfig: clientConfig,
+			ShardID:      "otel-test",
 		},
 		UAA: UAAConfig{
-			LimitedHTTPClientSettings: LimitedHTTPClientSettings{
+			LimitedClientConfig: LimitedClientConfig{
 				Endpoint: "https://uaa.sys.example.internal",
 				TLSSetting: LimitedTLSClientSetting{
 					InsecureSkipVerify: true,
@@ -153,5 +169,10 @@ func checkTypeFieldMatch(t *testing.T, fieldName string, localType reflect.Type,
 
 	require.True(t, localFieldPresent, "field %s present in local type", fieldName)
 	require.True(t, standardFieldPresent, "field %s present in standard type", fieldName)
-	require.Equal(t, localField.Tag, standardField.Tag, "field %s tag match", fieldName)
+
+	// Check that the mapstructure tag is not empty
+	require.GreaterOrEqual(t, len(strings.Split(localField.Tag.Get("mapstructure"), ",")), 1)
+
+	// Check that the configuration key names are the same, ignoring other tags like omitempty.
+	require.Equal(t, localField.Tag.Get("mapstructure")[0], standardField.Tag.Get("mapstructure")[0], "field %s tag match", fieldName)
 }

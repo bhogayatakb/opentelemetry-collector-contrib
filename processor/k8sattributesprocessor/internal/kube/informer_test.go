@@ -1,16 +1,5 @@
-// Copyright 2020 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package kube
 
@@ -44,6 +33,13 @@ func Test_newSharedNamespaceInformer(t *testing.T) {
 	assert.NotNil(t, informer)
 }
 
+func Test_newKubeSystemSharedInformer(t *testing.T) {
+	client, err := newFakeAPIClientset(k8sconfig.APIConfig{})
+	require.NoError(t, err)
+	informer := newKubeSystemSharedInformer(client)
+	assert.NotNil(t, informer)
+}
+
 func Test_informerListFuncWithSelectors(t *testing.T) {
 	ls, fs, err := selectorsFromFilters(Filters{
 		Fields: []FieldFilter{
@@ -53,7 +49,7 @@ func Test_informerListFuncWithSelectors(t *testing.T) {
 				Op:    selection.Equals,
 			},
 		},
-		Labels: []FieldFilter{
+		Labels: []LabelFilter{
 			{
 				Key:   "lk1",
 				Value: "lv1",
@@ -90,7 +86,7 @@ func Test_informerWatchFuncWithSelectors(t *testing.T) {
 				Op:    selection.Equals,
 			},
 		},
-		Labels: []FieldFilter{
+		Labels: []LabelFilter{
 			{
 				Key:   "lk1",
 				Value: "lv1",
@@ -123,7 +119,8 @@ func Test_fakeInformer(t *testing.T) {
 	c, err := newFakeAPIClientset(k8sconfig.APIConfig{})
 	assert.NoError(t, err)
 	i := NewFakeInformer(c, "ns", nil, nil)
-	i.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{}, time.Second)
+	_, err = i.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{}, time.Second)
+	assert.NoError(t, err)
 	i.HasSynced()
 	i.LastSyncResourceVersion()
 	store := i.GetStore()
@@ -135,7 +132,8 @@ func Test_fakeNamespaceInformer(t *testing.T) {
 	c, err := newFakeAPIClientset(k8sconfig.APIConfig{})
 	assert.NoError(t, err)
 	i := NewFakeNamespaceInformer(c)
-	i.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{}, time.Second)
+	_, err = i.AddEventHandlerWithResyncPeriod(cache.ResourceEventHandlerFuncs{}, time.Second)
+	assert.NoError(t, err)
 	i.HasSynced()
 	i.LastSyncResourceVersion()
 	store := i.GetStore()

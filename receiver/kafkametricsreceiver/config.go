@@ -1,35 +1,25 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package kafkametricsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kafkametricsreceiver"
 
 import (
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
+	"time"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/kafkaexporter"
+	"go.opentelemetry.io/collector/confmap"
+	"go.opentelemetry.io/collector/scraper/scraperhelper"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/kafka/configkafka"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kafkametricsreceiver/internal/metadata"
 )
 
 // Config represents user settings for kafkametrics receiver
 type Config struct {
-	scraperhelper.ScraperControllerSettings `mapstructure:",squash"`
+	scraperhelper.ControllerConfig `mapstructure:",squash"`
+	configkafka.ClientConfig       `mapstructure:",squash"`
 
-	// The list of kafka brokers (default localhost:9092)
-	Brokers []string `mapstructure:"brokers"`
-
-	// ProtocolVersion Kafka protocol version
-	ProtocolVersion string `mapstructure:"protocol_version"`
+	// Alias name of the kafka cluster
+	ClusterAlias string `mapstructure:"cluster_alias"`
 
 	// TopicMatch topics to collect metrics on
 	TopicMatch string `mapstructure:"topic_match"`
@@ -37,15 +27,40 @@ type Config struct {
 	// GroupMatch consumer groups to collect on
 	GroupMatch string `mapstructure:"group_match"`
 
-	// Authentication data
-	Authentication kafkaexporter.Authentication `mapstructure:"auth"`
+	// Cluster metadata refresh frequency
+	// Configures the refresh frequency to update cached cluster metadata
+	// Defaults to 10 minutes from Sarama library
+	//
+	// If Metadata.RefreshInterval is set, this will be ignored.
+	//
+	// Deprecated [v0.122.0]: use Metadata.RefreshInterval instead.
+	RefreshFrequency time.Duration `mapstructure:"refresh_frequency"`
 
 	// Scrapers defines which metric data points to be captured from kafka
 	Scrapers []string `mapstructure:"scrapers"`
 
-	// ClientID is the id associated with the consumer that reads from topics in kafka.
-	ClientID string `mapstructure:"client_id"`
+	// MetricsBuilderConfig allows customizing scraped metrics/attributes representation.
+	metadata.MetricsBuilderConfig `mapstructure:",squash"`
+}
 
-	// Metrics allows customizing scraped metrics representation.
-	Metrics metadata.MetricsSettings `mapstructure:"metrics"`
+func (c *Config) Unmarshal(conf *confmap.Conf) error {
+	if refreshFrequency := conf.Get("refresh_frequency"); refreshFrequency != nil {
+		metadataConf, err := conf.Sub("metadata")
+		if err != nil {
+			return err
+		}
+		if !metadataConf.IsSet("refresh_interval") {
+			// User has not explicitly set metadata.refresh_interval,
+			// but they have set the (deprecated) refresh_frequency,
+			// so use that.
+			if err := conf.Merge(confmap.NewFromStringMap(map[string]any{
+				"metadata": map[string]any{
+					"refresh_interval": refreshFrequency,
+				},
+			})); err != nil {
+				return err
+			}
+		}
+	}
+	return conf.Unmarshal(c)
 }

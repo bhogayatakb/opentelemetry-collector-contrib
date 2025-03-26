@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package batch // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/awskinesisexporter/internal/batch"
 
@@ -56,13 +45,13 @@ func NewEncoder(named string, batchOptions ...Option) (Encoder, error) {
 	case "zipkin_json":
 		bm.tracesMarshaller = zipkinv2.NewJSONTracesMarshaler()
 	case "otlp", "otlp_proto":
-		bm.logsMarshaller = plog.NewProtoMarshaler()
-		bm.metricsMarshaller = pmetric.NewProtoMarshaler()
-		bm.tracesMarshaller = ptrace.NewProtoMarshaler()
+		bm.logsMarshaller = &plog.ProtoMarshaler{}
+		bm.metricsMarshaller = &pmetric.ProtoMarshaler{}
+		bm.tracesMarshaller = &ptrace.ProtoMarshaler{}
 	case "otlp_json":
-		bm.logsMarshaller = plog.NewJSONMarshaler()
-		bm.metricsMarshaller = pmetric.NewJSONMarshaler()
-		bm.tracesMarshaller = ptrace.NewJSONMarshaler()
+		bm.logsMarshaller = &plog.JSONMarshaler{}
+		bm.metricsMarshaller = &pmetric.JSONMarshaler{}
+		bm.tracesMarshaller = &ptrace.JSONMarshaler{}
 	case "jaeger_proto":
 		// Jaeger encoding is a special case
 		// since the internal libraries offer no means of ptrace.TraceMarshaller.

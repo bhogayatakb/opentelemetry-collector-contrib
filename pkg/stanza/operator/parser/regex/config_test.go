@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//	http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 package regex
 
 import (
@@ -19,7 +8,7 @@ import (
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper/operatortest"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/operatortest"
 )
 
 func TestParserGoldenConfig(t *testing.T) {
@@ -51,7 +40,7 @@ func TestParserGoldenConfig(t *testing.T) {
 				Name: "parse_to_simple",
 				Expect: func() *Config {
 					cfg := NewConfig()
-					cfg.ParseTo = entry.NewBodyField("log")
+					cfg.ParseTo = entry.RootableField{Field: entry.NewBodyField("log")}
 					return cfg
 				}(),
 			},
@@ -84,14 +73,14 @@ func TestParserGoldenConfig(t *testing.T) {
 					parseField := entry.NewBodyField("severity_field")
 					severityParser := helper.NewSeverityConfig()
 					severityParser.ParseFrom = &parseField
-					mapping := map[interface{}]interface{}{
+					mapping := map[string]any{
 						"critical": "5xx",
 						"error":    "4xx",
 						"info":     "3xx",
 						"debug":    "2xx",
 					}
 					severityParser.Mapping = mapping
-					cfg.Config = &severityParser
+					cfg.SeverityConfig = &severityParser
 					return cfg
 				}(),
 			},
@@ -113,6 +102,30 @@ func TestParserGoldenConfig(t *testing.T) {
 					loggerNameParser.ParseFrom = parseField
 					cfg.ScopeNameParser = &loggerNameParser
 					return cfg
+				}(),
+			},
+			{
+				Name: "parse_to_attributes",
+				Expect: func() *Config {
+					p := NewConfig()
+					p.ParseTo = entry.RootableField{Field: entry.NewAttributeField()}
+					return p
+				}(),
+			},
+			{
+				Name: "parse_to_body",
+				Expect: func() *Config {
+					p := NewConfig()
+					p.ParseTo = entry.RootableField{Field: entry.NewBodyField()}
+					return p
+				}(),
+			},
+			{
+				Name: "parse_to_resource",
+				Expect: func() *Config {
+					p := NewConfig()
+					p.ParseTo = entry.RootableField{Field: entry.NewResourceField()}
+					return p
 				}(),
 			},
 		},

@@ -1,60 +1,59 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package redisreceiver
 
 import (
 	"context"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/receiver/receivertest"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/redisreceiver/internal/metadata"
 )
 
 func TestRedisRunnable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/38955")
+	}
 	logger, _ := zap.NewDevelopment()
-	settings := componenttest.NewNopReceiverCreateSettings()
+	settings := receivertest.NewNopSettings(metadata.Type)
 	settings.Logger = logger
 	cfg := createDefaultConfig().(*Config)
-	rs := &redisScraper{mb: metadata.NewMetricsBuilder(cfg.Metrics, settings.BuildInfo)}
+	cfg.Endpoint = "localhost:6379"
+	rs := &redisScraper{mb: metadata.NewMetricsBuilder(cfg.MetricsBuilderConfig, settings)}
 	runner, err := newRedisScraperWithClient(newFakeClient(), settings, cfg)
 	require.NoError(t, err)
-	md, err := runner.Scrape(context.Background())
+	md, err := runner.ScrapeMetrics(context.Background())
 	require.NoError(t, err)
-	// + 6 because there are two keyspace entries each of which has three metrics
-	// -1 because maxmemory is by default disabled, so recorder is there, but there won't be data point
-	assert.Equal(t, len(rs.dataPointRecorders())+6-1, md.DataPointCount())
+	// + 9 because there are three keyspace entries each of which has three metrics
+	// -2 because maxmemory and slave_repl_offset is by default disabled, so recorder is there, but there won't be data point
+	assert.Equal(t, len(rs.dataPointRecorders())+9-2, md.DataPointCount())
 	rm := md.ResourceMetrics().At(0)
 	ilm := rm.ScopeMetrics().At(0)
 	il := ilm.Scope()
-	assert.Equal(t, "otelcol/redisreceiver", il.Name())
+	assert.Equal(t, "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/redisreceiver", il.Name())
+}
+
+func TestNewReceiver_invalid_endpoint(t *testing.T) {
+	c := createDefaultConfig().(*Config)
+	_, err := createMetricsReceiver(context.Background(), receivertest.NewNopSettings(metadata.Type), c, nil)
+	assert.ErrorContains(t, err, "invalid endpoint")
 }
 
 func TestNewReceiver_invalid_auth_error(t *testing.T) {
 	c := createDefaultConfig().(*Config)
-	c.TLS = configtls.TLSClientSetting{
-		TLSSetting: configtls.TLSSetting{
+	c.TLS = configtls.ClientConfig{
+		Config: configtls.Config{
 			CAFile: "/invalid",
 		},
 	}
-	r, err := createMetricsReceiver(context.Background(), componenttest.NewNopReceiverCreateSettings(), c, nil)
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to load TLS config")
+	r, err := createMetricsReceiver(context.Background(), receivertest.NewNopSettings(metadata.Type), c, nil)
+	assert.ErrorContains(t, err, "failed to load TLS config")
 	assert.Nil(t, r)
 }

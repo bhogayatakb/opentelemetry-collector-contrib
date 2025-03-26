@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package internal // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
 
@@ -23,16 +12,11 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
-func AssertContainsAttribute(t *testing.T, attr pcommon.Map, key string) {
-	_, ok := attr.Get(key)
-	assert.True(t, ok)
-}
-
 func AssertDescriptorEqual(t *testing.T, expected pmetric.Metric, actual pmetric.Metric) {
 	assert.Equal(t, expected.Name(), actual.Name())
 	assert.Equal(t, expected.Description(), actual.Description())
 	assert.Equal(t, expected.Unit(), actual.Unit())
-	assert.Equal(t, expected.DataType(), actual.DataType())
+	assert.Equal(t, expected.Type(), actual.Type())
 }
 
 func AssertSumMetricHasAttributeValue(t *testing.T, metric pmetric.Metric, index int, labelName string, expectedVal pcommon.Value) {
@@ -70,6 +54,7 @@ func AssertGaugeMetricStartTimeEquals(t *testing.T, metric pmetric.Metric, start
 		require.Equal(t, startTime, ddps.At(i).StartTimestamp())
 	}
 }
+
 func AssertSameTimeStampForAllMetrics(t *testing.T, metrics pmetric.MetricSlice) {
 	AssertSameTimeStampForMetrics(t, metrics, 0, metrics.Len())
 }
@@ -78,7 +63,7 @@ func AssertSameTimeStampForMetrics(t *testing.T, metrics pmetric.MetricSlice, st
 	var ts pcommon.Timestamp
 	for i := startIdx; i < endIdx; i++ {
 		metric := metrics.At(i)
-		if metric.DataType() == pmetric.MetricDataTypeSum {
+		if metric.Type() == pmetric.MetricTypeSum {
 			ddps := metric.Sum().DataPoints()
 			for j := 0; j < ddps.Len(); j++ {
 				if ts == 0 {

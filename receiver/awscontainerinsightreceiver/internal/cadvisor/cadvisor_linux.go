@@ -1,21 +1,8 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build linux
-// +build linux
 
-// nolint:errcheck,gocritic
 package cadvisor // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awscontainerinsightreceiver/internal/cadvisor"
 
 import (
@@ -64,7 +51,7 @@ type cadvisorManager interface {
 }
 
 // define a function type for creating a cadvisor manager
-type createCadvisorManager func(*memory.InMemoryCache, sysfs.SysFs, manager.HouskeepingConfig, cadvisormetrics.MetricSet, *http.Client,
+type createCadvisorManager func(*memory.InMemoryCache, sysfs.SysFs, manager.HousekeepingConfig, cadvisormetrics.MetricSet, *http.Client,
 	[]string, string) (cadvisorManager, error)
 
 // this is the default function that are used in production code to create a cadvisor manager
@@ -73,10 +60,11 @@ type createCadvisorManager func(*memory.InMemoryCache, sysfs.SysFs, manager.Hous
 // createCadvisorManager() to create a mock. However this means that we will not be able
 // to unit test the code in `initManager(...)`. For now, I will leave code as it is. Hopefully we can find
 // a better way to mock the cadvisor related part in the future.
-var defaultCreateManager = func(memoryCache *memory.InMemoryCache, sysfs sysfs.SysFs, houskeepingConfig manager.HouskeepingConfig,
+var defaultCreateManager = func(memoryCache *memory.InMemoryCache, sysfs sysfs.SysFs, housekeepingConfig manager.HousekeepingConfig,
 	includedMetricsSet cadvisormetrics.MetricSet, collectorHTTPClient *http.Client, rawContainerCgroupPathPrefixWhiteList []string,
-	perfEventsFile string) (cadvisorManager, error) {
-	return manager.New(memoryCache, sysfs, houskeepingConfig, includedMetricsSet, collectorHTTPClient, rawContainerCgroupPathPrefixWhiteList, []string{}, perfEventsFile, 0)
+	perfEventsFile string,
+) (cadvisorManager, error) {
+	return manager.New(memoryCache, sysfs, housekeepingConfig, includedMetricsSet, collectorHTTPClient, rawContainerCgroupPathPrefixWhiteList, []string{}, perfEventsFile, 0)
 }
 
 // Option is a function that can be used to configure Cadvisor struct
@@ -122,11 +110,12 @@ type EcsInfo interface {
 
 type Decorator interface {
 	Decorate(*extractors.CAdvisorMetric) *extractors.CAdvisorMetric
+	Shutdown() error
 }
 
 type Cadvisor struct {
 	logger                *zap.Logger
-	nodeName              string //get the value from downward API
+	nodeName              string // get the value from downward API
 	createCadvisorManager createCadvisorManager
 	manager               cadvisorManager
 	version               string
@@ -134,6 +123,7 @@ type Cadvisor struct {
 	k8sDecorator          Decorator
 	ecsInfo               EcsInfo
 	containerOrchestrator string
+	metricsExtractors     []extractors.MetricExtractor
 }
 
 func init() {
@@ -170,13 +160,23 @@ func New(containerOrchestrator string, hostInfo hostInfo, logger *zap.Logger, op
 	return c, nil
 }
 
-var metricsExtractors = []extractors.MetricExtractor{}
-
-func GetMetricsExtractors() []extractors.MetricExtractor {
-	return metricsExtractors
+func (c *Cadvisor) GetMetricsExtractors() []extractors.MetricExtractor {
+	return c.metricsExtractors
 }
 
-func (c *Cadvisor) addEbsVolumeInfo(tags map[string]string, ebsVolumeIdsUsedAsPV map[string]string) {
+func (c *Cadvisor) Shutdown() error {
+	var errs error
+	for _, ext := range c.metricsExtractors {
+		errs = errors.Join(errs, ext.Shutdown())
+	}
+
+	if c.k8sDecorator != nil {
+		errs = errors.Join(errs, c.k8sDecorator.Shutdown())
+	}
+	return errs
+}
+
+func (c *Cadvisor) addEbsVolumeInfo(tags map[string]string, ebsVolumeIDsUsedAsPV map[string]string) {
 	deviceName, ok := tags[ci.DiskDev]
 	if !ok {
 		return
@@ -190,14 +190,13 @@ func (c *Cadvisor) addEbsVolumeInfo(tags map[string]string, ebsVolumeIdsUsedAsPV
 
 	if tags[ci.MetricType] == ci.TypeContainerFS || tags[ci.MetricType] == ci.TypeNodeFS ||
 		tags[ci.MetricType] == ci.TypeNodeDiskIO || tags[ci.MetricType] == ci.TypeContainerDiskIO {
-		if volID := ebsVolumeIdsUsedAsPV[deviceName]; volID != "" {
+		if volID := ebsVolumeIDsUsedAsPV[deviceName]; volID != "" {
 			tags[ci.EbsVolumeID] = volID
 		}
 	}
 }
 
 func (c *Cadvisor) addECSMetrics(cadvisormetrics []*extractors.CAdvisorMetric) {
-
 	if len(cadvisormetrics) == 0 {
 		c.logger.Warn("cadvisor can't collect any metrics!")
 	}
@@ -216,7 +215,7 @@ func (c *Cadvisor) addECSMetrics(cadvisormetrics []*extractors.CAdvisorMetric) {
 			if !cpuExist && !memExist {
 				c.logger.Warn("Can't get mem or cpu limit")
 			} else {
-				//cgroup standard cpulimits should be cadvisor standard * 1.024
+				// cgroup standard cpulimits should be cadvisor standard * 1.024
 				metricMap[ci.MetricName(ci.TypeInstance, ci.CPUReservedCapacity)] = float64(cpuReserved) / (float64(cpuLimits.(int64)) * 1.024) * 100
 				metricMap[ci.MetricName(ci.TypeInstance, ci.MemReservedCapacity)] = float64(memReserved) / float64(memLimits.(int64)) * 100
 			}
@@ -256,23 +255,23 @@ func addECSResources(tags map[string]string) {
 }
 
 func (c *Cadvisor) decorateMetrics(cadvisormetrics []*extractors.CAdvisorMetric) []*extractors.CAdvisorMetric {
-	ebsVolumeIdsUsedAsPV := c.hostInfo.ExtractEbsIDsUsedByKubernetes()
+	ebsVolumeIDsUsedAsPV := c.hostInfo.ExtractEbsIDsUsedByKubernetes()
 	var result []*extractors.CAdvisorMetric
 	for _, m := range cadvisormetrics {
 		tags := m.GetTags()
-		c.addEbsVolumeInfo(tags, ebsVolumeIdsUsedAsPV)
+		c.addEbsVolumeInfo(tags, ebsVolumeIDsUsedAsPV)
 
-		//add version
+		// add version
 		tags[ci.Version] = c.version
 
-		//add NodeName for node, pod and container
+		// add NodeName for node, pod and container
 		metricType := tags[ci.MetricType]
 		if c.nodeName != "" && (ci.IsNode(metricType) || ci.IsInstance(metricType) ||
 			ci.IsPod(metricType) || ci.IsContainer(metricType)) {
 			tags[ci.NodeNameKey] = c.nodeName
 		}
 
-		//add instance id and type
+		// add instance id and type
 		if instanceID := c.hostInfo.GetInstanceID(); instanceID != "" {
 			tags[ci.InstanceID] = instanceID
 		}
@@ -280,10 +279,10 @@ func (c *Cadvisor) decorateMetrics(cadvisormetrics []*extractors.CAdvisorMetric)
 			tags[ci.InstanceType] = instanceType
 		}
 
-		//add scaling group name
+		// add scaling group name
 		tags[ci.AutoScalingGroupNameKey] = c.hostInfo.GetAutoScalingGroupName()
 
-		//add ECS cluster name and container instance id
+		// add ECS cluster name and container instance id
 		if c.containerOrchestrator == ci.ECS {
 			if c.ecsInfo.GetClusterName() == "" {
 				c.logger.Warn("Can't get cluster name")
@@ -301,7 +300,6 @@ func (c *Cadvisor) decorateMetrics(cadvisormetrics []*extractors.CAdvisorMetric)
 
 		// add tags for EKS
 		if c.containerOrchestrator == ci.EKS {
-
 			tags[ci.ClusterNameKey] = c.hostInfo.GetClusterName()
 
 			out := c.k8sDecorator.Decorate(m)
@@ -309,7 +307,6 @@ func (c *Cadvisor) decorateMetrics(cadvisormetrics []*extractors.CAdvisorMetric)
 				result = append(result, out)
 			}
 		}
-
 	}
 
 	return result
@@ -322,7 +319,7 @@ func (c *Cadvisor) GetMetrics() []pmetric.Metrics {
 	var containerinfos []*cInfo.ContainerInfo
 	var err error
 
-	//For EKS don't emit metrics if the cluster name is not detected
+	// For EKS don't emit metrics if the cluster name is not detected
 	if c.containerOrchestrator == ci.EKS {
 		clusterName := c.hostInfo.GetClusterName()
 		if clusterName == "" {
@@ -341,7 +338,7 @@ func (c *Cadvisor) GetMetrics() []pmetric.Metrics {
 		return result
 	}
 
-	out := processContainers(containerinfos, c.hostInfo, c.containerOrchestrator, c.logger)
+	out := processContainers(containerinfos, c.hostInfo, c.containerOrchestrator, c.logger, c.GetMetricsExtractors())
 	results := c.decorateMetrics(out)
 
 	if c.containerOrchestrator == ci.ECS {
@@ -373,7 +370,7 @@ func (c *Cadvisor) initManager(createManager createCadvisorManager) error {
 		cgroupRoots = []string{"/kubepods"}
 	}
 
-	houseKeepingConfig := manager.HouskeepingConfig{
+	houseKeepingConfig := manager.HousekeepingConfig{
 		Interval:     &maxHousekeepingInterval,
 		AllowDynamic: &allowDynamicHousekeeping,
 	}
@@ -383,10 +380,10 @@ func (c *Cadvisor) initManager(createManager createCadvisorManager) error {
 		c.logger.Error("cadvisor manager allocate failed, ", zap.Error(err))
 		return err
 	}
-	cadvisormetrics.RegisterPlugin("containerd", containerd.NewPlugin())
-	cadvisormetrics.RegisterPlugin("crio", crio.NewPlugin())
-	cadvisormetrics.RegisterPlugin("docker", docker.NewPlugin())
-	cadvisormetrics.RegisterPlugin("systemd", systemd.NewPlugin())
+	_ = cadvisormetrics.RegisterPlugin("containerd", containerd.NewPlugin())
+	_ = cadvisormetrics.RegisterPlugin("crio", crio.NewPlugin())
+	_ = cadvisormetrics.RegisterPlugin("docker", docker.NewPlugin())
+	_ = cadvisormetrics.RegisterPlugin("systemd", systemd.NewPlugin())
 	c.manager = m
 	err = c.manager.Start()
 	if err != nil {
@@ -394,12 +391,12 @@ func (c *Cadvisor) initManager(createManager createCadvisorManager) error {
 		return err
 	}
 
-	metricsExtractors = []extractors.MetricExtractor{}
-	metricsExtractors = append(metricsExtractors, extractors.NewCPUMetricExtractor(c.logger))
-	metricsExtractors = append(metricsExtractors, extractors.NewMemMetricExtractor(c.logger))
-	metricsExtractors = append(metricsExtractors, extractors.NewDiskIOMetricExtractor(c.logger))
-	metricsExtractors = append(metricsExtractors, extractors.NewNetMetricExtractor(c.logger))
-	metricsExtractors = append(metricsExtractors, extractors.NewFileSystemMetricExtractor(c.logger))
+	c.metricsExtractors = make([]extractors.MetricExtractor, 0, 5)
+	c.metricsExtractors = append(c.metricsExtractors, extractors.NewCPUMetricExtractor(c.logger))
+	c.metricsExtractors = append(c.metricsExtractors, extractors.NewMemMetricExtractor(c.logger))
+	c.metricsExtractors = append(c.metricsExtractors, extractors.NewDiskIOMetricExtractor(c.logger))
+	c.metricsExtractors = append(c.metricsExtractors, extractors.NewNetMetricExtractor(c.logger))
+	c.metricsExtractors = append(c.metricsExtractors, extractors.NewFileSystemMetricExtractor(c.logger))
 
 	return nil
 }

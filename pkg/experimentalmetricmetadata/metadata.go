@@ -1,23 +1,12 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package experimentalmetricmetadata // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/experimentalmetricmetadata"
 
 // MetadataExporter provides an interface to implement
 // ConsumeMetadata in Exporters that support metadata.
 // Type, functionality, and interface not guaranteed to be stable or permanent.
-type MetadataExporter interface { //nolint
+type MetadataExporter interface {
 	// ConsumeMetadata will be invoked every time there's an
 	// update to a resource that results in one or more MetadataUpdate.
 	ConsumeMetadata(metadata []*MetadataUpdate) error
@@ -45,7 +34,7 @@ type ResourceID string
 // Apart from Kubernetes labels, the other metadata collected by this
 // receiver are also handled in the same manner.
 // Type, functionality, and fields not guaranteed to be stable or permanent.
-type MetadataDelta struct { //nolint
+type MetadataDelta struct {
 	// MetadataToAdd contains key-value pairs that are newly added to
 	// the resource description in the current revision.
 	MetadataToAdd map[string]string
@@ -60,7 +49,7 @@ type MetadataDelta struct { //nolint
 // MetadataUpdate provides a delta view of metadata on a resource between
 // two revisions of a resource.
 // Type, functionality, and fields not guaranteed to be stable or permanent.
-type MetadataUpdate struct { //nolint
+type MetadataUpdate struct {
 	// ResourceIDKey is the label key of UID label for the resource.
 	ResourceIDKey string
 	// ResourceID is the Kubernetes UID of the resource. In case of

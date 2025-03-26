@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package sampling // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/tailsamplingprocessor/internal/sampling"
 
@@ -22,24 +11,20 @@ import (
 // hasResourceOrSpanWithCondition iterates through all the resources and instrumentation library spans until any
 // callback returns true.
 func hasResourceOrSpanWithCondition(
-	batches []ptrace.Traces,
+	td ptrace.Traces,
 	shouldSampleResource func(resource pcommon.Resource) bool,
 	shouldSampleSpan func(span ptrace.Span) bool,
 ) Decision {
-	for _, batch := range batches {
-		rspans := batch.ResourceSpans()
+	for i := 0; i < td.ResourceSpans().Len(); i++ {
+		rs := td.ResourceSpans().At(i)
 
-		for i := 0; i < rspans.Len(); i++ {
-			rs := rspans.At(i)
+		resource := rs.Resource()
+		if shouldSampleResource(resource) {
+			return Sampled
+		}
 
-			resource := rs.Resource()
-			if shouldSampleResource(resource) {
-				return Sampled
-			}
-
-			if hasInstrumentationLibrarySpanWithCondition(rs.ScopeSpans(), shouldSampleSpan) {
-				return Sampled
-			}
+		if hasInstrumentationLibrarySpanWithCondition(rs.ScopeSpans(), shouldSampleSpan) {
+			return Sampled
 		}
 	}
 	return NotSampled
@@ -48,40 +33,32 @@ func hasResourceOrSpanWithCondition(
 // invertHasResourceOrSpanWithCondition iterates through all the resources and instrumentation library spans until any
 // callback returns false.
 func invertHasResourceOrSpanWithCondition(
-	batches []ptrace.Traces,
+	td ptrace.Traces,
 	shouldSampleResource func(resource pcommon.Resource) bool,
 	shouldSampleSpan func(span ptrace.Span) bool,
 ) Decision {
-	for _, batch := range batches {
-		rspans := batch.ResourceSpans()
+	for i := 0; i < td.ResourceSpans().Len(); i++ {
+		rs := td.ResourceSpans().At(i)
 
-		for i := 0; i < rspans.Len(); i++ {
-			rs := rspans.At(i)
+		resource := rs.Resource()
+		if !shouldSampleResource(resource) {
+			return InvertNotSampled
+		}
 
-			resource := rs.Resource()
-			if !shouldSampleResource(resource) {
-				return InvertNotSampled
-			}
-
-			if !invertHasInstrumentationLibrarySpanWithCondition(rs.ScopeSpans(), shouldSampleSpan) {
-				return InvertNotSampled
-			}
+		if !invertHasInstrumentationLibrarySpanWithCondition(rs.ScopeSpans(), shouldSampleSpan) {
+			return InvertNotSampled
 		}
 	}
 	return InvertSampled
 }
 
 // hasSpanWithCondition iterates through all the instrumentation library spans until any callback returns true.
-func hasSpanWithCondition(batches []ptrace.Traces, shouldSample func(span ptrace.Span) bool) Decision {
-	for _, batch := range batches {
-		rspans := batch.ResourceSpans()
+func hasSpanWithCondition(td ptrace.Traces, shouldSample func(span ptrace.Span) bool) Decision {
+	for i := 0; i < td.ResourceSpans().Len(); i++ {
+		rs := td.ResourceSpans().At(i)
 
-		for i := 0; i < rspans.Len(); i++ {
-			rs := rspans.At(i)
-
-			if hasInstrumentationLibrarySpanWithCondition(rs.ScopeSpans(), shouldSample) {
-				return Sampled
-			}
+		if hasInstrumentationLibrarySpanWithCondition(rs.ScopeSpans(), shouldSample) {
+			return Sampled
 		}
 	}
 	return NotSampled
@@ -115,4 +92,18 @@ func invertHasInstrumentationLibrarySpanWithCondition(ilss ptrace.ScopeSpansSlic
 		}
 	}
 	return true
+}
+
+func SetAttrOnScopeSpans(data *TraceData, attrName string, attrKey string) {
+	data.Mutex.Lock()
+	defer data.Mutex.Unlock()
+
+	rs := data.ReceivedBatches.ResourceSpans()
+	for i := 0; i < rs.Len(); i++ {
+		rss := rs.At(i)
+		for j := 0; j < rss.ScopeSpans().Len(); j++ {
+			ss := rss.ScopeSpans().At(j)
+			ss.Scope().Attributes().PutStr(attrName, attrKey)
+		}
+	}
 }

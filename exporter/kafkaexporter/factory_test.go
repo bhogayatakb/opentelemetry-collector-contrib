@@ -1,174 +1,227 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package kafkaexporter
 
 import (
 	"context"
-	"reflect"
+	"net"
 	"testing"
 
-	"github.com/Shopify/sarama"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config/configtest"
-	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/collector/exporter/exportertest"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/kafkaexporter/internal/metadata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/kafka/configkafka"
 )
+
+// applyConfigOption is used to modify values of the
+// the default exporter config to make it easier to
+// use the return in a test table set up
+func applyConfigOption(option func(conf *Config)) *Config {
+	conf := createDefaultConfig().(*Config)
+	option(conf)
+	return conf
+}
 
 func TestCreateDefaultConfig(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	assert.NotNil(t, cfg, "failed to create default config")
-	assert.NoError(t, configtest.CheckConfigStruct(cfg))
-	assert.Equal(t, []string{defaultBroker}, cfg.Brokers)
+	assert.NoError(t, componenttest.CheckConfigStruct(cfg))
+	assert.Equal(t, configkafka.NewDefaultClientConfig(), cfg.ClientConfig)
 	assert.Equal(t, "", cfg.Topic)
 }
 
-func TestCreateAllExporter(t *testing.T) {
-	cfg0 := createDefaultConfig().(*Config)
-	cfg1 := createDefaultConfig().(*Config)
-	cfg2 := createDefaultConfig().(*Config)
+func TestCreateMetricExporter(t *testing.T) {
+	t.Parallel()
 
-	cfg0.Brokers = []string{"invalid:9092"}
-	cfg1.Brokers = []string{"invalid:9092"}
-	cfg2.Brokers = []string{"invalid:9092"}
+	tests := []struct {
+		name       string
+		conf       *Config
+		marshalers []MetricsMarshaler
+		err        *net.DNSError
+	}{
+		{
+			name: "valid config (no validating broker)",
+			conf: applyConfigOption(func(conf *Config) {
+				// this disables contacting the broker so
+				// we can successfully create the exporter
+				conf.Metadata.Full = false
+				conf.Brokers = []string{"invalid:9092"}
+				conf.ProtocolVersion = "2.0.0"
+			}),
+			err: nil,
+		},
+		{
+			name: "invalid config (validating broker)",
+			conf: applyConfigOption(func(conf *Config) {
+				conf.Brokers = []string{"invalid:9092"}
+				conf.ProtocolVersion = "2.0.0"
+			}),
+			err: &net.DNSError{},
+		},
+		{
+			name: "default_encoding",
+			conf: applyConfigOption(func(conf *Config) {
+				// Disabling broker check to ensure encoding work
+				conf.Metadata.Full = false
+				conf.Encoding = defaultEncoding
+			}),
+			marshalers: nil,
+			err:        nil,
+		},
+	}
 
-	cfg0.ProtocolVersion = "2.0.0"
-	cfg1.ProtocolVersion = "2.0.0"
-	cfg2.ProtocolVersion = "2.0.0"
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	// this disables contacting the broker so we can successfully create the exporter
-	cfg0.Metadata.Full = false
-	cfg1.Metadata.Full = false
-	cfg2.Metadata.Full = false
-
-	cfgClone := *cfg0 // Clone the config
-
-	f := kafkaExporterFactory{tracesMarshalers: tracesMarshalers(), metricsMarshalers: metricsMarshalers(), logsMarshalers: logsMarshalers()}
-	r0, err := f.createTracesExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg0)
-	require.NoError(t, err)
-	r1, err := f.createMetricsExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg1)
-	require.NoError(t, err)
-	r2, err := f.createLogsExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg2)
-	require.NoError(t, err)
-
-	// createTracesExporter should not mutate values
-	assert.True(t, reflect.DeepEqual(*cfg0, cfgClone), "config should not mutate")
-	assert.True(t, reflect.DeepEqual(*cfg1, cfgClone), "config should not mutate")
-	assert.True(t, reflect.DeepEqual(*cfg2, cfgClone), "config should not mutate")
-	assert.NotNil(t, r0)
-	assert.NotNil(t, r1)
-	assert.NotNil(t, r2)
+			f := NewFactory()
+			exporter, err := f.CreateMetrics(
+				context.Background(),
+				exportertest.NewNopSettings(metadata.Type),
+				tc.conf,
+			)
+			require.NoError(t, err)
+			assert.NotNil(t, exporter, "Must return valid exporter")
+			err = exporter.Start(context.Background(), componenttest.NewNopHost())
+			if tc.err != nil {
+				assert.ErrorAs(t, err, &tc.err, "Must match the expected error")
+				return
+			}
+			assert.NoError(t, err, "Must not error")
+			assert.NotNil(t, exporter, "Must return valid exporter when no error is returned")
+			assert.NoError(t, exporter.Shutdown(context.Background()))
+		})
+	}
 }
 
-func TestCreateTracesExporter(t *testing.T) {
-	cfg := createDefaultConfig().(*Config)
-	cfg.Brokers = []string{"invalid:9092"}
-	cfg.ProtocolVersion = "2.0.0"
-	// this disables contacting the broker so we can successfully create the exporter
-	cfg.Metadata.Full = false
-	f := kafkaExporterFactory{tracesMarshalers: tracesMarshalers()}
-	r, err := f.createTracesExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-	require.NoError(t, err)
-	assert.NotNil(t, r)
+func TestCreateLogExporter(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		conf       *Config
+		marshalers []LogsMarshaler
+		err        *net.DNSError
+	}{
+		{
+			name: "valid config (no validating broker)",
+			conf: applyConfigOption(func(conf *Config) {
+				// this disables contacting the broker so
+				// we can successfully create the exporter
+				conf.Metadata.Full = false
+				conf.Brokers = []string{"invalid:9092"}
+				conf.ProtocolVersion = "2.0.0"
+			}),
+			err: nil,
+		},
+		{
+			name: "invalid config (validating broker)",
+			conf: applyConfigOption(func(conf *Config) {
+				conf.Brokers = []string{"invalid:9092"}
+				conf.ProtocolVersion = "2.0.0"
+			}),
+			err: &net.DNSError{},
+		},
+		{
+			name: "default_encoding",
+			conf: applyConfigOption(func(conf *Config) {
+				// Disabling broker check to ensure encoding work
+				conf.Metadata.Full = false
+				conf.Encoding = defaultEncoding
+			}),
+			marshalers: nil,
+			err:        nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := NewFactory()
+			exporter, err := f.CreateLogs(
+				context.Background(),
+				exportertest.NewNopSettings(metadata.Type),
+				tc.conf,
+			)
+			require.NoError(t, err)
+			assert.NotNil(t, exporter, "Must return valid exporter")
+			err = exporter.Start(context.Background(), componenttest.NewNopHost())
+			if tc.err != nil {
+				assert.ErrorAs(t, err, &tc.err, "Must match the expected error")
+				return
+			}
+			assert.NoError(t, err, "Must not error")
+			assert.NotNil(t, exporter, "Must return valid exporter when no error is returned")
+			assert.NoError(t, exporter.Shutdown(context.Background()))
+		})
+	}
 }
 
-func TestCreateMetricsExport(t *testing.T) {
-	cfg := createDefaultConfig().(*Config)
-	cfg.Brokers = []string{"invalid:9092"}
-	cfg.ProtocolVersion = "2.0.0"
-	// this disables contacting the broker so we can successfully create the exporter
-	cfg.Metadata.Full = false
-	mf := kafkaExporterFactory{metricsMarshalers: metricsMarshalers()}
-	mr, err := mf.createMetricsExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-	require.NoError(t, err)
-	assert.NotNil(t, mr)
-}
+func TestCreateTraceExporter(t *testing.T) {
+	t.Parallel()
 
-func TestCreateLogsExport(t *testing.T) {
-	cfg := createDefaultConfig().(*Config)
-	cfg.Brokers = []string{"invalid:9092"}
-	cfg.ProtocolVersion = "2.0.0"
-	// this disables contacting the broker so we can successfully create the exporter
-	cfg.Metadata.Full = false
-	mf := kafkaExporterFactory{logsMarshalers: logsMarshalers()}
-	mr, err := mf.createLogsExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-	require.NoError(t, err)
-	assert.NotNil(t, mr)
-}
+	tests := []struct {
+		name       string
+		conf       *Config
+		marshalers []TracesMarshaler
+		err        *net.DNSError
+	}{
+		{
+			name: "valid config (no validating brokers)",
+			conf: applyConfigOption(func(conf *Config) {
+				conf.Metadata.Full = false
+				conf.Brokers = []string{"invalid:9092"}
+				conf.ProtocolVersion = "2.0.0"
+			}),
+			marshalers: nil,
+			err:        nil,
+		},
+		{
+			name: "invalid config (validating brokers)",
+			conf: applyConfigOption(func(conf *Config) {
+				conf.Brokers = []string{"invalid:9092"}
+				conf.ProtocolVersion = "2.0.0"
+			}),
+			marshalers: nil,
+			err:        &net.DNSError{},
+		},
+		{
+			name: "default_encoding",
+			conf: applyConfigOption(func(conf *Config) {
+				// Disabling broker check to ensure encoding work
+				conf.Metadata.Full = false
+				conf.Encoding = defaultEncoding
+			}),
+			marshalers: nil,
+			err:        nil,
+		},
+	}
 
-func TestCreateTracesExporter_err(t *testing.T) {
-	cfg := createDefaultConfig().(*Config)
-	cfg.Brokers = []string{"invalid:9092"}
-	cfg.ProtocolVersion = "2.0.0"
-	f := kafkaExporterFactory{tracesMarshalers: tracesMarshalers()}
-	r, err := f.createTracesExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-	// no available broker
-	require.Error(t, err)
-	assert.Nil(t, r)
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-func TestCreateMetricsExporter_err(t *testing.T) {
-	cfg := createDefaultConfig().(*Config)
-	cfg.Brokers = []string{"invalid:9092"}
-	cfg.ProtocolVersion = "2.0.0"
-	mf := kafkaExporterFactory{metricsMarshalers: metricsMarshalers()}
-	mr, err := mf.createMetricsExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-	require.Error(t, err)
-	assert.Nil(t, mr)
-}
-
-func TestCreateLogsExporter_err(t *testing.T) {
-	cfg := createDefaultConfig().(*Config)
-	cfg.Brokers = []string{"invalid:9092"}
-	cfg.ProtocolVersion = "2.0.0"
-	mf := kafkaExporterFactory{logsMarshalers: logsMarshalers()}
-	mr, err := mf.createLogsExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-	require.Error(t, err)
-	assert.Nil(t, mr)
-}
-
-func TestWithMarshalers(t *testing.T) {
-	cm := &customMarshaler{}
-	f := NewFactory(WithTracesMarshalers(cm))
-	cfg := createDefaultConfig().(*Config)
-	// disable contacting broker
-	cfg.Metadata.Full = false
-
-	t.Run("custom_encoding", func(t *testing.T) {
-		cfg.Encoding = cm.Encoding()
-		exporter, err := f.CreateTracesExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-		require.NoError(t, err)
-		require.NotNil(t, exporter)
-	})
-	t.Run("default_encoding", func(t *testing.T) {
-		cfg.Encoding = defaultEncoding
-		exporter, err := f.CreateTracesExporter(context.Background(), componenttest.NewNopExporterCreateSettings(), cfg)
-		require.NoError(t, err)
-		assert.NotNil(t, exporter)
-	})
-}
-
-type customMarshaler struct {
-}
-
-var _ TracesMarshaler = (*customMarshaler)(nil)
-
-func (c customMarshaler) Marshal(_ ptrace.Traces, topic string) ([]*sarama.ProducerMessage, error) {
-	panic("implement me")
-}
-
-func (c customMarshaler) Encoding() string {
-	return "custom"
+			f := NewFactory()
+			exporter, err := f.CreateTraces(
+				context.Background(),
+				exportertest.NewNopSettings(metadata.Type),
+				tc.conf,
+			)
+			require.NoError(t, err)
+			assert.NotNil(t, exporter, "Must return valid exporter")
+			err = exporter.Start(context.Background(), componenttest.NewNopHost())
+			if tc.err != nil {
+				assert.ErrorAs(t, err, &tc.err, "Must match the expected error")
+				return
+			}
+			assert.NoError(t, err, "Must not error")
+			assert.NotNil(t, exporter, "Must return valid exporter when no error is returned")
+			assert.NoError(t, exporter.Shutdown(context.Background()))
+		})
+	}
 }

@@ -1,19 +1,7 @@
-// Copyright 2020 OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build !windows
-// +build !windows
 
 package podmanreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/podmanreceiver"
 
@@ -29,9 +17,7 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	errNoStatsFound = fmt.Errorf("No stats found")
-)
+var errNoStatsFound = errors.New("No stats found")
 
 type libpodClient struct {
 	conn     *http.Client
@@ -39,7 +25,7 @@ type libpodClient struct {
 }
 
 func newLibpodClient(logger *zap.Logger, cfg *Config) (PodmanClient, error) {
-	connection, err := newPodmanConnection(logger, cfg.Endpoint, cfg.SSHKey, cfg.SSHPassphrase)
+	connection, err := newPodmanConnection(logger, cfg.Endpoint, cfg.SSHKey, string(cfg.SSHPassphrase))
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +37,7 @@ func newLibpodClient(logger *zap.Logger, cfg *Config) (PodmanClient, error) {
 }
 
 func (c *libpodClient) request(ctx context.Context, path string, params url.Values) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.endpoint+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoint+path, nil)
 	if err != nil {
 		return nil, err
 	}

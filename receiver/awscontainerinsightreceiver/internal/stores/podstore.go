@@ -1,18 +1,6 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
-// nolint:gocritic
 package stores // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awscontainerinsightreceiver/internal/stores"
 
 import (
@@ -44,9 +32,7 @@ const (
 	kubeProxy          = "kube-proxy"
 )
 
-var (
-	re = regexp.MustCompile(splitRegexStr)
-)
+var re = regexp.MustCompile(splitRegexStr)
 
 type cachedEntry struct {
 	pod      corev1.Pod
@@ -70,7 +56,9 @@ type mapWithExpiry struct {
 	*awsmetrics.MapWithExpiry
 }
 
-func (m *mapWithExpiry) Get(key string) (interface{}, bool) {
+func (m *mapWithExpiry) Get(key string) (any, bool) {
+	m.MapWithExpiry.Lock()
+	defer m.MapWithExpiry.Unlock()
 	if val, ok := m.MapWithExpiry.Get(awsmetrics.NewKey(key, nil)); ok {
 		return val.RawValue, ok
 	}
@@ -78,7 +66,9 @@ func (m *mapWithExpiry) Get(key string) (interface{}, bool) {
 	return nil, false
 }
 
-func (m *mapWithExpiry) Set(key string, content interface{}) {
+func (m *mapWithExpiry) Set(key string, content any) {
+	m.MapWithExpiry.Lock()
+	defer m.MapWithExpiry.Unlock()
 	val := awsmetrics.MetricValue{
 		RawValue:  content,
 		Timestamp: time.Now(),
@@ -102,7 +92,7 @@ type podClient interface {
 
 type PodStore struct {
 	cache            *mapWithExpiry
-	prevMeasurements map[string]*mapWithExpiry //preMeasurements per each Type (Pod, Container, etc)
+	prevMeasurements map[string]*mapWithExpiry // preMeasurements per each Type (Pod, Container, etc)
 	podClient        podClient
 	k8sClient        replicaSetInfoProvider
 	lastRefreshed    time.Time
@@ -143,7 +133,18 @@ func NewPodStore(hostIP string, prefFullPodName bool, addFullPodNameMetricLabel 
 	return podStore, nil
 }
 
-func (p *PodStore) getPrevMeasurement(metricType, metricKey string) (interface{}, bool) {
+func (p *PodStore) Shutdown() error {
+	var errs error
+	errs = p.cache.Shutdown()
+	for _, maps := range p.prevMeasurements {
+		if prevMeasErr := maps.Shutdown(); prevMeasErr != nil {
+			errs = errors.Join(errs, prevMeasErr)
+		}
+	}
+	return errs
+}
+
+func (p *PodStore) getPrevMeasurement(metricType, metricKey string) (any, bool) {
 	prevMeasurement, ok := p.prevMeasurements[metricType]
 	if !ok {
 		return nil, false
@@ -158,7 +159,7 @@ func (p *PodStore) getPrevMeasurement(metricType, metricKey string) (interface{}
 	return content, true
 }
 
-func (p *PodStore) setPrevMeasurement(metricType, metricKey string, content interface{}) {
+func (p *PodStore) setPrevMeasurement(metricType, metricKey string, content any) {
 	prevMeasurement, ok := p.prevMeasurements[metricType]
 	if !ok {
 		prevMeasurement = newMapWithExpiry(measurementsExpiry)
@@ -176,13 +177,11 @@ func (p *PodStore) RefreshTick(ctx context.Context) {
 	now := time.Now()
 	if now.Sub(p.lastRefreshed) >= refreshInterval {
 		p.refresh(ctx, now)
-		// call cleanup every refresh cycle
-		p.cleanup(now)
 		p.lastRefreshed = now
 	}
 }
 
-func (p *PodStore) Decorate(ctx context.Context, metric CIMetric, kubernetesBlob map[string]interface{}) bool {
+func (p *PodStore) Decorate(ctx context.Context, metric CIMetric, kubernetesBlob map[string]any) bool {
 	if metric.GetTag(ci.MetricType) == ci.TypeNode {
 		p.decorateNode(metric)
 	} else if metric.GetTag(ci.K8sPodNameKey) != "" {
@@ -207,18 +206,17 @@ func (p *PodStore) Decorate(ctx context.Context, metric CIMetric, kubernetesBlob
 		}
 
 		// If the entry is not a placeholder, decorate the pod
-		if entry.pod.Name != "" {
-			p.decorateCPU(metric, &entry.pod)
-			p.decorateMem(metric, &entry.pod)
-			p.addStatus(metric, &entry.pod)
-			addContainerCount(metric, &entry.pod)
-			addContainerID(&entry.pod, metric, kubernetesBlob, p.logger)
-			p.addPodOwnersAndPodName(metric, &entry.pod, kubernetesBlob)
-			addLabels(&entry.pod, kubernetesBlob)
-		} else {
-			p.logger.Warn(fmt.Sprintf("no pod information is found in podstore for pod %s", podKey))
+		if entry.pod.Name == "" {
+			p.logger.Warn("no pod information is found in podstore for pod " + podKey)
 			return false
 		}
+		p.decorateCPU(metric, &entry.pod)
+		p.decorateMem(metric, &entry.pod)
+		p.addStatus(metric, &entry.pod)
+		addContainerCount(metric, &entry.pod)
+		addContainerID(&entry.pod, metric, kubernetesBlob, p.logger)
+		p.addPodOwnersAndPodName(metric, &entry.pod, kubernetesBlob)
+		addLabels(&entry.pod, kubernetesBlob)
 	}
 	return true
 }
@@ -251,16 +249,6 @@ func (p *PodStore) refresh(ctx context.Context, now time.Time) {
 	p.refreshInternal(now, podList)
 }
 
-func (p *PodStore) cleanup(now time.Time) {
-	for _, prevMeasurement := range p.prevMeasurements {
-		prevMeasurement.CleanUp(now)
-	}
-
-	p.Lock()
-	defer p.Unlock()
-	p.cache.CleanUp(now)
-}
-
 func (p *PodStore) refreshInternal(now time.Time, podList []corev1.Pod) {
 	var podCount int
 	var containerCount int
@@ -271,13 +259,15 @@ func (p *PodStore) refreshInternal(now time.Time, podList []corev1.Pod) {
 		pod := podList[i]
 		podKey := createPodKeyFromMetaData(&pod)
 		if podKey == "" {
-			p.logger.Warn(fmt.Sprintf("podKey is unavailable, refresh pod store for pod %s", pod.Name))
+			p.logger.Warn("podKey is unavailable, refresh pod store for pod " + pod.Name)
 			continue
 		}
-		tmpCPUReq, _ := getResourceSettingForPod(&pod, p.nodeInfo.getCPUCapacity(), cpuKey, getRequestForContainer)
-		cpuRequest += tmpCPUReq
-		tmpMemReq, _ := getResourceSettingForPod(&pod, p.nodeInfo.getMemCapacity(), memoryKey, getRequestForContainer)
-		memRequest += tmpMemReq
+		if pod.Status.Phase != corev1.PodSucceeded && pod.Status.Phase != corev1.PodFailed {
+			tmpCPUReq, _ := getResourceSettingForPod(&pod, p.nodeInfo.getCPUCapacity(), cpuKey, getRequestForContainer)
+			cpuRequest += tmpCPUReq
+			tmpMemReq, _ := getResourceSettingForPod(&pod, p.nodeInfo.getMemCapacity(), memoryKey, getRequestForContainer)
+			memRequest += tmpMemReq
+		}
 		if pod.Status.Phase == corev1.PodRunning {
 			podCount++
 		}
@@ -290,7 +280,8 @@ func (p *PodStore) refreshInternal(now time.Time, podList []corev1.Pod) {
 
 		p.setCachedEntry(podKey, &cachedEntry{
 			pod:      pod,
-			creation: now})
+			creation: now,
+		})
 	}
 
 	p.nodeInfo.setNodeStats(nodeStats{podCnt: podCount, containerCnt: containerCount, memReq: memRequest, cpuReq: cpuRequest})
@@ -438,19 +429,21 @@ func (p *PodStore) addStatus(metric CIMetric, pod *corev1.Pod) {
 		if containerName := metric.GetTag(ci.ContainerNamekey); containerName != "" {
 			for _, containerStatus := range pod.Status.ContainerStatuses {
 				if containerStatus.Name == containerName {
-					if containerStatus.State.Running != nil {
+					switch {
+					case containerStatus.State.Running != nil:
 						metric.AddTag(ci.ContainerStatus, "Running")
-					} else if containerStatus.State.Waiting != nil {
+					case containerStatus.State.Waiting != nil:
 						metric.AddTag(ci.ContainerStatus, "Waiting")
 						if containerStatus.State.Waiting.Reason != "" {
 							metric.AddTag(ci.ContainerStatusReason, containerStatus.State.Waiting.Reason)
 						}
-					} else if containerStatus.State.Terminated != nil {
+					case containerStatus.State.Terminated != nil:
 						metric.AddTag(ci.ContainerStatus, "Terminated")
 						if containerStatus.State.Terminated.Reason != "" {
 							metric.AddTag(ci.ContainerStatusReason, containerStatus.State.Terminated.Reason)
 						}
 					}
+
 					if containerStatus.LastTerminationState.Terminated != nil && containerStatus.LastTerminationState.Terminated.Reason != "" {
 						metric.AddTag(ci.ContainerLastTerminationReason, containerStatus.LastTerminationState.Terminated.Reason)
 					}
@@ -526,7 +519,7 @@ func getRequestForContainer(resource corev1.ResourceName, spec corev1.Container)
 	return 0, false
 }
 
-func addContainerID(pod *corev1.Pod, metric CIMetric, kubernetesBlob map[string]interface{}, logger *zap.Logger) {
+func addContainerID(pod *corev1.Pod, metric CIMetric, kubernetesBlob map[string]any, logger *zap.Logger) {
 	if containerName := metric.GetTag(ci.ContainerNamekey); containerName != "" {
 		rawID := ""
 		for _, container := range pod.Status.ContainerStatuses {
@@ -551,7 +544,7 @@ func addContainerID(pod *corev1.Pod, metric CIMetric, kubernetesBlob map[string]
 	}
 }
 
-func addLabels(pod *corev1.Pod, kubernetesBlob map[string]interface{}) {
+func addLabels(pod *corev1.Pod, kubernetesBlob map[string]any) {
 	labels := make(map[string]string)
 	for k, v := range pod.Labels {
 		labels[k] = v
@@ -565,8 +558,8 @@ func getJobNamePrefix(podName string) string {
 	return re.Split(podName, 2)[0]
 }
 
-func (p *PodStore) addPodOwnersAndPodName(metric CIMetric, pod *corev1.Pod, kubernetesBlob map[string]interface{}) {
-	var owners []interface{}
+func (p *PodStore) addPodOwnersAndPodName(metric CIMetric, pod *corev1.Pod, kubernetesBlob map[string]any) {
+	var owners []any
 	podName := ""
 	for _, owner := range pod.OwnerReferences {
 		if owner.Kind != "" && owner.Name != "" {

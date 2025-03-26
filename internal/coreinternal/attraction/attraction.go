@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package attraction // import "github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/attraction"
 
@@ -24,7 +13,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterhelper"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/clientutil"
 )
 
 // Settings specifies the processor settings.
@@ -43,9 +32,9 @@ type ActionKeyValue struct {
 
 	// Value specifies the value to populate for the key.
 	// The type of the value is inferred from the configuration.
-	Value interface{} `mapstructure:"value"`
+	Value any `mapstructure:"value"`
 
-	// A regex pattern  must be specified for the action EXTRACT.
+	// A regex pattern must be specified for the action EXTRACT.
 	// It uses the attribute specified by `key' to extract values from
 	// The target keys are inferred based on the names of the matcher groups
 	// provided and the names will be inferred based on the values of the
@@ -87,7 +76,9 @@ type ActionKeyValue struct {
 	// DELETE  - Deletes the attribute. If the key doesn't exist,
 	//           no action is performed.
 	// HASH    - Calculates the SHA-1 hash of an existing value and overwrites the
-	//           value with it's SHA-1 hash result.
+	//           value with its SHA-1 hash result. If the feature gate
+	//           `coreinternal.attraction.hash.sha256` is enabled, it uses SHA2-256
+	//           instead.
 	// EXTRACT - Extracts values using a regular expression rule from the input
 	//           'key' to target keys specified in the 'rule'. If a target key
 	//           already exists, it will be overridden.
@@ -134,8 +125,8 @@ const (
 	// Supports pattern which is matched against attribute key.
 	DELETE Action = "delete"
 
-	// HASH calculates the SHA-1 hash of an existing value and overwrites the
-	// value with it's SHA-1 hash result.
+	// HASH calculates the SHA-256 hash of an existing value and overwrites the
+	// value with it's SHA-256 hash result.
 	// Supports pattern which is matched against attribute key.
 	HASH Action = "hash"
 
@@ -176,7 +167,7 @@ type AttrProc struct {
 // and returns a AttrProc to be used to process attributes.
 // An error is returned if there are any invalid inputs.
 func NewAttrProc(settings *Settings) (*AttrProc, error) {
-	var attributeActions []attributeAction
+	attributeActions := make([]attributeAction, 0, len(settings.Actions))
 	for i, a := range settings.Actions {
 		// Convert `action` to lowercase for comparison.
 		a.Action = Action(strings.ToLower(string(a.Action)))
@@ -218,7 +209,8 @@ func NewAttrProc(settings *Settings) (*AttrProc, error) {
 			}
 			// Convert the raw value from the configuration to the internal trace representation of the value.
 			if a.Value != nil {
-				val, err := filterhelper.NewAttributeValueRaw(a.Value)
+				val := pcommon.NewValueEmpty()
+				err := val.FromRaw(a.Value)
 				if err != nil {
 					return nil, err
 				}
@@ -310,7 +302,10 @@ func (ap *AttrProc) Process(ctx context.Context, logger *zap.Logger, attrs pcomm
 			if !found {
 				continue
 			}
-			attrs.Insert(action.Key, av)
+			if _, found = attrs.Get(action.Key); found {
+				continue
+			}
+			av.CopyTo(attrs.PutEmpty(action.Key))
 		case UPDATE:
 			av, found := getSourceAttributeValue(ctx, action, attrs)
 			if !found {
@@ -330,7 +325,7 @@ func (ap *AttrProc) Process(ctx context.Context, logger *zap.Logger, attrs pcomm
 			if found {
 				av.CopyTo(val)
 			} else {
-				av.CopyTo(attrs.UpsertEmpty(action.Key))
+				av.CopyTo(attrs.PutEmpty(action.Key))
 			}
 		case HASH:
 			hashAttribute(action.Key, attrs)
@@ -348,14 +343,17 @@ func (ap *AttrProc) Process(ctx context.Context, logger *zap.Logger, attrs pcomm
 
 func getAttributeValueFromContext(ctx context.Context, key string) (pcommon.Value, bool) {
 	const (
-		metadataPrefix = "metadata."
-		authPrefix     = "auth."
+		metadataPrefix   = "metadata."
+		authPrefix       = "auth."
+		clientAddressKey = "client.address"
 	)
 
 	ci := client.FromContext(ctx)
 	var vals []string
 
 	switch {
+	case key == clientAddressKey:
+		vals = []string{clientutil.Address(ci)}
 	case strings.HasPrefix(key, metadataPrefix):
 		mdKey := strings.TrimPrefix(key, metadataPrefix)
 		vals = ci.Metadata.Get(mdKey)
@@ -369,7 +367,7 @@ func getAttributeValueFromContext(ctx context.Context, key string) (pcommon.Valu
 
 		switch a := attr.(type) {
 		case string:
-			return pcommon.NewValueString(a), true
+			return pcommon.NewValueStr(a), true
 		case []string:
 			vals = a
 		default:
@@ -385,7 +383,7 @@ func getAttributeValueFromContext(ctx context.Context, key string) (pcommon.Valu
 		return pcommon.Value{}, false
 	}
 
-	return pcommon.NewValueString(strings.Join(vals, ";")), true
+	return pcommon.NewValueStr(strings.Join(vals, ";")), true
 }
 
 func getSourceAttributeValue(ctx context.Context, action attributeAction, attrs pcommon.Map) (pcommon.Value, bool) {
@@ -403,7 +401,7 @@ func getSourceAttributeValue(ctx context.Context, action attributeAction, attrs 
 
 func hashAttribute(key string, attrs pcommon.Map) {
 	if value, exists := attrs.Get(key); exists {
-		sha1Hasher(value)
+		sha2Hasher(value)
 	}
 }
 
@@ -417,13 +415,13 @@ func extractAttributes(action attributeAction, attrs pcommon.Map) {
 	value, found := attrs.Get(action.Key)
 
 	// Extracting values only functions on strings.
-	if !found || value.Type() != pcommon.ValueTypeString {
+	if !found || value.Type() != pcommon.ValueTypeStr {
 		return
 	}
 
 	// Note: The number of matches will always be equal to number of
 	// subexpressions.
-	matches := action.Regex.FindStringSubmatch(value.StringVal())
+	matches := action.Regex.FindStringSubmatch(value.Str())
 	if matches == nil {
 		return
 	}
@@ -431,7 +429,7 @@ func extractAttributes(action attributeAction, attrs pcommon.Map) {
 	// Start from index 1, which is the first submatch (index 0 is the entire
 	// match).
 	for i := 1; i < len(matches); i++ {
-		attrs.UpsertString(action.AttrNames[i], matches[i])
+		attrs.PutStr(action.AttrNames[i], matches[i])
 	}
 }
 
@@ -442,11 +440,10 @@ func getMatchingKeys(regexp *regexp.Regexp, attrs pcommon.Map) []string {
 		return keys
 	}
 
-	attrs.Range(func(k string, v pcommon.Value) bool {
+	for k := range attrs.All() {
 		if regexp.MatchString(k) {
 			keys = append(keys, k)
 		}
-		return true
-	})
+	}
 	return keys
 }

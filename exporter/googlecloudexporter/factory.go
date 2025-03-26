@@ -1,16 +1,7 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
+
+//go:generate mdatagen metadata.yaml
 
 package googlecloudexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/googlecloudexporter"
 
@@ -20,137 +11,132 @@ import (
 
 	"github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/collector"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-	"go.opentelemetry.io/collector/service/featuregate"
+	"go.opentelemetry.io/collector/featuregate"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/googlecloudexporter/internal/metadata"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/googlecloudexporter/internal/resourcemapping"
 )
 
 const (
-	// The value of "type" key in configuration.
-	typeStr = "googlecloud"
-	// The stability level of the exporter.
-	stability                = component.StabilityLevelBeta
-	defaultTimeout           = 12 * time.Second // Consistent with Cloud Monitoring's timeout
-	pdataExporterFeatureGate = "exporter.googlecloud.OTLPDirect"
+	defaultTimeout = 12 * time.Second // Consistent with Cloud Monitoring's timeout
 )
 
-func init() {
-	featuregate.GetRegistry().MustRegister(featuregate.Gate{
-		ID:          pdataExporterFeatureGate,
-		Description: "When enabled, the googlecloud exporter translates pdata directly to google cloud monitoring's types, rather than first translating to opencensus.",
-		Enabled:     true,
-	})
-}
+var _ = featuregate.GlobalRegistry().MustRegister(
+	"exporter.googlecloud.OTLPDirect",
+	featuregate.StageStable,
+	featuregate.WithRegisterDescription("When enabled, the googlecloud exporter translates pdata directly to google cloud monitoring's types, rather than first translating to opencensus."),
+	featuregate.WithRegisterReferenceURL("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/7132"),
+	featuregate.WithRegisterToVersion("v0.69.0"),
+)
+
+var customMonitoredResourcesMetricsGate = featuregate.GlobalRegistry().MustRegister(
+	"exporter.googlecloud.CustomMonitoredResources",
+	featuregate.StageAlpha,
+	featuregate.WithRegisterDescription("When enabled, the googlecloudexporter"+
+		" will map the OTLP metrics to the monitored resource type defined by the resource label `gcp.resource_type`."+
+		" The MR labels are defined by resource labels with the prefix `gcp.<monitored_resource_type>."),
+)
 
 // NewFactory creates a factory for the googlecloud exporter
-func NewFactory() component.ExporterFactory {
-	return component.NewExporterFactory(
-		typeStr,
+func NewFactory() exporter.Factory {
+	return exporter.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		component.WithTracesExporter(createTracesExporter, stability),
-		component.WithMetricsExporter(createMetricsExporter, stability),
-		component.WithLogsExporter(createLogsExporter, stability),
+		exporter.WithTraces(createTracesExporter, metadata.TracesStability),
+		exporter.WithMetrics(createMetricsExporter, metadata.MetricsStability),
+		exporter.WithLogs(createLogsExporter, metadata.LogsStability),
 	)
 }
 
 // createDefaultConfig creates the default configuration for exporter.
-func createDefaultConfig() config.Exporter {
-	if !featuregate.GetRegistry().IsEnabled(pdataExporterFeatureGate) {
-		return &LegacyConfig{
-			ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-			TimeoutSettings:  exporterhelper.TimeoutSettings{Timeout: defaultTimeout},
-			RetrySettings:    exporterhelper.NewDefaultRetrySettings(),
-			QueueSettings:    exporterhelper.NewDefaultQueueSettings(),
-			UserAgent:        "opentelemetry-collector-contrib {{version}}",
-		}
-	}
+func createDefaultConfig() component.Config {
 	return &Config{
-		ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-		TimeoutSettings:  exporterhelper.TimeoutSettings{Timeout: defaultTimeout},
-		RetrySettings:    exporterhelper.NewDefaultRetrySettings(),
-		QueueSettings:    exporterhelper.NewDefaultQueueSettings(),
-		Config:           collector.DefaultConfig(),
+		TimeoutSettings: exporterhelper.TimeoutConfig{Timeout: defaultTimeout},
+		QueueSettings:   exporterhelper.NewDefaultQueueConfig(),
+		Config:          collector.DefaultConfig(),
 	}
 }
 
 func createLogsExporter(
 	ctx context.Context,
-	params component.ExporterCreateSettings,
-	cfg config.Exporter) (component.LogsExporter, error) {
-	var eCfg *Config
-	if !featuregate.GetRegistry().IsEnabled(pdataExporterFeatureGate) {
-		eCfg = toNewConfig(cfg.(*LegacyConfig))
-	} else {
-		eCfg = cfg.(*Config)
-	}
-	logsExporter, err := collector.NewGoogleCloudLogsExporter(ctx, eCfg.Config, params.TelemetrySettings.Logger)
+	params exporter.Settings,
+	cfg component.Config,
+) (exporter.Logs, error) {
+	eCfg := cfg.(*Config)
+	logsExporter, err := collector.NewGoogleCloudLogsExporter(ctx, eCfg.Config, params, eCfg.TimeoutSettings.Timeout)
 	if err != nil {
 		return nil, err
 	}
-	return exporterhelper.NewLogsExporter(
+	return exporterhelper.NewLogs(
 		ctx,
 		params,
 		cfg,
 		logsExporter.PushLogs,
+		exporterhelper.WithStart(logsExporter.Start),
 		exporterhelper.WithShutdown(logsExporter.Shutdown),
 		// Disable exporterhelper Timeout, since we are using a custom mechanism
 		// within exporter itself
-		exporterhelper.WithTimeout(exporterhelper.TimeoutSettings{Timeout: 0}),
+		exporterhelper.WithTimeout(exporterhelper.TimeoutConfig{Timeout: 0}),
 		exporterhelper.WithQueue(eCfg.QueueSettings),
-		exporterhelper.WithRetry(eCfg.RetrySettings))
+		exporterhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
+	)
 }
 
 // createTracesExporter creates a trace exporter based on this config.
 func createTracesExporter(
 	ctx context.Context,
-	params component.ExporterCreateSettings,
-	cfg config.Exporter) (component.TracesExporter, error) {
-	var eCfg *Config
-	if !featuregate.GetRegistry().IsEnabled(pdataExporterFeatureGate) {
-		eCfg = toNewConfig(cfg.(*LegacyConfig))
-	} else {
-		eCfg = cfg.(*Config)
-	}
-	tExp, err := collector.NewGoogleCloudTracesExporter(ctx, eCfg.Config, params.BuildInfo.Version, eCfg.Timeout)
+	params exporter.Settings,
+	cfg component.Config,
+) (exporter.Traces, error) {
+	eCfg := cfg.(*Config)
+	tExp, err := collector.NewGoogleCloudTracesExporter(ctx, eCfg.Config, params, eCfg.TimeoutSettings.Timeout)
 	if err != nil {
 		return nil, err
 	}
-	return exporterhelper.NewTracesExporter(
+	return exporterhelper.NewTraces(
 		ctx,
 		params,
 		cfg,
 		tExp.PushTraces,
+		exporterhelper.WithStart(tExp.Start),
 		exporterhelper.WithShutdown(tExp.Shutdown),
 		// Disable exporterhelper Timeout, since we are using a custom mechanism
 		// within exporter itself
-		exporterhelper.WithTimeout(exporterhelper.TimeoutSettings{Timeout: 0}),
+		exporterhelper.WithTimeout(exporterhelper.TimeoutConfig{Timeout: 0}),
 		exporterhelper.WithQueue(eCfg.QueueSettings),
-		exporterhelper.WithRetry(eCfg.RetrySettings))
+		exporterhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
+	)
 }
 
 // createMetricsExporter creates a metrics exporter based on this config.
 func createMetricsExporter(
 	ctx context.Context,
-	params component.ExporterCreateSettings,
-	cfg config.Exporter) (component.MetricsExporter, error) {
-	if !featuregate.GetRegistry().IsEnabled(pdataExporterFeatureGate) {
-		eCfg := cfg.(*LegacyConfig)
-		return newLegacyGoogleCloudMetricsExporter(eCfg, params)
-	}
+	params exporter.Settings,
+	cfg component.Config,
+) (exporter.Metrics, error) {
 	eCfg := cfg.(*Config)
-	mExp, err := collector.NewGoogleCloudMetricsExporter(ctx, eCfg.Config, params.TelemetrySettings.Logger, params.BuildInfo.Version, eCfg.Timeout)
+	config := eCfg.Config
+	if customMonitoredResourcesMetricsGate.IsEnabled() {
+		config.MetricConfig.MapMonitoredResource = resourcemapping.CustomMonitoredResourceMapping
+	}
+	mExp, err := collector.NewGoogleCloudMetricsExporter(ctx, config, params, eCfg.TimeoutSettings.Timeout)
 	if err != nil {
 		return nil, err
 	}
-	return exporterhelper.NewMetricsExporter(
+	return exporterhelper.NewMetrics(
 		ctx,
 		params,
 		cfg,
 		mExp.PushMetrics,
+		exporterhelper.WithStart(mExp.Start),
 		exporterhelper.WithShutdown(mExp.Shutdown),
 		// Disable exporterhelper Timeout, since we are using a custom mechanism
 		// within exporter itself
-		exporterhelper.WithTimeout(exporterhelper.TimeoutSettings{Timeout: 0}),
+		exporterhelper.WithTimeout(exporterhelper.TimeoutConfig{Timeout: 0}),
 		exporterhelper.WithQueue(eCfg.QueueSettings),
-		exporterhelper.WithRetry(eCfg.RetrySettings))
+		exporterhelper.WithCapabilities(consumer.Capabilities{MutatesData: true}),
+	)
 }

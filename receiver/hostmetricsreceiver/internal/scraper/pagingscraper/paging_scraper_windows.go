@@ -1,19 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build windows
-// +build windows
 
 package pagingscraper // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/pagingscraper"
 
@@ -22,14 +10,14 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v4/host"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-	"go.opentelemetry.io/collector/receiver/scrapererror"
-	"go.opentelemetry.io/collector/service/featuregate"
+	"go.opentelemetry.io/collector/scraper"
+	"go.opentelemetry.io/collector/scraper/scrapererror"
+	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/perfcounters"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/pagingscraper/internal/metadata"
 )
@@ -45,45 +33,50 @@ const (
 )
 
 // scraper for Paging Metrics
-type scraper struct {
-	settings component.ReceiverCreateSettings
+type pagingScraper struct {
+	settings scraper.Settings
 	config   *Config
 	mb       *metadata.MetricsBuilder
 
 	perfCounterScraper perfcounters.PerfCounterScraper
+	skipScrape         bool
 
 	// for mocking
-	bootTime                             func() (uint64, error)
-	pageFileStats                        func() ([]*pageFileStats, error)
-	emitMetricsWithDirectionAttribute    bool
-	emitMetricsWithoutDirectionAttribute bool
+	bootTime      func(context.Context) (uint64, error)
+	pageFileStats func() ([]*pageFileStats, error)
 }
 
 // newPagingScraper creates a Paging Scraper
-func newPagingScraper(_ context.Context, settings component.ReceiverCreateSettings, cfg *Config) *scraper {
-	return &scraper{
-		settings:                             settings,
-		config:                               cfg,
-		perfCounterScraper:                   &perfcounters.PerfLibScraper{},
-		bootTime:                             host.BootTime,
-		pageFileStats:                        getPageFileStats,
-		emitMetricsWithDirectionAttribute:    featuregate.GetRegistry().IsEnabled(internal.EmitMetricsWithDirectionAttributeFeatureGateID),
-		emitMetricsWithoutDirectionAttribute: featuregate.GetRegistry().IsEnabled(internal.EmitMetricsWithoutDirectionAttributeFeatureGateID),
+func newPagingScraper(_ context.Context, settings scraper.Settings, cfg *Config) *pagingScraper {
+	return &pagingScraper{
+		settings:           settings,
+		config:             cfg,
+		perfCounterScraper: &perfcounters.PerfLibScraper{},
+		bootTime:           host.BootTimeWithContext,
+		pageFileStats:      getPageFileStats,
 	}
 }
 
-func (s *scraper) start(context.Context, component.Host) error {
-	bootTime, err := s.bootTime()
+func (s *pagingScraper) start(ctx context.Context, _ component.Host) error {
+	bootTime, err := s.bootTime(ctx)
 	if err != nil {
 		return err
 	}
 
-	s.mb = metadata.NewMetricsBuilder(s.config.Metrics, s.settings.BuildInfo, metadata.WithStartTime(pcommon.Timestamp(bootTime*1e9)))
+	s.mb = metadata.NewMetricsBuilder(s.config.MetricsBuilderConfig, s.settings, metadata.WithStartTime(pcommon.Timestamp(bootTime*1e9)))
 
-	return s.perfCounterScraper.Initialize(memory)
+	if err = s.perfCounterScraper.Initialize(memory); err != nil {
+		s.settings.Logger.Error("Failed to initialize performance counter, paging metrics will not scrape", zap.Error(err))
+		s.skipScrape = true
+	}
+	return nil
 }
 
-func (s *scraper) scrape(context.Context) (pmetric.Metrics, error) {
+func (s *pagingScraper) scrape(context.Context) (pmetric.Metrics, error) {
+	if s.skipScrape {
+		return pmetric.NewMetrics(), nil
+	}
+
 	var errors scrapererror.ScrapeErrors
 
 	err := s.scrapePagingUsageMetric()
@@ -99,7 +92,7 @@ func (s *scraper) scrape(context.Context) (pmetric.Metrics, error) {
 	return s.mb.Emit(), errors.Combine()
 }
 
-func (s *scraper) scrapePagingUsageMetric() error {
+func (s *pagingScraper) scrapePagingUsageMetric() error {
 	now := pcommon.NewTimestampFromTime(time.Now())
 	pageFiles, err := s.pageFileStats()
 	if err != nil {
@@ -112,21 +105,21 @@ func (s *scraper) scrapePagingUsageMetric() error {
 	return nil
 }
 
-func (s *scraper) recordPagingUsageDataPoints(now pcommon.Timestamp, pageFiles []*pageFileStats) {
+func (s *pagingScraper) recordPagingUsageDataPoints(now pcommon.Timestamp, pageFiles []*pageFileStats) {
 	for _, pageFile := range pageFiles {
 		s.mb.RecordSystemPagingUsageDataPoint(now, int64(pageFile.usedBytes), pageFile.deviceName, metadata.AttributeStateUsed)
 		s.mb.RecordSystemPagingUsageDataPoint(now, int64(pageFile.freeBytes), pageFile.deviceName, metadata.AttributeStateFree)
 	}
 }
 
-func (s *scraper) recordPagingUtilizationDataPoints(now pcommon.Timestamp, pageFiles []*pageFileStats) {
+func (s *pagingScraper) recordPagingUtilizationDataPoints(now pcommon.Timestamp, pageFiles []*pageFileStats) {
 	for _, pageFile := range pageFiles {
 		s.mb.RecordSystemPagingUtilizationDataPoint(now, float64(pageFile.usedBytes)/float64(pageFile.totalBytes), pageFile.deviceName, metadata.AttributeStateUsed)
 		s.mb.RecordSystemPagingUtilizationDataPoint(now, float64(pageFile.freeBytes)/float64(pageFile.totalBytes), pageFile.deviceName, metadata.AttributeStateFree)
 	}
 }
 
-func (s *scraper) scrapePagingOperationsMetric() error {
+func (s *pagingScraper) scrapePagingOperationsMetric() error {
 	now := pcommon.NewTimestampFromTime(time.Now())
 
 	counters, err := s.perfCounterScraper.Scrape()
@@ -150,13 +143,7 @@ func (s *scraper) scrapePagingOperationsMetric() error {
 	return nil
 }
 
-func (s *scraper) recordPagingOperationsDataPoints(now pcommon.Timestamp, memoryCounterValues *perfcounters.CounterValues) {
-	if s.emitMetricsWithoutDirectionAttribute {
-		s.mb.RecordSystemPagingOperationsPageInDataPoint(now, memoryCounterValues.Values[pageReadsPerSec], metadata.AttributeTypeMajor)
-		s.mb.RecordSystemPagingOperationsPageOutDataPoint(now, memoryCounterValues.Values[pageWritesPerSec], metadata.AttributeTypeMajor)
-	}
-	if s.emitMetricsWithDirectionAttribute {
-		s.mb.RecordSystemPagingOperationsDataPoint(now, memoryCounterValues.Values[pageReadsPerSec], metadata.AttributeDirectionPageIn, metadata.AttributeTypeMajor)
-		s.mb.RecordSystemPagingOperationsDataPoint(now, memoryCounterValues.Values[pageWritesPerSec], metadata.AttributeDirectionPageOut, metadata.AttributeTypeMajor)
-	}
+func (s *pagingScraper) recordPagingOperationsDataPoints(now pcommon.Timestamp, memoryCounterValues *perfcounters.CounterValues) {
+	s.mb.RecordSystemPagingOperationsDataPoint(now, memoryCounterValues.Values[pageReadsPerSec], metadata.AttributeDirectionPageIn, metadata.AttributeTypeMajor)
+	s.mb.RecordSystemPagingOperationsDataPoint(now, memoryCounterValues.Values[pageWritesPerSec], metadata.AttributeDirectionPageOut, metadata.AttributeTypeMajor)
 }

@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package ecstaskobserver
 
@@ -19,9 +8,9 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/component/componenttest"
+	"go.opentelemetry.io/collector/extension/extensiontest"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/endpointswatcher"
 )
 
 func TestFactoryCreatedExtensionIsEndpointsLister(t *testing.T) {
@@ -29,8 +18,8 @@ func TestFactoryCreatedExtensionIsEndpointsLister(t *testing.T) {
 	cfg := etoFactory.CreateDefaultConfig()
 	cfg.(*Config).Endpoint = "http://localhost:1234/mock/endpoint"
 
-	eto, err := etoFactory.CreateExtension(context.Background(), componenttest.NewNopExtensionCreateSettings(), cfg)
+	eto, err := etoFactory.Create(context.Background(), extensiontest.NewNopSettings(etoFactory.Type()), cfg)
 	require.NoError(t, err)
 	require.NotNil(t, eto)
-	require.Implements(t, (*observer.EndpointsLister)(nil), eto)
+	require.Implements(t, (*endpointswatcher.EndpointsLister)(nil), eto)
 }

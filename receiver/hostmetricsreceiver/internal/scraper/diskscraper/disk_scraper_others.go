@@ -1,19 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 //go:build !windows
-// +build !windows
 
 package diskscraper // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/diskscraper"
 
@@ -22,16 +10,15 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/shirou/gopsutil/v3/disk"
-	"github.com/shirou/gopsutil/v3/host"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/host"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-	"go.opentelemetry.io/collector/receiver/scrapererror"
-	"go.opentelemetry.io/collector/service/featuregate"
+	"go.opentelemetry.io/collector/scraper"
+	"go.opentelemetry.io/collector/scraper/scrapererror"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterset"
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterset"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/diskscraper/internal/metadata"
 )
 
@@ -41,8 +28,8 @@ const (
 )
 
 // scraper for Disk Metrics
-type scraper struct {
-	settings  component.ReceiverCreateSettings
+type diskScraper struct {
+	settings  scraper.Settings
 	config    *Config
 	startTime pcommon.Timestamp
 	mb        *metadata.MetricsBuilder
@@ -50,17 +37,13 @@ type scraper struct {
 	excludeFS filterset.FilterSet
 
 	// for mocking
-	bootTime                             func() (uint64, error)
-	ioCounters                           func(names ...string) (map[string]disk.IOCountersStat, error)
-	emitMetricsWithDirectionAttribute    bool
-	emitMetricsWithoutDirectionAttribute bool
+	bootTime   func(context.Context) (uint64, error)
+	ioCounters func(ctx context.Context, names ...string) (map[string]disk.IOCountersStat, error)
 }
 
 // newDiskScraper creates a Disk Scraper
-func newDiskScraper(_ context.Context, settings component.ReceiverCreateSettings, cfg *Config) (*scraper, error) {
-	scraper := &scraper{settings: settings, config: cfg, bootTime: host.BootTime, ioCounters: disk.IOCounters}
-	scraper.emitMetricsWithDirectionAttribute = featuregate.GetRegistry().IsEnabled(internal.EmitMetricsWithDirectionAttributeFeatureGateID)
-	scraper.emitMetricsWithoutDirectionAttribute = featuregate.GetRegistry().IsEnabled(internal.EmitMetricsWithoutDirectionAttributeFeatureGateID)
+func newDiskScraper(_ context.Context, settings scraper.Settings, cfg *Config) (*diskScraper, error) {
+	scraper := &diskScraper{settings: settings, config: cfg, bootTime: host.BootTimeWithContext, ioCounters: disk.IOCountersWithContext}
 
 	var err error
 
@@ -81,20 +64,20 @@ func newDiskScraper(_ context.Context, settings component.ReceiverCreateSettings
 	return scraper, nil
 }
 
-func (s *scraper) start(context.Context, component.Host) error {
-	bootTime, err := s.bootTime()
+func (s *diskScraper) start(ctx context.Context, _ component.Host) error {
+	bootTime, err := s.bootTime(ctx)
 	if err != nil {
 		return err
 	}
 
 	s.startTime = pcommon.Timestamp(bootTime * 1e9)
-	s.mb = metadata.NewMetricsBuilder(s.config.Metrics, s.settings.BuildInfo, metadata.WithStartTime(s.startTime))
+	s.mb = metadata.NewMetricsBuilder(s.config.MetricsBuilderConfig, s.settings, metadata.WithStartTime(s.startTime))
 	return nil
 }
 
-func (s *scraper) scrape(_ context.Context) (pmetric.Metrics, error) {
+func (s *diskScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
 	now := pcommon.NewTimestampFromTime(time.Now())
-	ioCounters, err := s.ioCounters()
+	ioCounters, err := s.ioCounters(ctx)
 	if err != nil {
 		return pmetric.NewMetrics(), scrapererror.NewPartialScrapeError(err, metricsLen)
 	}
@@ -114,58 +97,40 @@ func (s *scraper) scrape(_ context.Context) (pmetric.Metrics, error) {
 	return s.mb.Emit(), nil
 }
 
-func (s *scraper) recordDiskIOMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
+func (s *diskScraper) recordDiskIOMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
 	for device, ioCounter := range ioCounters {
-		if s.emitMetricsWithDirectionAttribute {
-			s.mb.RecordSystemDiskIoDataPoint(now, int64(ioCounter.ReadBytes), device, metadata.AttributeDirectionRead)
-			s.mb.RecordSystemDiskIoDataPoint(now, int64(ioCounter.WriteBytes), device, metadata.AttributeDirectionWrite)
-		}
-		if s.emitMetricsWithoutDirectionAttribute {
-			s.mb.RecordSystemDiskIoReadDataPoint(now, int64(ioCounter.ReadBytes), device)
-			s.mb.RecordSystemDiskIoWriteDataPoint(now, int64(ioCounter.WriteBytes), device)
-		}
+		s.mb.RecordSystemDiskIoDataPoint(now, int64(ioCounter.ReadBytes), device, metadata.AttributeDirectionRead)
+		s.mb.RecordSystemDiskIoDataPoint(now, int64(ioCounter.WriteBytes), device, metadata.AttributeDirectionWrite)
 	}
 }
 
-func (s *scraper) recordDiskOperationsMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
+func (s *diskScraper) recordDiskOperationsMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
 	for device, ioCounter := range ioCounters {
-		if s.emitMetricsWithDirectionAttribute {
-			s.mb.RecordSystemDiskOperationsDataPoint(now, int64(ioCounter.ReadCount), device, metadata.AttributeDirectionRead)
-			s.mb.RecordSystemDiskOperationsDataPoint(now, int64(ioCounter.WriteCount), device, metadata.AttributeDirectionWrite)
-		}
-		if s.emitMetricsWithoutDirectionAttribute {
-			s.mb.RecordSystemDiskOperationsReadDataPoint(now, int64(ioCounter.ReadCount), device)
-			s.mb.RecordSystemDiskOperationsWriteDataPoint(now, int64(ioCounter.WriteCount), device)
-		}
+		s.mb.RecordSystemDiskOperationsDataPoint(now, int64(ioCounter.ReadCount), device, metadata.AttributeDirectionRead)
+		s.mb.RecordSystemDiskOperationsDataPoint(now, int64(ioCounter.WriteCount), device, metadata.AttributeDirectionWrite)
 	}
 }
 
-func (s *scraper) recordDiskIOTimeMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
+func (s *diskScraper) recordDiskIOTimeMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
 	for device, ioCounter := range ioCounters {
 		s.mb.RecordSystemDiskIoTimeDataPoint(now, float64(ioCounter.IoTime)/1e3, device)
 	}
 }
 
-func (s *scraper) recordDiskOperationTimeMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
+func (s *diskScraper) recordDiskOperationTimeMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
 	for device, ioCounter := range ioCounters {
-		if s.emitMetricsWithDirectionAttribute {
-			s.mb.RecordSystemDiskOperationTimeDataPoint(now, float64(ioCounter.ReadTime)/1e3, device, metadata.AttributeDirectionRead)
-			s.mb.RecordSystemDiskOperationTimeDataPoint(now, float64(ioCounter.WriteTime)/1e3, device, metadata.AttributeDirectionWrite)
-		}
-		if s.emitMetricsWithoutDirectionAttribute {
-			s.mb.RecordSystemDiskOperationTimeReadDataPoint(now, float64(ioCounter.ReadTime)/1e3, device)
-			s.mb.RecordSystemDiskOperationTimeWriteDataPoint(now, float64(ioCounter.WriteTime)/1e3, device)
-		}
+		s.mb.RecordSystemDiskOperationTimeDataPoint(now, float64(ioCounter.ReadTime)/1e3, device, metadata.AttributeDirectionRead)
+		s.mb.RecordSystemDiskOperationTimeDataPoint(now, float64(ioCounter.WriteTime)/1e3, device, metadata.AttributeDirectionWrite)
 	}
 }
 
-func (s *scraper) recordDiskPendingOperationsMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
+func (s *diskScraper) recordDiskPendingOperationsMetric(now pcommon.Timestamp, ioCounters map[string]disk.IOCountersStat) {
 	for device, ioCounter := range ioCounters {
 		s.mb.RecordSystemDiskPendingOperationsDataPoint(now, int64(ioCounter.IopsInProgress), device)
 	}
 }
 
-func (s *scraper) filterByDevice(ioCounters map[string]disk.IOCountersStat) map[string]disk.IOCountersStat {
+func (s *diskScraper) filterByDevice(ioCounters map[string]disk.IOCountersStat) map[string]disk.IOCountersStat {
 	if s.includeFS == nil && s.excludeFS == nil {
 		return ioCounters
 	}
@@ -178,7 +143,7 @@ func (s *scraper) filterByDevice(ioCounters map[string]disk.IOCountersStat) map[
 	return ioCounters
 }
 
-func (s *scraper) includeDevice(deviceName string) bool {
+func (s *diskScraper) includeDevice(deviceName string) bool {
 	return (s.includeFS == nil || s.includeFS.Matches(deviceName)) &&
 		(s.excludeFS == nil || !s.excludeFS.Matches(deviceName))
 }

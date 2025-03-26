@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package receivercreator // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/receivercreator"
 
@@ -18,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cast"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/confmap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer"
@@ -36,7 +25,7 @@ const (
 // receiverConfig describes a receiver instance with a default config.
 type receiverConfig struct {
 	// id is the id of the subreceiver (ie <receiver type>/<id>).
-	id config.ComponentID
+	id component.ID
 	// config is the map configured by the user in the config file. It is the contents of the map from
 	// the "config" section. The keys and values are arbitrarily configured by the user.
 	config     userConfigMap
@@ -44,7 +33,13 @@ type receiverConfig struct {
 }
 
 // userConfigMap is an arbitrary map of string keys to arbitrary values as specified by the user
-type userConfigMap map[string]interface{}
+type userConfigMap map[string]any
+
+type receiverSignals struct {
+	metrics bool
+	logs    bool
+	traces  bool
+}
 
 // receiverTemplate is the configuration of a single subreceiver.
 type receiverTemplate struct {
@@ -55,8 +50,9 @@ type receiverTemplate struct {
 	Rule string `mapstructure:"rule"`
 	// ResourceAttributes is a map of resource attributes to add to just this receiver's resource metrics.
 	// It can contain expr expressions for endpoint env value expansion
-	ResourceAttributes map[string]interface{} `mapstructure:"resource_attributes"`
+	ResourceAttributes map[string]any `mapstructure:"resource_attributes"`
 	rule               rule
+	signals            receiverSignals
 }
 
 // resourceAttributes holds a map of default resource attributes for each Endpoint type.
@@ -65,12 +61,13 @@ type resourceAttributes map[observer.EndpointType]map[string]string
 // newReceiverTemplate creates a receiverTemplate instance from the full name of a subreceiver
 // and its arbitrary config map values.
 func newReceiverTemplate(name string, cfg userConfigMap) (receiverTemplate, error) {
-	id, err := config.NewComponentIDFromString(name)
-	if err != nil {
+	id := component.ID{}
+	if err := id.UnmarshalText([]byte(name)); err != nil {
 		return receiverTemplate{}, err
 	}
 
 	return receiverTemplate{
+		signals: receiverSignals{metrics: true, logs: true, traces: true},
 		receiverConfig: receiverConfig{
 			id:         id,
 			config:     cfg,
@@ -79,17 +76,22 @@ func newReceiverTemplate(name string, cfg userConfigMap) (receiverTemplate, erro
 	}, nil
 }
 
-var _ config.Unmarshallable = (*Config)(nil)
+var _ confmap.Unmarshaler = (*Config)(nil)
 
 // Config defines configuration for receiver_creator.
 type Config struct {
-	config.ReceiverSettings `mapstructure:",squash"`
-	receiverTemplates       map[string]receiverTemplate
+	receiverTemplates map[string]receiverTemplate
 	// WatchObservers are the extensions to listen to endpoints from.
-	WatchObservers []config.ComponentID `mapstructure:"watch_observers"`
+	WatchObservers []component.ID `mapstructure:"watch_observers"`
 	// ResourceAttributes is a map of default resource attributes to add to each resource
 	// object received by this receiver from dynamically created receivers.
 	ResourceAttributes resourceAttributes `mapstructure:"resource_attributes"`
+	Discovery          DiscoveryConfig    `mapstructure:"discovery"`
+}
+
+type DiscoveryConfig struct {
+	Enabled         bool     `mapstructure:"enabled"`
+	IgnoreReceivers []string `mapstructure:"ignore_receivers"`
 }
 
 func (cfg *Config) Unmarshal(componentParser *confmap.Conf) error {
@@ -98,13 +100,13 @@ func (cfg *Config) Unmarshal(componentParser *confmap.Conf) error {
 		return nil
 	}
 
-	if err := componentParser.Unmarshal(cfg); err != nil {
+	if err := componentParser.Unmarshal(cfg, confmap.WithIgnoreUnused()); err != nil {
 		return err
 	}
 
 	for endpointType := range cfg.ResourceAttributes {
 		switch endpointType {
-		case observer.ContainerType, observer.HostPortType, observer.K8sNodeType, observer.PodType, observer.PortType:
+		case observer.ContainerType, observer.K8sServiceType, observer.K8sIngressType, observer.HostPortType, observer.K8sNodeType, observer.PodType, observer.PortType, observer.PodContainerType:
 		default:
 			return fmt.Errorf("resource attributes for unsupported endpoint type %q", endpointType)
 		}
@@ -127,7 +129,7 @@ func (cfg *Config) Unmarshal(componentParser *confmap.Conf) error {
 		}
 
 		// Unmarshals receiver_creator configuration like rule.
-		if err = subreceiverSection.Unmarshal(&subreceiver); err != nil {
+		if err = subreceiverSection.Unmarshal(&subreceiver, confmap.WithIgnoreUnused()); err != nil {
 			return fmt.Errorf("failed to deserialize sub-receiver %q: %w", subreceiverKey, err)
 		}
 

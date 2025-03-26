@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package processscraper // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/processscraper"
 
@@ -20,38 +9,43 @@ import (
 	"runtime"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
+	"go.opentelemetry.io/collector/featuregate"
+	"go.opentelemetry.io/collector/scraper"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/processscraper/internal/metadata"
 )
 
-// This file implements Factory for Process scraper.
-
-const (
-	// TypeStr the value of "type" key in configuration.
-	TypeStr = "process"
+var (
+	bootTimeCacheFeaturegateID = "hostmetrics.process.bootTimeCache"
+	bootTimeCacheFeaturegate   = featuregate.GlobalRegistry().MustRegister(
+		bootTimeCacheFeaturegateID,
+		featuregate.StageBeta,
+		featuregate.WithRegisterDescription("When enabled, all process scrapes will use the boot time value that is cached at the start of the process."),
+		featuregate.WithRegisterReferenceURL("https://github.com/open-telemetry/opentelemetry-collector-contrib/issues/28849"),
+		featuregate.WithRegisterFromVersion("v0.98.0"),
+	)
 )
 
-// Factory is the Factory for scraper.
-type Factory struct {
+// NewFactory for Process scraper.
+func NewFactory() scraper.Factory {
+	return scraper.NewFactory(metadata.Type, createDefaultConfig, scraper.WithMetrics(createMetricsScraper, metadata.MetricsStability))
 }
 
-// CreateDefaultConfig creates the default configuration for the Scraper.
-func (f *Factory) CreateDefaultConfig() internal.Config {
+// createDefaultConfig creates the default configuration for the Scraper.
+func createDefaultConfig() component.Config {
 	return &Config{
-		Metrics: metadata.DefaultMetricsSettings(),
+		MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
 	}
 }
 
-// CreateMetricsScraper creates a resource scraper based on provided config.
-func (f *Factory) CreateMetricsScraper(
+// createMetricsScraper creates a resource scraper based on provided config.
+func createMetricsScraper(
 	_ context.Context,
-	settings component.ReceiverCreateSettings,
-	cfg internal.Config,
-) (scraperhelper.Scraper, error) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "windows" {
-		return nil, errors.New("process scraper only available on Linux or Windows")
+	settings scraper.Settings,
+	cfg component.Config,
+) (scraper.Metrics, error) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		return nil, errors.New("process scraper only available on Linux, Windows, or macOS")
 	}
 
 	s, err := newProcessScraper(settings, cfg.(*Config))
@@ -59,9 +53,8 @@ func (f *Factory) CreateMetricsScraper(
 		return nil, err
 	}
 
-	return scraperhelper.NewScraper(
-		TypeStr,
+	return scraper.NewMetrics(
 		s.scrape,
-		scraperhelper.WithStart(s.start),
+		scraper.WithStart(s.start),
 	)
 }

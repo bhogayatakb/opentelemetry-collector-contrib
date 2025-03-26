@@ -6,49 +6,13 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/filter"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/receiver"
 )
 
-// MetricSettings provides common settings for a particular metric.
-type MetricSettings struct {
-	Enabled bool `mapstructure:"enabled"`
-}
-
-// MetricsSettings provides settings for rabbitmqreceiver metrics.
-type MetricsSettings struct {
-	RabbitmqConsumerCount       MetricSettings `mapstructure:"rabbitmq.consumer.count"`
-	RabbitmqMessageAcknowledged MetricSettings `mapstructure:"rabbitmq.message.acknowledged"`
-	RabbitmqMessageCurrent      MetricSettings `mapstructure:"rabbitmq.message.current"`
-	RabbitmqMessageDelivered    MetricSettings `mapstructure:"rabbitmq.message.delivered"`
-	RabbitmqMessageDropped      MetricSettings `mapstructure:"rabbitmq.message.dropped"`
-	RabbitmqMessagePublished    MetricSettings `mapstructure:"rabbitmq.message.published"`
-}
-
-func DefaultMetricsSettings() MetricsSettings {
-	return MetricsSettings{
-		RabbitmqConsumerCount: MetricSettings{
-			Enabled: true,
-		},
-		RabbitmqMessageAcknowledged: MetricSettings{
-			Enabled: true,
-		},
-		RabbitmqMessageCurrent: MetricSettings{
-			Enabled: true,
-		},
-		RabbitmqMessageDelivered: MetricSettings{
-			Enabled: true,
-		},
-		RabbitmqMessageDropped: MetricSettings{
-			Enabled: true,
-		},
-		RabbitmqMessagePublished: MetricSettings{
-			Enabled: true,
-		},
-	}
-}
-
-// AttributeMessageState specifies the a value message.state attribute.
+// AttributeMessageState specifies the value message.state attribute.
 type AttributeMessageState int
 
 const (
@@ -76,7 +40,7 @@ var MapAttributeMessageState = map[string]AttributeMessageState{
 
 type metricRabbitmqConsumerCount struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -85,19 +49,19 @@ func (m *metricRabbitmqConsumerCount) init() {
 	m.data.SetName("rabbitmq.consumer.count")
 	m.data.SetDescription("The number of consumers currently reading from the queue.")
 	m.data.SetUnit("{consumers}")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(false)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
 func (m *metricRabbitmqConsumerCount) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -109,16 +73,16 @@ func (m *metricRabbitmqConsumerCount) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricRabbitmqConsumerCount) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricRabbitmqConsumerCount(settings MetricSettings) metricRabbitmqConsumerCount {
-	m := metricRabbitmqConsumerCount{settings: settings}
-	if settings.Enabled {
+func newMetricRabbitmqConsumerCount(cfg MetricConfig) metricRabbitmqConsumerCount {
+	m := metricRabbitmqConsumerCount{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -127,7 +91,7 @@ func newMetricRabbitmqConsumerCount(settings MetricSettings) metricRabbitmqConsu
 
 type metricRabbitmqMessageAcknowledged struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -136,19 +100,19 @@ func (m *metricRabbitmqMessageAcknowledged) init() {
 	m.data.SetName("rabbitmq.message.acknowledged")
 	m.data.SetDescription("The number of messages acknowledged by consumers.")
 	m.data.SetUnit("{messages}")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
 func (m *metricRabbitmqMessageAcknowledged) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -160,16 +124,16 @@ func (m *metricRabbitmqMessageAcknowledged) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricRabbitmqMessageAcknowledged) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricRabbitmqMessageAcknowledged(settings MetricSettings) metricRabbitmqMessageAcknowledged {
-	m := metricRabbitmqMessageAcknowledged{settings: settings}
-	if settings.Enabled {
+func newMetricRabbitmqMessageAcknowledged(cfg MetricConfig) metricRabbitmqMessageAcknowledged {
+	m := metricRabbitmqMessageAcknowledged{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -178,7 +142,7 @@ func newMetricRabbitmqMessageAcknowledged(settings MetricSettings) metricRabbitm
 
 type metricRabbitmqMessageCurrent struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -187,21 +151,21 @@ func (m *metricRabbitmqMessageCurrent) init() {
 	m.data.SetName("rabbitmq.message.current")
 	m.data.SetDescription("The total number of messages currently in the queue.")
 	m.data.SetUnit("{messages}")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(false)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 	m.data.Sum().DataPoints().EnsureCapacity(m.capacity)
 }
 
 func (m *metricRabbitmqMessageCurrent) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64, messageStateAttributeValue string) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
-	dp.Attributes().UpsertString("state", messageStateAttributeValue)
+	dp.SetIntValue(val)
+	dp.Attributes().PutStr("state", messageStateAttributeValue)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -213,16 +177,16 @@ func (m *metricRabbitmqMessageCurrent) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricRabbitmqMessageCurrent) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricRabbitmqMessageCurrent(settings MetricSettings) metricRabbitmqMessageCurrent {
-	m := metricRabbitmqMessageCurrent{settings: settings}
-	if settings.Enabled {
+func newMetricRabbitmqMessageCurrent(cfg MetricConfig) metricRabbitmqMessageCurrent {
+	m := metricRabbitmqMessageCurrent{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -231,7 +195,7 @@ func newMetricRabbitmqMessageCurrent(settings MetricSettings) metricRabbitmqMess
 
 type metricRabbitmqMessageDelivered struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -240,19 +204,19 @@ func (m *metricRabbitmqMessageDelivered) init() {
 	m.data.SetName("rabbitmq.message.delivered")
 	m.data.SetDescription("The number of messages delivered to consumers.")
 	m.data.SetUnit("{messages}")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
 func (m *metricRabbitmqMessageDelivered) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -264,16 +228,16 @@ func (m *metricRabbitmqMessageDelivered) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricRabbitmqMessageDelivered) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricRabbitmqMessageDelivered(settings MetricSettings) metricRabbitmqMessageDelivered {
-	m := metricRabbitmqMessageDelivered{settings: settings}
-	if settings.Enabled {
+func newMetricRabbitmqMessageDelivered(cfg MetricConfig) metricRabbitmqMessageDelivered {
+	m := metricRabbitmqMessageDelivered{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -282,7 +246,7 @@ func newMetricRabbitmqMessageDelivered(settings MetricSettings) metricRabbitmqMe
 
 type metricRabbitmqMessageDropped struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -291,19 +255,19 @@ func (m *metricRabbitmqMessageDropped) init() {
 	m.data.SetName("rabbitmq.message.dropped")
 	m.data.SetDescription("The number of messages dropped as unroutable.")
 	m.data.SetUnit("{messages}")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
 func (m *metricRabbitmqMessageDropped) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -315,16 +279,16 @@ func (m *metricRabbitmqMessageDropped) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricRabbitmqMessageDropped) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricRabbitmqMessageDropped(settings MetricSettings) metricRabbitmqMessageDropped {
-	m := metricRabbitmqMessageDropped{settings: settings}
-	if settings.Enabled {
+func newMetricRabbitmqMessageDropped(cfg MetricConfig) metricRabbitmqMessageDropped {
+	m := metricRabbitmqMessageDropped{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -333,7 +297,7 @@ func newMetricRabbitmqMessageDropped(settings MetricSettings) metricRabbitmqMess
 
 type metricRabbitmqMessagePublished struct {
 	data     pmetric.Metric // data buffer for generated metric.
-	settings MetricSettings // metric settings provided by user.
+	config   MetricConfig   // metric config provided by user.
 	capacity int            // max observed number of data points added to the metric.
 }
 
@@ -342,19 +306,19 @@ func (m *metricRabbitmqMessagePublished) init() {
 	m.data.SetName("rabbitmq.message.published")
 	m.data.SetDescription("The number of messages published to a queue.")
 	m.data.SetUnit("{messages}")
-	m.data.SetDataType(pmetric.MetricDataTypeSum)
+	m.data.SetEmptySum()
 	m.data.Sum().SetIsMonotonic(true)
-	m.data.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 }
 
 func (m *metricRabbitmqMessagePublished) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
-	if !m.settings.Enabled {
+	if !m.config.Enabled {
 		return
 	}
 	dp := m.data.Sum().DataPoints().AppendEmpty()
 	dp.SetStartTimestamp(start)
 	dp.SetTimestamp(ts)
-	dp.SetIntVal(val)
+	dp.SetIntValue(val)
 }
 
 // updateCapacity saves max length of data point slices that will be used for the slice capacity.
@@ -366,16 +330,220 @@ func (m *metricRabbitmqMessagePublished) updateCapacity() {
 
 // emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
 func (m *metricRabbitmqMessagePublished) emit(metrics pmetric.MetricSlice) {
-	if m.settings.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
 		m.updateCapacity()
 		m.data.MoveTo(metrics.AppendEmpty())
 		m.init()
 	}
 }
 
-func newMetricRabbitmqMessagePublished(settings MetricSettings) metricRabbitmqMessagePublished {
-	m := metricRabbitmqMessagePublished{settings: settings}
-	if settings.Enabled {
+func newMetricRabbitmqMessagePublished(cfg MetricConfig) metricRabbitmqMessagePublished {
+	m := metricRabbitmqMessagePublished{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricRabbitmqNodeDiskFree struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills rabbitmq.node.disk_free metric with initial data.
+func (m *metricRabbitmqNodeDiskFree) init() {
+	m.data.SetName("rabbitmq.node.disk_free")
+	m.data.SetDescription("Free disk space on the node.")
+	m.data.SetUnit("{bytes}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricRabbitmqNodeDiskFree) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricRabbitmqNodeDiskFree) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricRabbitmqNodeDiskFree) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricRabbitmqNodeDiskFree(cfg MetricConfig) metricRabbitmqNodeDiskFree {
+	m := metricRabbitmqNodeDiskFree{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricRabbitmqNodeFdUsed struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills rabbitmq.node.fd_used metric with initial data.
+func (m *metricRabbitmqNodeFdUsed) init() {
+	m.data.SetName("rabbitmq.node.fd_used")
+	m.data.SetDescription("The number of file descriptors used on the node.")
+	m.data.SetUnit("{fd}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricRabbitmqNodeFdUsed) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricRabbitmqNodeFdUsed) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricRabbitmqNodeFdUsed) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricRabbitmqNodeFdUsed(cfg MetricConfig) metricRabbitmqNodeFdUsed {
+	m := metricRabbitmqNodeFdUsed{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricRabbitmqNodeMemLimit struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills rabbitmq.node.mem_limit metric with initial data.
+func (m *metricRabbitmqNodeMemLimit) init() {
+	m.data.SetName("rabbitmq.node.mem_limit")
+	m.data.SetDescription("The memory limit on the node.")
+	m.data.SetUnit("{bytes}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricRabbitmqNodeMemLimit) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricRabbitmqNodeMemLimit) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricRabbitmqNodeMemLimit) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricRabbitmqNodeMemLimit(cfg MetricConfig) metricRabbitmqNodeMemLimit {
+	m := metricRabbitmqNodeMemLimit{config: cfg}
+	if cfg.Enabled {
+		m.data = pmetric.NewMetric()
+		m.init()
+	}
+	return m
+}
+
+type metricRabbitmqNodeMemUsed struct {
+	data     pmetric.Metric // data buffer for generated metric.
+	config   MetricConfig   // metric config provided by user.
+	capacity int            // max observed number of data points added to the metric.
+}
+
+// init fills rabbitmq.node.mem_used metric with initial data.
+func (m *metricRabbitmqNodeMemUsed) init() {
+	m.data.SetName("rabbitmq.node.mem_used")
+	m.data.SetDescription("The memory used on the node.")
+	m.data.SetUnit("{bytes}")
+	m.data.SetEmptySum()
+	m.data.Sum().SetIsMonotonic(false)
+	m.data.Sum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+}
+
+func (m *metricRabbitmqNodeMemUsed) recordDataPoint(start pcommon.Timestamp, ts pcommon.Timestamp, val int64) {
+	if !m.config.Enabled {
+		return
+	}
+	dp := m.data.Sum().DataPoints().AppendEmpty()
+	dp.SetStartTimestamp(start)
+	dp.SetTimestamp(ts)
+	dp.SetIntValue(val)
+}
+
+// updateCapacity saves max length of data point slices that will be used for the slice capacity.
+func (m *metricRabbitmqNodeMemUsed) updateCapacity() {
+	if m.data.Sum().DataPoints().Len() > m.capacity {
+		m.capacity = m.data.Sum().DataPoints().Len()
+	}
+}
+
+// emit appends recorded metric data to a metrics slice and prepares it for recording another set of data points.
+func (m *metricRabbitmqNodeMemUsed) emit(metrics pmetric.MetricSlice) {
+	if m.config.Enabled && m.data.Sum().DataPoints().Len() > 0 {
+		m.updateCapacity()
+		m.data.MoveTo(metrics.AppendEmpty())
+		m.init()
+	}
+}
+
+func newMetricRabbitmqNodeMemUsed(cfg MetricConfig) metricRabbitmqNodeMemUsed {
+	m := metricRabbitmqNodeMemUsed{config: cfg}
+	if cfg.Enabled {
 		m.data = pmetric.NewMetric()
 		m.init()
 	}
@@ -383,47 +551,91 @@ func newMetricRabbitmqMessagePublished(settings MetricSettings) metricRabbitmqMe
 }
 
 // MetricsBuilder provides an interface for scrapers to report metrics while taking care of all the transformations
-// required to produce metric representation defined in metadata and user settings.
+// required to produce metric representation defined in metadata and user config.
 type MetricsBuilder struct {
-	startTime                         pcommon.Timestamp   // start time that will be applied to all recorded data points.
-	metricsCapacity                   int                 // maximum observed number of metrics per resource.
-	resourceCapacity                  int                 // maximum observed number of resource attributes.
-	metricsBuffer                     pmetric.Metrics     // accumulates metrics data before emitting.
-	buildInfo                         component.BuildInfo // contains version information
+	config                            MetricsBuilderConfig // config of the metrics builder.
+	startTime                         pcommon.Timestamp    // start time that will be applied to all recorded data points.
+	metricsCapacity                   int                  // maximum observed number of metrics per resource.
+	metricsBuffer                     pmetric.Metrics      // accumulates metrics data before emitting.
+	buildInfo                         component.BuildInfo  // contains version information.
+	resourceAttributeIncludeFilter    map[string]filter.Filter
+	resourceAttributeExcludeFilter    map[string]filter.Filter
 	metricRabbitmqConsumerCount       metricRabbitmqConsumerCount
 	metricRabbitmqMessageAcknowledged metricRabbitmqMessageAcknowledged
 	metricRabbitmqMessageCurrent      metricRabbitmqMessageCurrent
 	metricRabbitmqMessageDelivered    metricRabbitmqMessageDelivered
 	metricRabbitmqMessageDropped      metricRabbitmqMessageDropped
 	metricRabbitmqMessagePublished    metricRabbitmqMessagePublished
+	metricRabbitmqNodeDiskFree        metricRabbitmqNodeDiskFree
+	metricRabbitmqNodeFdUsed          metricRabbitmqNodeFdUsed
+	metricRabbitmqNodeMemLimit        metricRabbitmqNodeMemLimit
+	metricRabbitmqNodeMemUsed         metricRabbitmqNodeMemUsed
 }
 
-// metricBuilderOption applies changes to default metrics builder.
-type metricBuilderOption func(*MetricsBuilder)
+// MetricBuilderOption applies changes to default metrics builder.
+type MetricBuilderOption interface {
+	apply(*MetricsBuilder)
+}
+
+type metricBuilderOptionFunc func(mb *MetricsBuilder)
+
+func (mbof metricBuilderOptionFunc) apply(mb *MetricsBuilder) {
+	mbof(mb)
+}
 
 // WithStartTime sets startTime on the metrics builder.
-func WithStartTime(startTime pcommon.Timestamp) metricBuilderOption {
-	return func(mb *MetricsBuilder) {
+func WithStartTime(startTime pcommon.Timestamp) MetricBuilderOption {
+	return metricBuilderOptionFunc(func(mb *MetricsBuilder) {
 		mb.startTime = startTime
-	}
+	})
 }
-
-func NewMetricsBuilder(settings MetricsSettings, buildInfo component.BuildInfo, options ...metricBuilderOption) *MetricsBuilder {
+func NewMetricsBuilder(mbc MetricsBuilderConfig, settings receiver.Settings, options ...MetricBuilderOption) *MetricsBuilder {
 	mb := &MetricsBuilder{
+		config:                            mbc,
 		startTime:                         pcommon.NewTimestampFromTime(time.Now()),
 		metricsBuffer:                     pmetric.NewMetrics(),
-		buildInfo:                         buildInfo,
-		metricRabbitmqConsumerCount:       newMetricRabbitmqConsumerCount(settings.RabbitmqConsumerCount),
-		metricRabbitmqMessageAcknowledged: newMetricRabbitmqMessageAcknowledged(settings.RabbitmqMessageAcknowledged),
-		metricRabbitmqMessageCurrent:      newMetricRabbitmqMessageCurrent(settings.RabbitmqMessageCurrent),
-		metricRabbitmqMessageDelivered:    newMetricRabbitmqMessageDelivered(settings.RabbitmqMessageDelivered),
-		metricRabbitmqMessageDropped:      newMetricRabbitmqMessageDropped(settings.RabbitmqMessageDropped),
-		metricRabbitmqMessagePublished:    newMetricRabbitmqMessagePublished(settings.RabbitmqMessagePublished),
+		buildInfo:                         settings.BuildInfo,
+		metricRabbitmqConsumerCount:       newMetricRabbitmqConsumerCount(mbc.Metrics.RabbitmqConsumerCount),
+		metricRabbitmqMessageAcknowledged: newMetricRabbitmqMessageAcknowledged(mbc.Metrics.RabbitmqMessageAcknowledged),
+		metricRabbitmqMessageCurrent:      newMetricRabbitmqMessageCurrent(mbc.Metrics.RabbitmqMessageCurrent),
+		metricRabbitmqMessageDelivered:    newMetricRabbitmqMessageDelivered(mbc.Metrics.RabbitmqMessageDelivered),
+		metricRabbitmqMessageDropped:      newMetricRabbitmqMessageDropped(mbc.Metrics.RabbitmqMessageDropped),
+		metricRabbitmqMessagePublished:    newMetricRabbitmqMessagePublished(mbc.Metrics.RabbitmqMessagePublished),
+		metricRabbitmqNodeDiskFree:        newMetricRabbitmqNodeDiskFree(mbc.Metrics.RabbitmqNodeDiskFree),
+		metricRabbitmqNodeFdUsed:          newMetricRabbitmqNodeFdUsed(mbc.Metrics.RabbitmqNodeFdUsed),
+		metricRabbitmqNodeMemLimit:        newMetricRabbitmqNodeMemLimit(mbc.Metrics.RabbitmqNodeMemLimit),
+		metricRabbitmqNodeMemUsed:         newMetricRabbitmqNodeMemUsed(mbc.Metrics.RabbitmqNodeMemUsed),
+		resourceAttributeIncludeFilter:    make(map[string]filter.Filter),
+		resourceAttributeExcludeFilter:    make(map[string]filter.Filter),
 	}
+	if mbc.ResourceAttributes.RabbitmqNodeName.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["rabbitmq.node.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqNodeName.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqNodeName.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["rabbitmq.node.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqNodeName.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqQueueName.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["rabbitmq.queue.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqQueueName.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqQueueName.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["rabbitmq.queue.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqQueueName.MetricsExclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqVhostName.MetricsInclude != nil {
+		mb.resourceAttributeIncludeFilter["rabbitmq.vhost.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqVhostName.MetricsInclude)
+	}
+	if mbc.ResourceAttributes.RabbitmqVhostName.MetricsExclude != nil {
+		mb.resourceAttributeExcludeFilter["rabbitmq.vhost.name"] = filter.CreateFilter(mbc.ResourceAttributes.RabbitmqVhostName.MetricsExclude)
+	}
+
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 	return mb
+}
+
+// NewResourceBuilder returns a new resource builder that should be used to build a resource associated with for the emitted metrics.
+func (mb *MetricsBuilder) NewResourceBuilder() *ResourceBuilder {
+	return NewResourceBuilder(mb.config.ResourceAttributes)
 }
 
 // updateCapacity updates max length of metrics and resource attributes that will be used for the slice capacity.
@@ -431,53 +643,45 @@ func (mb *MetricsBuilder) updateCapacity(rm pmetric.ResourceMetrics) {
 	if mb.metricsCapacity < rm.ScopeMetrics().At(0).Metrics().Len() {
 		mb.metricsCapacity = rm.ScopeMetrics().At(0).Metrics().Len()
 	}
-	if mb.resourceCapacity < rm.Resource().Attributes().Len() {
-		mb.resourceCapacity = rm.Resource().Attributes().Len()
-	}
 }
 
 // ResourceMetricsOption applies changes to provided resource metrics.
-type ResourceMetricsOption func(pmetric.ResourceMetrics)
-
-// WithRabbitmqNodeName sets provided value as "rabbitmq.node.name" attribute for current resource.
-func WithRabbitmqNodeName(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("rabbitmq.node.name", val)
-	}
+type ResourceMetricsOption interface {
+	apply(pmetric.ResourceMetrics)
 }
 
-// WithRabbitmqQueueName sets provided value as "rabbitmq.queue.name" attribute for current resource.
-func WithRabbitmqQueueName(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("rabbitmq.queue.name", val)
-	}
+type resourceMetricsOptionFunc func(pmetric.ResourceMetrics)
+
+func (rmof resourceMetricsOptionFunc) apply(rm pmetric.ResourceMetrics) {
+	rmof(rm)
 }
 
-// WithRabbitmqVhostName sets provided value as "rabbitmq.vhost.name" attribute for current resource.
-func WithRabbitmqVhostName(val string) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
-		rm.Resource().Attributes().UpsertString("rabbitmq.vhost.name", val)
-	}
+// WithResource sets the provided resource on the emitted ResourceMetrics.
+// It's recommended to use ResourceBuilder to create the resource.
+func WithResource(res pcommon.Resource) ResourceMetricsOption {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
+		res.CopyTo(rm.Resource())
+	})
 }
 
 // WithStartTimeOverride overrides start time for all the resource metrics data points.
 // This option should be only used if different start time has to be set on metrics coming from different resources.
 func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
-	return func(rm pmetric.ResourceMetrics) {
+	return resourceMetricsOptionFunc(func(rm pmetric.ResourceMetrics) {
 		var dps pmetric.NumberDataPointSlice
 		metrics := rm.ScopeMetrics().At(0).Metrics()
 		for i := 0; i < metrics.Len(); i++ {
-			switch metrics.At(i).DataType() {
-			case pmetric.MetricDataTypeGauge:
+			switch metrics.At(i).Type() {
+			case pmetric.MetricTypeGauge:
 				dps = metrics.At(i).Gauge().DataPoints()
-			case pmetric.MetricDataTypeSum:
+			case pmetric.MetricTypeSum:
 				dps = metrics.At(i).Sum().DataPoints()
 			}
 			for j := 0; j < dps.Len(); j++ {
 				dps.At(j).SetStartTimestamp(start)
 			}
 		}
-	}
+	})
 }
 
 // EmitForResource saves all the generated metrics under a new resource and updates the internal state to be ready for
@@ -485,11 +689,10 @@ func WithStartTimeOverride(start pcommon.Timestamp) ResourceMetricsOption {
 // needs to emit metrics from several resources. Otherwise calling this function is not required,
 // just `Emit` function can be called instead.
 // Resource attributes should be provided as ResourceMetricsOption arguments.
-func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
+func (mb *MetricsBuilder) EmitForResource(options ...ResourceMetricsOption) {
 	rm := pmetric.NewResourceMetrics()
-	rm.Resource().Attributes().EnsureCapacity(mb.resourceCapacity)
 	ils := rm.ScopeMetrics().AppendEmpty()
-	ils.Scope().SetName("otelcol/rabbitmqreceiver")
+	ils.Scope().SetName(ScopeName)
 	ils.Scope().SetVersion(mb.buildInfo.Version)
 	ils.Metrics().EnsureCapacity(mb.metricsCapacity)
 	mb.metricRabbitmqConsumerCount.emit(ils.Metrics())
@@ -498,9 +701,25 @@ func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
 	mb.metricRabbitmqMessageDelivered.emit(ils.Metrics())
 	mb.metricRabbitmqMessageDropped.emit(ils.Metrics())
 	mb.metricRabbitmqMessagePublished.emit(ils.Metrics())
-	for _, op := range rmo {
-		op(rm)
+	mb.metricRabbitmqNodeDiskFree.emit(ils.Metrics())
+	mb.metricRabbitmqNodeFdUsed.emit(ils.Metrics())
+	mb.metricRabbitmqNodeMemLimit.emit(ils.Metrics())
+	mb.metricRabbitmqNodeMemUsed.emit(ils.Metrics())
+
+	for _, op := range options {
+		op.apply(rm)
 	}
+	for attr, filter := range mb.resourceAttributeIncludeFilter {
+		if val, ok := rm.Resource().Attributes().Get(attr); ok && !filter.Matches(val.AsString()) {
+			return
+		}
+	}
+	for attr, filter := range mb.resourceAttributeExcludeFilter {
+		if val, ok := rm.Resource().Attributes().Get(attr); ok && filter.Matches(val.AsString()) {
+			return
+		}
+	}
+
 	if ils.Metrics().Len() > 0 {
 		mb.updateCapacity(rm)
 		rm.MoveTo(mb.metricsBuffer.ResourceMetrics().AppendEmpty())
@@ -509,11 +728,11 @@ func (mb *MetricsBuilder) EmitForResource(rmo ...ResourceMetricsOption) {
 
 // Emit returns all the metrics accumulated by the metrics builder and updates the internal state to be ready for
 // recording another set of metrics. This function will be responsible for applying all the transformations required to
-// produce metric representation defined in metadata and user settings, e.g. delta or cumulative.
-func (mb *MetricsBuilder) Emit(rmo ...ResourceMetricsOption) pmetric.Metrics {
-	mb.EmitForResource(rmo...)
-	metrics := pmetric.NewMetrics()
-	mb.metricsBuffer.MoveTo(metrics)
+// produce metric representation defined in metadata and user config, e.g. delta or cumulative.
+func (mb *MetricsBuilder) Emit(options ...ResourceMetricsOption) pmetric.Metrics {
+	mb.EmitForResource(options...)
+	metrics := mb.metricsBuffer
+	mb.metricsBuffer = pmetric.NewMetrics()
 	return metrics
 }
 
@@ -547,11 +766,31 @@ func (mb *MetricsBuilder) RecordRabbitmqMessagePublishedDataPoint(ts pcommon.Tim
 	mb.metricRabbitmqMessagePublished.recordDataPoint(mb.startTime, ts, val)
 }
 
+// RecordRabbitmqNodeDiskFreeDataPoint adds a data point to rabbitmq.node.disk_free metric.
+func (mb *MetricsBuilder) RecordRabbitmqNodeDiskFreeDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricRabbitmqNodeDiskFree.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordRabbitmqNodeFdUsedDataPoint adds a data point to rabbitmq.node.fd_used metric.
+func (mb *MetricsBuilder) RecordRabbitmqNodeFdUsedDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricRabbitmqNodeFdUsed.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordRabbitmqNodeMemLimitDataPoint adds a data point to rabbitmq.node.mem_limit metric.
+func (mb *MetricsBuilder) RecordRabbitmqNodeMemLimitDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricRabbitmqNodeMemLimit.recordDataPoint(mb.startTime, ts, val)
+}
+
+// RecordRabbitmqNodeMemUsedDataPoint adds a data point to rabbitmq.node.mem_used metric.
+func (mb *MetricsBuilder) RecordRabbitmqNodeMemUsedDataPoint(ts pcommon.Timestamp, val int64) {
+	mb.metricRabbitmqNodeMemUsed.recordDataPoint(mb.startTime, ts, val)
+}
+
 // Reset resets metrics builder to its initial state. It should be used when external metrics source is restarted,
 // and metrics builder should update its startTime and reset it's internal state accordingly.
-func (mb *MetricsBuilder) Reset(options ...metricBuilderOption) {
+func (mb *MetricsBuilder) Reset(options ...MetricBuilderOption) {
 	mb.startTime = pcommon.NewTimestampFromTime(time.Now())
 	for _, op := range options {
-		op(mb)
+		op.apply(mb)
 	}
 }

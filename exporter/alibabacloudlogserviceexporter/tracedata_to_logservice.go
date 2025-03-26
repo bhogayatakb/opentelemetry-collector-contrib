@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package alibabacloudlogserviceexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/alibabacloudlogserviceexporter"
 
@@ -24,6 +13,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/tracetranslator"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/traceutil"
 )
 
 const (
@@ -90,16 +80,16 @@ func spanToLogServiceData(span ptrace.Span, resourceContents, instrumentationLib
 
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(traceIDField),
-		Value: proto.String(span.TraceID().HexString()),
+		Value: proto.String(traceutil.TraceIDToHexOrEmptyString(span.TraceID())),
 	})
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(spanIDField),
-		Value: proto.String(span.SpanID().HexString()),
+		Value: proto.String(traceutil.SpanIDToHexOrEmptyString(span.SpanID())),
 	})
 	// if ParentSpanID is not valid, the return "", it is compatible for log service
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(parentSpanIDField),
-		Value: proto.String(span.ParentSpanID().HexString()),
+		Value: proto.String(traceutil.SpanIDToHexOrEmptyString(span.ParentSpanID())),
 	})
 
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
@@ -121,7 +111,7 @@ func spanToLogServiceData(span ptrace.Span, resourceContents, instrumentationLib
 	})
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(traceStateField),
-		Value: proto.String(string(span.TraceState())),
+		Value: proto.String(span.TraceState().AsRaw()),
 	})
 	contentsBuffer = append(contentsBuffer, sls.LogContent{
 		Key:   proto.String(startTimeField),
@@ -187,10 +177,10 @@ func statusCodeToShortString(code ptrace.StatusCode) string {
 }
 
 func eventsToString(events ptrace.SpanEventSlice) string {
-	eventArray := make([]map[string]interface{}, 0, events.Len())
+	eventArray := make([]map[string]any, 0, events.Len())
 	for i := 0; i < events.Len(); i++ {
 		spanEvent := events.At(i)
-		event := map[string]interface{}{}
+		event := map[string]any{}
 		event[nameField] = spanEvent.Name()
 		event[timeField] = spanEvent.Timestamp()
 		event[attributeField] = spanEvent.Attributes().AsRaw()
@@ -198,16 +188,15 @@ func eventsToString(events ptrace.SpanEventSlice) string {
 	}
 	eventArrayBytes, _ := json.Marshal(&eventArray)
 	return string(eventArrayBytes)
-
 }
 
 func spanLinksToString(spanLinkSlice ptrace.SpanLinkSlice) string {
-	linkArray := make([]map[string]interface{}, 0, spanLinkSlice.Len())
+	linkArray := make([]map[string]any, 0, spanLinkSlice.Len())
 	for i := 0; i < spanLinkSlice.Len(); i++ {
 		spanLink := spanLinkSlice.At(i)
-		link := map[string]interface{}{}
-		link[spanIDField] = spanLink.SpanID().HexString()
-		link[traceIDField] = spanLink.TraceID().HexString()
+		link := map[string]any{}
+		link[spanIDField] = traceutil.SpanIDToHexOrEmptyString(spanLink.SpanID())
+		link[traceIDField] = traceutil.TraceIDToHexOrEmptyString(spanLink.TraceID())
 		link[attributeField] = spanLink.Attributes().AsRaw()
 		linkArray = append(linkArray, link)
 	}

@@ -1,16 +1,5 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package simpleprometheusreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/simpleprometheusreceiver"
 
@@ -18,15 +7,13 @@ import (
 	"net/url"
 	"time"
 
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/confighttp"
 )
 
 // Config defines configuration for simple prometheus receiver.
 type Config struct {
-	config.ReceiverSettings       `mapstructure:",squash"`
-	confighttp.HTTPClientSettings `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
-	// Deprecated: [v0.55.0] Use confighttp.HTTPClientSettings instead.
+	confighttp.ClientConfig `mapstructure:",squash"` // squash ensures fields are correctly decoded in embedded struct.
+	// Deprecated: [v0.55.0] Use confighttp.ClientConfig instead.
 	httpConfig `mapstructure:",squash"`
 	// CollectionInterval is the interval at which metrics should be collected
 	CollectionInterval time.Duration `mapstructure:"collection_interval"`
@@ -38,6 +25,8 @@ type Config struct {
 	Labels map[string]string `mapstructure:"labels,omitempty"`
 	// Whether or not to use pod service account to authenticate.
 	UseServiceAccount bool `mapstructure:"use_service_account"`
+	// JobName allows users to customize the job name optionally.
+	JobName string `mapstructure:"job_name"`
 }
 
 // TODO: Move to a common package for use by other receivers and also pull

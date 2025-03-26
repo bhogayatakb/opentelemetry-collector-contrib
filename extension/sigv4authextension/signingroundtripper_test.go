@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package sigv4authextension
 
@@ -30,7 +19,7 @@ import (
 
 type errorRoundTripper struct{}
 
-func (ert *errorRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+func (ert *errorRoundTripper) RoundTrip(_ *http.Request) (*http.Response, error) {
 	return nil, errors.New("error")
 }
 
@@ -50,13 +39,19 @@ func TestRoundTrip(t *testing.T) {
 			"valid_round_tripper",
 			defaultRoundTripper,
 			false,
-			&Config{Region: "region", Service: "service"},
+			&Config{Region: "region", Service: "service", credsProvider: awsCredsProvider},
 		},
 		{
 			"error_round_tripper",
 			errorRoundTripper,
 			true,
-			&Config{Region: "region", Service: "service", AssumeRole: AssumeRole{ARN: "rolearn", STSRegion: "region"}},
+			&Config{Region: "region", Service: "service", AssumeRole: AssumeRole{ARN: "rolearn", STSRegion: "region"}, credsProvider: awsCredsProvider},
+		},
+		{
+			"error_invalid_credsProvider",
+			defaultRoundTripper,
+			true,
+			&Config{Region: "region", Service: "service", credsProvider: nil},
 		},
 	}
 
@@ -74,18 +69,17 @@ func TestRoundTrip(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, body, string(content))
 
-				w.WriteHeader(200)
+				w.WriteHeader(http.StatusOK)
 			}))
 			defer server.Close()
 			serverURL, _ := url.Parse(server.URL)
 
-			testcase.cfg.credsProvider = awsCredsProvider
 			sa := newSigv4Extension(testcase.cfg, awsSDKInfo, zap.NewNop())
 			rt, err := sa.RoundTripper(testcase.rt)
 			assert.NoError(t, err)
 
 			newBody := strings.NewReader(body)
-			req, err := http.NewRequest("POST", serverURL.String(), newBody)
+			req, err := http.NewRequest(http.MethodPost, serverURL.String(), newBody)
 			assert.NoError(t, err)
 
 			res, err := rt.RoundTrip(req)
@@ -95,25 +89,31 @@ func TestRoundTrip(t *testing.T) {
 				return
 			}
 			assert.NoError(t, err)
-			assert.Equal(t, res.StatusCode, 200)
+			assert.Equal(t, 200, res.StatusCode)
 		})
 	}
 }
 
 func TestInferServiceAndRegion(t *testing.T) {
-	req1, err := http.NewRequest("GET", "https://example.com", nil)
+	req1, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	assert.NoError(t, err)
 
-	req2, err := http.NewRequest("GET", "https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-XXX/api/v1/remote_write", nil)
+	req2, err := http.NewRequest(http.MethodGet, "https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-XXX/api/v1/remote_write", nil)
 	assert.NoError(t, err)
 
-	req3, err := http.NewRequest("GET", "https://search-my-domain.us-east-1.es.amazonaws.com/_search?q=house", nil)
+	req3, err := http.NewRequest(http.MethodGet, "https://search-my-domain.us-east-1.es.amazonaws.com/_search?q=house", nil)
 	assert.NoError(t, err)
 
-	req4, err := http.NewRequest("GET", "https://example.com", nil)
+	req4, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	assert.NoError(t, err)
 
-	req5, err := http.NewRequest("GET", "https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-XXX/api/v1/remote_write", nil)
+	req5, err := http.NewRequest(http.MethodGet, "https://aps-workspaces.us-east-1.amazonaws.com/workspaces/ws-XXX/api/v1/remote_write", nil)
+	assert.NoError(t, err)
+
+	req6, err := http.NewRequest(http.MethodGet, "https://logs.us-east-1.amazonaws.com/v1/logs", nil)
+	assert.NoError(t, err)
+
+	req7, err := http.NewRequest(http.MethodGet, "https://xray.us-east-1.amazonaws.com/v1/traces", nil)
 	assert.NoError(t, err)
 
 	tests := []struct {
@@ -158,6 +158,20 @@ func TestInferServiceAndRegion(t *testing.T) {
 			"service",
 			"region",
 		},
+		{
+			"logs_service_and_region_match_with_no_config",
+			req6,
+			createDefaultConfig().(*Config),
+			"logs",
+			"us-east-1",
+		},
+		{
+			"xray_service_and_region_match_with_no_config",
+			req7,
+			createDefaultConfig().(*Config),
+			"xray",
+			"us-east-1",
+		},
 	}
 
 	// run tests
@@ -167,7 +181,7 @@ func TestInferServiceAndRegion(t *testing.T) {
 			assert.NotNil(t, sa)
 
 			rt, err := sa.RoundTripper((http.RoundTripper)(http.DefaultTransport.(*http.Transport).Clone()))
-			assert.Nil(t, err)
+			assert.NoError(t, err)
 			si := rt.(*signingRoundTripper)
 
 			service, region := si.inferServiceAndRegion(testcase.request)
@@ -178,13 +192,13 @@ func TestInferServiceAndRegion(t *testing.T) {
 }
 
 func TestHashPayload(t *testing.T) {
-	req1, err := http.NewRequest("GET", "https://example.com", nil)
+	req1, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	assert.NoError(t, err)
 
-	req2, err := http.NewRequest("GET", "https://example.com", bytes.NewReader([]byte("This is a test.")))
+	req2, err := http.NewRequest(http.MethodGet, "https://example.com", bytes.NewReader([]byte("This is a test.")))
 	assert.NoError(t, err)
 
-	req3, err := http.NewRequest("GET", "https://example.com", nil)
+	req3, err := http.NewRequest(http.MethodGet, "https://example.com", nil)
 	assert.NoError(t, err)
 	req3.GetBody = func() (io.ReadCloser, error) { return nil, errors.New("this will always fail") }
 

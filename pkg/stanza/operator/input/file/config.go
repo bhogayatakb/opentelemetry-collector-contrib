@@ -1,22 +1,12 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package file // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/input/file"
 
 import (
-	"go.uber.org/zap"
+	"go.opentelemetry.io/collector/component"
 
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/textutils"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/fileconsumer"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/helper"
@@ -43,47 +33,33 @@ func NewConfigWithID(operatorID string) *Config {
 
 // Config is the configuration of a file input operator
 type Config struct {
-	helper.InputConfig  `mapstructure:",squash" yaml:",inline"`
-	fileconsumer.Config `mapstructure:",squash" yaml:",inline"`
+	helper.InputConfig  `mapstructure:",squash"`
+	fileconsumer.Config `mapstructure:",squash"`
 }
 
 // Build will build a file input operator from the supplied configuration
-func (c Config) Build(logger *zap.SugaredLogger) (operator.Operator, error) {
-	inputOperator, err := c.InputConfig.Build(logger)
+func (c Config) Build(set component.TelemetrySettings) (operator.Operator, error) {
+	inputOperator, err := c.InputConfig.Build(set)
 	if err != nil {
 		return nil, err
 	}
 
-	var preEmitOptions []preEmitOption
-	if c.IncludeFileName {
-		preEmitOptions = append(preEmitOptions, setFileName)
+	var toBody toBodyFunc = func(token []byte) any {
+		return textutils.UnsafeBytesAsString(token)
 	}
-	if c.IncludeFilePath {
-		preEmitOptions = append(preEmitOptions, setFilePath)
-	}
-	if c.IncludeFileNameResolved {
-		preEmitOptions = append(preEmitOptions, setFileNameResolved)
-	}
-	if c.IncludeFilePathResolved {
-		preEmitOptions = append(preEmitOptions, setFilePathResolved)
-	}
-
-	var toBody toBodyFunc = func(token []byte) interface{} {
-		return string(token)
-	}
-	if helper.IsNop(c.Config.Splitter.EncodingConfig.Encoding) {
-		toBody = func(token []byte) interface{} {
+	if textutils.IsNop(c.Config.Encoding) {
+		toBody = func(token []byte) any {
 			return token
 		}
 	}
 
 	input := &Input{
-		InputOperator:  inputOperator,
-		toBody:         toBody,
-		preEmitOptions: preEmitOptions,
+		InputOperator:           inputOperator,
+		toBody:                  toBody,
+		includeFileRecordNumber: c.IncludeFileRecordNumber,
 	}
 
-	input.fileConsumer, err = c.Config.Build(logger, input.emit)
+	input.fileConsumer, err = c.Config.Build(set, input.emitBatch)
 	if err != nil {
 		return nil, err
 	}

@@ -1,30 +1,16 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package file
 
 import (
 	"fmt"
-	"log"
-	"math/rand"
 	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/observiq/nanojack"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component/componenttest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
@@ -40,11 +26,8 @@ func newDefaultConfig(tempDir string) *Config {
 	return cfg
 }
 
-func newTestFileOperator(t *testing.T, cfgMod func(*Config), outMod func(*testutil.FakeOutput)) (*Input, chan *entry.Entry, string) {
+func newTestFileOperator(t *testing.T, cfgMod func(*Config)) (*Input, chan *entry.Entry, string) {
 	fakeOutput := testutil.NewFakeOutput(t)
-	if outMod != nil {
-		outMod(fakeOutput)
-	}
 
 	tempDir := t.TempDir()
 
@@ -52,7 +35,8 @@ func newTestFileOperator(t *testing.T, cfgMod func(*Config), outMod func(*testut
 	if cfgMod != nil {
 		cfgMod(cfg)
 	}
-	op, err := cfg.Build(testutil.Logger(t))
+	set := componenttest.NewNopTelemetrySettings()
+	op, err := cfg.Build(set)
 	require.NoError(t, err)
 
 	err = op.SetOutputs([]operator.Operator{fakeOutput})
@@ -61,58 +45,20 @@ func newTestFileOperator(t *testing.T, cfgMod func(*Config), outMod func(*testut
 	return op.(*Input), fakeOutput.Received, tempDir
 }
 
-func openFile(tb testing.TB, path string) *os.File {
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+func openTemp(tb testing.TB, tempDir string) *os.File {
+	return openTempWithPattern(tb, tempDir, "")
+}
+
+func openTempWithPattern(tb testing.TB, tempDir, pattern string) *os.File {
+	file, err := os.CreateTemp(tempDir, pattern)
 	require.NoError(tb, err)
 	tb.Cleanup(func() { _ = file.Close() })
 	return file
 }
 
-func openTemp(t testing.TB, tempDir string) *os.File {
-	return openTempWithPattern(t, tempDir, "")
-}
-
-func reopenTemp(t testing.TB, name string) *os.File {
-	return openTempWithPattern(t, filepath.Dir(name), filepath.Base(name))
-}
-
-func openTempWithPattern(t testing.TB, tempDir, pattern string) *os.File {
-	file, err := os.CreateTemp(tempDir, pattern)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = file.Close() })
-	return file
-}
-
-func getRotatingLogger(t testing.TB, tempDir string, maxLines, maxBackups int, copyTruncate, sequential bool) *log.Logger {
-	file, err := os.CreateTemp(tempDir, "")
-	require.NoError(t, err)
-	require.NoError(t, file.Close()) // will be managed by rotator
-
-	rotator := nanojack.Logger{
-		Filename:     file.Name(),
-		MaxLines:     maxLines,
-		MaxBackups:   maxBackups,
-		CopyTruncate: copyTruncate,
-		Sequential:   sequential,
-	}
-
-	t.Cleanup(func() { _ = rotator.Close() })
-
-	return log.New(&rotator, "", 0)
-}
-
-func writeString(t testing.TB, file *os.File, s string) {
+func writeString(tb testing.TB, file *os.File, s string) {
 	_, err := file.WriteString(s)
-	require.NoError(t, err)
-}
-
-func stringWithLength(length int) string {
-	charset := "abcdefghijklmnopqrstuvwxyz"
-	b := make([]byte, length)
-	for i := range b {
-		b[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(b)
+	require.NoError(tb, err)
 }
 
 func waitForOne(t *testing.T, c chan *entry.Entry) *entry.Entry {
@@ -141,21 +87,6 @@ func waitForByteMessage(t *testing.T, c chan *entry.Entry, expected []byte) {
 	case <-time.After(3 * time.Second):
 		require.FailNow(t, "Timed out waiting for message", expected)
 	}
-}
-
-func waitForMessages(t *testing.T, c chan *entry.Entry, expected []string) {
-	receivedMessages := make([]string, 0, len(expected))
-LOOP:
-	for {
-		select {
-		case e := <-c:
-			receivedMessages = append(receivedMessages, e.Body.(string))
-		case <-time.After(3 * time.Second):
-			break LOOP
-		}
-	}
-
-	require.ElementsMatch(t, expected, receivedMessages)
 }
 
 func expectNoMessages(t *testing.T, c chan *entry.Entry) {

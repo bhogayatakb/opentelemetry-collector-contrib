@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package basicauthextension // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/basicauthextension"
 
@@ -27,7 +16,8 @@ import (
 	"github.com/tg123/go-htpasswd"
 	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config/configauth"
+	"go.opentelemetry.io/collector/extension"
+	"go.opentelemetry.io/collector/extension/extensionauth"
 	creds "google.golang.org/grpc/credentials"
 )
 
@@ -38,42 +28,32 @@ var (
 	errInvalidFormat       = errors.New("invalid authorization format")
 )
 
-type basicAuth struct {
-	htpasswd   *HtpasswdSettings
-	clientAuth *ClientAuthSettings
-	matchFunc  func(username, password string) bool
+func newClientAuthExtension(cfg *Config) *basicAuthClient {
+	return &basicAuthClient{clientAuth: cfg.ClientAuth}
 }
 
-func newClientAuthExtension(cfg *Config) (configauth.ClientAuthenticator, error) {
-	if cfg.ClientAuth == nil || cfg.ClientAuth.Username == "" {
-		return nil, errNoCredentialSource
-	}
-
-	ba := basicAuth{
-		clientAuth: cfg.ClientAuth,
-	}
-	return configauth.NewClientAuthenticator(
-		configauth.WithClientRoundTripper(ba.roundTripper),
-		configauth.WithPerRPCCredentials(ba.perRPCCredentials),
-	), nil
-}
-
-func newServerAuthExtension(cfg *Config) (configauth.ServerAuthenticator, error) {
-
+func newServerAuthExtension(cfg *Config) (*basicAuthServer, error) {
 	if cfg.Htpasswd == nil || (cfg.Htpasswd.File == "" && cfg.Htpasswd.Inline == "") {
 		return nil, errNoCredentialSource
 	}
 
-	ba := basicAuth{
+	return &basicAuthServer{
 		htpasswd: cfg.Htpasswd,
-	}
-	return configauth.NewServerAuthenticator(
-		configauth.WithStart(ba.serverStart),
-		configauth.WithAuthenticate(ba.authenticate),
-	), nil
+	}, nil
 }
 
-func (ba *basicAuth) serverStart(ctx context.Context, host component.Host) error {
+var (
+	_ extension.Extension  = (*basicAuthServer)(nil)
+	_ extensionauth.Server = (*basicAuthServer)(nil)
+)
+
+type basicAuthServer struct {
+	htpasswd  *HtpasswdSettings
+	matchFunc func(username, password string) bool
+	component.ShutdownFunc
+}
+
+func (ba *basicAuthServer) Start(_ context.Context, _ component.Host) error {
 	var rs []io.Reader
 
 	if ba.htpasswd.File != "" {
@@ -102,7 +82,7 @@ func (ba *basicAuth) serverStart(ctx context.Context, host component.Host) error
 	return nil
 }
 
-func (ba *basicAuth) authenticate(ctx context.Context, headers map[string][]string) (context.Context, error) {
+func (ba *basicAuthServer) Authenticate(ctx context.Context, headers map[string][]string) (context.Context, error) {
 	auth := getAuthHeader(headers)
 	if auth == "" {
 		return ctx, errNoAuth
@@ -184,7 +164,7 @@ type authData struct {
 	raw      string
 }
 
-func (a *authData) GetAttribute(name string) interface{} {
+func (a *authData) GetAttribute(name string) any {
 	switch name {
 	case "username":
 		return a.username
@@ -221,11 +201,24 @@ type basicAuthRoundTripper struct {
 
 func (b *basicAuthRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
 	newRequest := request.Clone(request.Context())
-	newRequest.SetBasicAuth(b.authData.Username, b.authData.Password)
+	newRequest.SetBasicAuth(b.authData.Username, string(b.authData.Password))
 	return b.base.RoundTrip(newRequest)
 }
 
-func (ba *basicAuth) roundTripper(base http.RoundTripper) (http.RoundTripper, error) {
+var (
+	_ extension.Extension      = (*basicAuthClient)(nil)
+	_ extensionauth.HTTPClient = (*basicAuthClient)(nil)
+	_ extensionauth.GRPCClient = (*basicAuthClient)(nil)
+)
+
+type basicAuthClient struct {
+	component.StartFunc
+	component.ShutdownFunc
+
+	clientAuth *ClientAuthSettings
+}
+
+func (ba *basicAuthClient) RoundTripper(base http.RoundTripper) (http.RoundTripper, error) {
 	if strings.Contains(ba.clientAuth.Username, ":") {
 		return nil, errInvalidFormat
 	}
@@ -235,11 +228,11 @@ func (ba *basicAuth) roundTripper(base http.RoundTripper) (http.RoundTripper, er
 	}, nil
 }
 
-func (ba *basicAuth) perRPCCredentials() (creds.PerRPCCredentials, error) {
+func (ba *basicAuthClient) PerRPCCredentials() (creds.PerRPCCredentials, error) {
 	if strings.Contains(ba.clientAuth.Username, ":") {
 		return nil, errInvalidFormat
 	}
-	encoded := base64.StdEncoding.EncodeToString([]byte(ba.clientAuth.Username + ":" + ba.clientAuth.Password))
+	encoded := base64.StdEncoding.EncodeToString([]byte(ba.clientAuth.Username + ":" + string(ba.clientAuth.Password)))
 	return &perRPCAuth{
 		metadata: map[string]string{
 			"authorization": fmt.Sprintf("Basic %s", encoded),

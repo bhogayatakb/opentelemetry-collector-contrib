@@ -1,45 +1,35 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metadata // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver/internal/metadata"
 
 import (
 	"fmt"
 
+	"cloud.google.com/go/spanner"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
-type newMetricValueFunction func(m MetricValueMetadata, value interface{}) MetricValue
+type newMetricValueFunction func(m MetricValueMetadata, value any) MetricValue
 
 type MetricValueMetadata interface {
 	ValueMetadata
 	ValueType() ValueType
-	DataType() MetricDataType
+	DataType() MetricType
 	Unit() string
-	NewMetricValue(value interface{}) MetricValue
+	NewMetricValue(value any) MetricValue
 }
 
 type MetricValue interface {
 	Metadata() MetricValueMetadata
-	Value() interface{}
+	Value() any
 	SetValueTo(ndp pmetric.NumberDataPoint)
 }
 
 type queryMetricValueMetadata struct {
 	name               string
 	columnName         string
-	dataType           MetricDataType
+	dataType           MetricType
 	unit               string
 	valueType          ValueType
 	newMetricValueFunc newMetricValueFunction
@@ -56,11 +46,16 @@ type float64MetricValue struct {
 	value    float64
 }
 
-func (m queryMetricValueMetadata) ValueHolder() interface{} {
+type nullFloat64MetricValue struct {
+	metadata MetricValueMetadata
+	value    spanner.NullFloat64
+}
+
+func (m queryMetricValueMetadata) ValueHolder() any {
 	return m.valueHolderFunc()
 }
 
-func (m queryMetricValueMetadata) NewMetricValue(value interface{}) MetricValue {
+func (m queryMetricValueMetadata) NewMetricValue(value any) MetricValue {
 	return m.newMetricValueFunc(m, value)
 }
 
@@ -76,7 +71,7 @@ func (m queryMetricValueMetadata) ValueType() ValueType {
 	return m.valueType
 }
 
-func (m queryMetricValueMetadata) DataType() MetricDataType {
+func (m queryMetricValueMetadata) DataType() MetricType {
 	return m.dataType
 }
 
@@ -92,55 +87,86 @@ func (v float64MetricValue) Metadata() MetricValueMetadata {
 	return v.metadata
 }
 
-func (v int64MetricValue) Value() interface{} {
+func (v nullFloat64MetricValue) Metadata() MetricValueMetadata {
+	return v.metadata
+}
+
+func (v int64MetricValue) Value() any {
 	return v.value
 }
 
-func (v float64MetricValue) Value() interface{} {
+func (v float64MetricValue) Value() any {
+	return v.value
+}
+
+func (v nullFloat64MetricValue) Value() any {
 	return v.value
 }
 
 func (v int64MetricValue) SetValueTo(point pmetric.NumberDataPoint) {
-	point.SetIntVal(v.value)
+	point.SetIntValue(v.value)
 }
 
 func (v float64MetricValue) SetValueTo(point pmetric.NumberDataPoint) {
-	point.SetDoubleVal(v.value)
+	point.SetDoubleValue(v.value)
 }
 
-func newInt64MetricValue(metadata MetricValueMetadata, valueHolder interface{}) MetricValue {
+func (v nullFloat64MetricValue) SetValueTo(point pmetric.NumberDataPoint) {
+	if v.value.Valid {
+		point.SetDoubleValue(v.value.Float64)
+	} else {
+		point.SetDoubleValue(0)
+	}
+}
+
+func newInt64MetricValue(metadata MetricValueMetadata, valueHolder any) MetricValue {
 	return int64MetricValue{
 		metadata: metadata,
 		value:    *valueHolder.(*int64),
 	}
 }
 
-func newFloat64MetricValue(metadata MetricValueMetadata, valueHolder interface{}) MetricValue {
+func newFloat64MetricValue(metadata MetricValueMetadata, valueHolder any) MetricValue {
 	return float64MetricValue{
 		metadata: metadata,
 		value:    *valueHolder.(*float64),
 	}
 }
 
-func NewMetricValueMetadata(name string, columnName string, dataType MetricDataType, unit string,
-	valueType ValueType) (MetricValueMetadata, error) {
+func newNullFloat64MetricValue(metadata MetricValueMetadata, valueHolder any) MetricValue {
+	return nullFloat64MetricValue{
+		metadata: metadata,
+		value:    *valueHolder.(*spanner.NullFloat64),
+	}
+}
 
+func NewMetricValueMetadata(name string, columnName string, dataType MetricType, unit string,
+	valueType ValueType,
+) (MetricValueMetadata, error) {
 	var newMetricValueFunc newMetricValueFunction
 	var valueHolderFunc valueHolderFunction
 
 	switch valueType {
 	case IntValueType:
 		newMetricValueFunc = newInt64MetricValue
-		valueHolderFunc = func() interface{} {
+		valueHolderFunc = func() any {
 			var valueHolder int64
 			return &valueHolder
 		}
 	case FloatValueType:
 		newMetricValueFunc = newFloat64MetricValue
-		valueHolderFunc = func() interface{} {
+		valueHolderFunc = func() any {
 			var valueHolder float64
 			return &valueHolder
 		}
+	case NullFloatValueType:
+		newMetricValueFunc = newNullFloat64MetricValue
+		valueHolderFunc = func() any {
+			var valueHolder spanner.NullFloat64
+			return &valueHolder
+		}
+	case UnknownValueType, StringValueType, BoolValueType, StringSliceValueType, ByteSliceValueType, LockRequestSliceValueType:
+		fallthrough
 	default:
 		return nil, fmt.Errorf("invalid value type received for metric value %q", name)
 	}

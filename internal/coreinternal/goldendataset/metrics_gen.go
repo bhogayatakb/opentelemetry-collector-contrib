@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package goldendataset // import "github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/goldendataset"
 
@@ -27,7 +16,7 @@ import (
 // metrics with the corresponding number/type of attributes and pass into MetricsFromCfg to generate metrics.
 type MetricsCfg struct {
 	// The type of metric to generate
-	MetricDescriptorType pmetric.MetricDataType
+	MetricDescriptorType pmetric.MetricType
 	// MetricValueType is the type of the numeric value: int or double.
 	MetricValueType pmetric.NumberDataPointValueType
 	// If MetricDescriptorType is one of the Sum, this describes if the sum is monotonic or not.
@@ -58,7 +47,7 @@ type MetricsCfg struct {
 // (but boring) metrics, and can be used as a starting point for making alterations.
 func DefaultCfg() MetricsCfg {
 	return MetricsCfg{
-		MetricDescriptorType: pmetric.MetricDataTypeGauge,
+		MetricDescriptorType: pmetric.MetricTypeGauge,
 		MetricValueType:      pmetric.NumberDataPointValueTypeInt,
 		MetricNamePrefix:     "",
 		NumILMPerResource:    1,
@@ -95,7 +84,7 @@ func (g *metricGenerator) genMetricFromCfg(cfg MetricsCfg) pmetric.Metrics {
 		rm := rms.AppendEmpty()
 		resource := rm.Resource()
 		for j := 0; j < cfg.NumResourceAttrs; j++ {
-			resource.Attributes().UpsertString(
+			resource.Attributes().PutStr(
 				fmt.Sprintf("resource-attr-name-%d", j),
 				fmt.Sprintf("resource-attr-val-%d", j),
 			)
@@ -120,26 +109,25 @@ func (g *metricGenerator) populateMetrics(cfg MetricsCfg, ilm pmetric.ScopeMetri
 	for i := 0; i < cfg.NumMetricsPerILM; i++ {
 		metric := metrics.AppendEmpty()
 		g.populateMetricDesc(cfg, metric)
+		//exhaustive:enforce
 		switch cfg.MetricDescriptorType {
-		case pmetric.MetricDataTypeGauge:
-			metric.SetDataType(pmetric.MetricDataTypeGauge)
-			populateNumberPoints(cfg, metric.Gauge().DataPoints())
-		case pmetric.MetricDataTypeSum:
-			metric.SetDataType(pmetric.MetricDataTypeSum)
-			sum := metric.Sum()
+		case pmetric.MetricTypeGauge:
+			populateNumberPoints(cfg, metric.SetEmptyGauge().DataPoints())
+		case pmetric.MetricTypeSum:
+			sum := metric.SetEmptySum()
 			sum.SetIsMonotonic(cfg.IsMonotonicSum)
-			sum.SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+			sum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 			populateNumberPoints(cfg, sum.DataPoints())
-		case pmetric.MetricDataTypeHistogram:
-			metric.SetDataType(pmetric.MetricDataTypeHistogram)
-			histo := metric.Histogram()
-			histo.SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+		case pmetric.MetricTypeHistogram:
+			histo := metric.SetEmptyHistogram()
+			histo.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 			populateDoubleHistogram(cfg, histo)
-		case pmetric.MetricDataTypeExponentialHistogram:
-			metric.SetDataType(pmetric.MetricDataTypeExponentialHistogram)
-			histo := metric.ExponentialHistogram()
-			histo.SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+		case pmetric.MetricTypeExponentialHistogram:
+			histo := metric.SetEmptyExponentialHistogram()
+			histo.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 			populateExpoHistogram(cfg, histo)
+		case pmetric.MetricTypeSummary:
+			panic("unsupported type summary")
 		}
 	}
 }
@@ -159,9 +147,9 @@ func populateNumberPoints(cfg MetricsCfg, pts pmetric.NumberDataPointSlice) {
 		pt.SetTimestamp(getTimestamp(cfg.StartTime, cfg.StepSize, i))
 		switch cfg.MetricValueType {
 		case pmetric.NumberDataPointValueTypeInt:
-			pt.SetIntVal(int64(cfg.PtVal + i))
+			pt.SetIntValue(int64(cfg.PtVal + i))
 		case pmetric.NumberDataPointValueTypeDouble:
-			pt.SetDoubleVal(float64(cfg.PtVal + i))
+			pt.SetDoubleValue(float64(cfg.PtVal + i))
 		default:
 			panic("Should not happen")
 		}
@@ -188,31 +176,31 @@ func populateDoubleHistogram(cfg MetricsCfg, dh pmetric.Histogram) {
 }
 
 func setDoubleHistogramBounds(hdp pmetric.HistogramDataPoint, bounds ...float64) {
-	counts := make([]uint64, len(bounds))
-	hdp.SetBucketCounts(pcommon.NewImmutableUInt64Slice(counts))
-	hdp.SetExplicitBounds(pcommon.NewImmutableFloat64Slice(bounds))
+	counts := make([]uint64, len(bounds)+1)
+	hdp.BucketCounts().FromRaw(counts)
+	hdp.ExplicitBounds().FromRaw(bounds)
 }
 
 func addDoubleHistogramVal(hdp pmetric.HistogramDataPoint, val float64) {
 	hdp.SetCount(hdp.Count() + 1)
 	hdp.SetSum(hdp.Sum() + val)
-	buckets := hdp.BucketCounts().AsRaw()
+	// TODO: HasSum, Min, HasMin, Max, HasMax are not covered in tests.
+	buckets := hdp.BucketCounts()
 	bounds := hdp.ExplicitBounds()
 	for i := 0; i < bounds.Len(); i++ {
 		bound := bounds.At(i)
 		if val <= bound {
-			buckets[i]++
+			buckets.SetAt(i, buckets.At(i)+1)
 			break
 		}
 	}
-	hdp.SetBucketCounts(pcommon.NewImmutableUInt64Slice(buckets))
 }
 
 func populatePtAttributes(cfg MetricsCfg, lm pcommon.Map) {
 	for i := 0; i < cfg.NumPtLabels; i++ {
 		k := fmt.Sprintf("pt-label-key-%d", i)
 		v := fmt.Sprintf("pt-label-val-%d", i)
-		lm.UpsertString(k, v)
+		lm.PutStr(k, v)
 	}
 }
 
@@ -230,11 +218,13 @@ func populateExpoHistogram(cfg MetricsCfg, dh pmetric.ExponentialHistogram) {
 		pt.SetTimestamp(ts)
 		populatePtAttributes(cfg, pt.Attributes())
 
-		pt.SetSum(100)
+		pt.SetSum(100 * float64(cfg.PtVal))
 		pt.SetCount(uint64(cfg.PtVal))
-		pt.SetScale(0)
-		pt.SetZeroCount(0)
+		pt.SetScale(int32(cfg.PtVal))
+		pt.SetZeroCount(uint64(cfg.PtVal))
+		pt.SetMin(float64(cfg.PtVal))
+		pt.SetMax(float64(cfg.PtVal))
 		pt.Positive().SetOffset(int32(cfg.PtVal))
-		pt.Positive().SetBucketCounts(pcommon.NewImmutableUInt64Slice([]uint64{uint64(cfg.PtVal)}))
+		pt.Positive().BucketCounts().FromRaw([]uint64{uint64(cfg.PtVal)})
 	}
 }

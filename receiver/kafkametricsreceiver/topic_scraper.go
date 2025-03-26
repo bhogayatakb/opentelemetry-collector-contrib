@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package kafkametricsreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kafkametricsreceiver"
 
@@ -18,14 +7,16 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 
-	"github.com/Shopify/sarama"
+	"github.com/IBM/sarama"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-	"go.opentelemetry.io/collector/receiver/scrapererror"
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/scraper"
+	"go.opentelemetry.io/collector/scraper/scrapererror"
 	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/kafkametricsreceiver/internal/metadata"
@@ -33,16 +24,18 @@ import (
 
 type topicScraper struct {
 	client       sarama.Client
-	settings     component.ReceiverCreateSettings
+	clusterAdmin sarama.ClusterAdmin
+	settings     receiver.Settings
 	topicFilter  *regexp.Regexp
-	saramaConfig *sarama.Config
 	config       Config
 	mb           *metadata.MetricsBuilder
 }
 
-func (s *topicScraper) Name() string {
-	return topicsScraperName
-}
+const (
+	minInsyncReplicas = "min.insync.replicas"
+	retentionMs       = "retention.ms"
+	retentionBytes    = "retention.bytes"
+)
 
 func (s *topicScraper) shutdown(context.Context) error {
 	if s.client != nil && !s.client.Closed() {
@@ -52,13 +45,13 @@ func (s *topicScraper) shutdown(context.Context) error {
 }
 
 func (s *topicScraper) start(_ context.Context, _ component.Host) error {
-	s.mb = metadata.NewMetricsBuilder(s.config.Metrics, s.settings.BuildInfo)
+	s.mb = metadata.NewMetricsBuilder(s.config.MetricsBuilderConfig, s.settings)
 	return nil
 }
 
 func (s *topicScraper) scrape(context.Context) (pmetric.Metrics, error) {
 	if s.client == nil {
-		client, err := newSaramaClient(s.config.Brokers, s.saramaConfig)
+		client, err := newSaramaClient(context.Background(), s.config.ClientConfig)
 		if err != nil {
 			return pmetric.Metrics{}, fmt.Errorf("failed to create client in topics scraper: %w", err)
 		}
@@ -71,10 +64,11 @@ func (s *topicScraper) scrape(context.Context) (pmetric.Metrics, error) {
 		return pmetric.Metrics{}, err
 	}
 
-	var scrapeErrors = scrapererror.ScrapeErrors{}
+	scrapeErrors := scrapererror.ScrapeErrors{}
 
 	now := pcommon.NewTimestampFromTime(time.Now())
 
+	s.scrapeTopicConfigs(now, scrapeErrors)
 	for _, topic := range topics {
 		if !s.topicFilter.MatchString(topic) {
 			continue
@@ -113,24 +107,80 @@ func (s *topicScraper) scrape(context.Context) (pmetric.Metrics, error) {
 			}
 		}
 	}
-	return s.mb.Emit(), scrapeErrors.Combine()
+
+	rb := s.mb.NewResourceBuilder()
+	rb.SetKafkaClusterAlias(s.config.ClusterAlias)
+
+	return s.mb.Emit(metadata.WithResource(rb.Emit())), scrapeErrors.Combine()
 }
 
-func createTopicsScraper(_ context.Context, cfg Config, saramaConfig *sarama.Config, settings component.ReceiverCreateSettings) (scraperhelper.Scraper, error) {
+func (s *topicScraper) scrapeTopicConfigs(now pcommon.Timestamp, errors scrapererror.ScrapeErrors) {
+	if !s.config.Metrics.KafkaTopicLogRetentionPeriod.Enabled &&
+		!s.config.Metrics.KafkaTopicLogRetentionSize.Enabled &&
+		!s.config.Metrics.KafkaTopicMinInsyncReplicas.Enabled &&
+		!s.config.Metrics.KafkaTopicReplicationFactor.Enabled {
+		return
+	}
+	if s.clusterAdmin == nil {
+		admin, err := newClusterAdmin(s.client)
+		if err != nil {
+			s.settings.Logger.Error("Error creating kafka client with admin privileges", zap.Error(err))
+			return
+		}
+		s.clusterAdmin = admin
+	}
+	topics, err := s.clusterAdmin.ListTopics()
+	if err != nil {
+		s.settings.Logger.Error("Error fetching cluster topic configurations", zap.Error(err))
+		return
+	}
+
+	for name, topic := range topics {
+		s.mb.RecordKafkaTopicReplicationFactorDataPoint(now, int64(topic.ReplicationFactor), name)
+		configEntries, _ := s.clusterAdmin.DescribeConfig(sarama.ConfigResource{
+			Type:        sarama.TopicResource,
+			Name:        name,
+			ConfigNames: []string{minInsyncReplicas, retentionMs, retentionBytes},
+		})
+
+		for _, config := range configEntries {
+			switch config.Name {
+			case minInsyncReplicas:
+				if val, err := strconv.Atoi(config.Value); err == nil {
+					s.mb.RecordKafkaTopicMinInsyncReplicasDataPoint(now, int64(val), name)
+				} else {
+					errors.AddPartial(1, err)
+				}
+			case retentionMs:
+				if val, err := strconv.Atoi(config.Value); err == nil {
+					s.mb.RecordKafkaTopicLogRetentionPeriodDataPoint(now, int64(val/1000), name)
+				} else {
+					errors.AddPartial(1, err)
+				}
+			case retentionBytes:
+				if val, err := strconv.Atoi(config.Value); err == nil {
+					s.mb.RecordKafkaTopicLogRetentionSizeDataPoint(now, int64(val), name)
+				} else {
+					errors.AddPartial(1, err)
+				}
+			}
+		}
+	}
+}
+
+func createTopicsScraper(_ context.Context, cfg Config, settings receiver.Settings) (scraper.Metrics, error) {
 	topicFilter, err := regexp.Compile(cfg.TopicMatch)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile topic filter: %w", err)
 	}
 	s := topicScraper{
-		settings:     settings,
-		topicFilter:  topicFilter,
-		saramaConfig: saramaConfig,
-		config:       cfg,
+		settings:    settings,
+		topicFilter: topicFilter,
+		config:      cfg,
 	}
-	return scraperhelper.NewScraper(
-		s.Name(),
+	return scraper.NewMetrics(
 		s.scrape,
-		scraperhelper.WithStart(s.start),
-		scraperhelper.WithShutdown(s.shutdown),
+		scraper.WithStart(s.start),
+		scraper.WithShutdown(s.shutdown),
 	)
 }

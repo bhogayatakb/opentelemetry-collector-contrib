@@ -1,16 +1,5 @@
-// Copyright 2020 The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package pulsarexporter
 
@@ -33,16 +22,15 @@ func buildTraces() ptrace.Traces {
 	span.SetName("foo")
 	span.SetStartTimestamp(pcommon.Timestamp(10))
 	span.SetEndTimestamp(pcommon.Timestamp(20))
-	span.SetTraceID(pcommon.NewTraceID([16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}))
-	span.SetSpanID(pcommon.NewSpanID([8]byte{1, 2, 3, 4, 5, 6, 7, 8}))
+	span.SetTraceID([16]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16})
+	span.SetSpanID([8]byte{1, 2, 3, 4, 5, 6, 7, 8})
 
 	return td
 }
 
 func TestJaegerJsonBatchMarshaler(t *testing.T) {
 	ptraces := buildTraces()
-	batches, err := jaeger.ProtoFromTraces(ptraces)
-	require.NoError(t, err)
+	batches := jaeger.ProtoFromTraces(ptraces)
 
 	jsonMarshaler := &jsonpb.Marshaler{}
 	buffer := new(bytes.Buffer)
@@ -54,13 +42,12 @@ func TestJaegerJsonBatchMarshaler(t *testing.T) {
 	}
 	jaegerJSONMessages, err := jaegerJSONMarshaler.Marshal(ptraces, "")
 	require.NoError(t, err)
-	assert.Equal(t, jaegerJSONMessages[0].Payload, jsonBytes)
+	assert.JSONEq(t, string(jaegerJSONMessages[0].Payload), string(jsonBytes))
 }
 
 func TestJaegerProtoBatchMarshaler(t *testing.T) {
 	ptraces := buildTraces()
-	batches, err := jaeger.ProtoFromTraces(ptraces)
-	require.NoError(t, err)
+	batches := jaeger.ProtoFromTraces(ptraces)
 
 	jaegerProtoBytes, err := batches[0].Marshal()
 	require.NoError(t, err)

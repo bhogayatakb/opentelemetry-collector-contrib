@@ -1,16 +1,5 @@
-// Copyright OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package azuremonitorexporter
 
@@ -23,20 +12,39 @@ import (
 	"testing"
 	"time"
 
+	"github.com/microsoft/ApplicationInsights-Go/appinsights"
 	"github.com/microsoft/ApplicationInsights-Go/appinsights/contracts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+	conventions "go.opentelemetry.io/collector/semconv/v1.27.0"
 	"go.uber.org/zap"
 )
 
 const (
 	defaultEnvelopeName = "Microsoft.ApplicationInsights.Message"
-	defaultdBaseType    = "MessageData"
+	defaultBaseType     = "MessageData"
+	eventBaseType       = "EventData"
 )
 
 var (
-	testLogs = []byte(`{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"dotnet"}}]},"scopeLogs":[{"scope":{},"logRecords":[{"timeUnixNano":"1643240673066096200","severityText":"Information","body":{"stringValue":"Message Body"},"flags":1,"traceId":"7b20d1349ef9b6d6f9d4d1d4a3ac2e82","spanId":"0c2ad924e1771630"},{"timeUnixNano":"0","observedTimeUnixNano":"1643240673066096200","severityText":"Information","body":{"stringValue":"Message Body"},"flags":1,"traceId":"7b20d1349ef9b6d6f9d4d1d4a3ac2e82","spanId":"0c2ad924e1771630"},{"timeUnixNano":"0","observedTimeUnixNano":"0","severityText":"Information","body":{"stringValue":"Message Body"},"flags":1,"traceId":"7b20d1349ef9b6d6f9d4d1d4a3ac2e82","spanId":"0c2ad924e1771630"}]}]}]}`)
+	testLogTime      = time.Date(2020, 2, 11, 20, 26, 13, 789, time.UTC)
+	testLogTimestamp = pcommon.NewTimestampFromTime(testLogTime)
+	testStringBody   = "Message Body"
+	severityLevelMap = map[plog.SeverityNumber]contracts.SeverityLevel{
+		plog.SeverityNumberTrace:       contracts.Verbose,
+		plog.SeverityNumberDebug4:      contracts.Verbose,
+		plog.SeverityNumberInfo:        contracts.Information,
+		plog.SeverityNumberInfo4:       contracts.Information,
+		plog.SeverityNumberWarn:        contracts.Warning,
+		plog.SeverityNumberWarn4:       contracts.Warning,
+		plog.SeverityNumberError:       contracts.Error,
+		plog.SeverityNumberError4:      contracts.Error,
+		plog.SeverityNumberFatal:       contracts.Critical,
+		plog.SeverityNumberFatal4:      contracts.Critical,
+		plog.SeverityNumberUnspecified: contracts.Information,
+	}
 )
 
 // Tests proper wrapping of a log record to an envelope
@@ -47,57 +55,59 @@ func TestLogRecordToEnvelope(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		logRecord plog.LogRecord
+		name     string
+		baseType string
+		index    int
 	}{
 		{
-			name:      "timestamp is correct",
-			logRecord: getTestLogRecord(t, 0),
+			name:  "timestamp is correct",
+			index: 0,
 		},
 		{
-			name:      "timestamp is empty",
-			logRecord: getTestLogRecord(t, 1),
+			name:  "timestamp is empty",
+			index: 1,
 		},
 		{
-			name:      "timestamp is empty and observed timestamp is empty",
-			logRecord: getTestLogRecord(t, 2),
+			name:  "timestamp is empty and observed timestamp is empty",
+			index: 2,
+		},
+		{
+			name:  "non-string body",
+			index: 3,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logRecord := tt.logRecord
+			resource, scope, logRecord := getTestLogRecord(tt.index)
 			logPacker := getLogPacker()
-			envelope := logPacker.LogRecordToEnvelope(logRecord)
+			envelope := logPacker.LogRecordToEnvelope(logRecord, resource, scope)
 
 			require.NotNil(t, envelope)
 			assert.Equal(t, defaultEnvelopeName, envelope.Name)
 			assert.Equal(t, toTime(timestampFromLogRecord(logRecord)).Format(time.RFC3339Nano), envelope.Time)
 			require.NotNil(t, envelope.Data)
 			envelopeData := envelope.Data.(*contracts.Data)
-			assert.Equal(t, defaultdBaseType, envelopeData.BaseType)
+			assert.Equal(t, defaultBaseType, envelopeData.BaseType)
 
 			require.NotNil(t, envelopeData.BaseData)
 
 			messageData := envelopeData.BaseData.(*contracts.MessageData)
-			assert.Equal(t, messageData.Message, logRecord.Body().StringVal())
-			assert.Equal(t, messageData.SeverityLevel, contracts.Information)
-
-			hexTraceID := logRecord.TraceID().HexString()
-			assert.Equal(t, envelope.Tags[contracts.OperationId], hexTraceID)
-
-			hexSpanID := logRecord.SpanID().HexString()
-			assert.Equal(t, envelope.Tags[contracts.OperationParentId], hexSpanID)
+			assert.Equal(t, logRecord.Body().AsString(), messageData.Message)
+			assert.Equal(t, contracts.Information, messageData.SeverityLevel)
+			assert.Equal(t, defaultTraceIDAsHex, envelope.Tags[contracts.OperationId])
+			assert.Equal(t, defaultSpanIDAsHex, envelope.Tags[contracts.OperationParentId])
+			assert.Contains(t, envelope.Tags[contracts.InternalSdkVersion], "otelc-")
 		})
 	}
 }
 
-// Test conversion from logRecord.SeverityText() to contracts.SeverityLevel()
+// Test conversion from logRecord.SeverityNumber() to contracts.SeverityLevel()
 func TestToAiSeverityLevel(t *testing.T) {
 	logPacker := getLogPacker()
-	for severityText, expectedSeverityLevel := range severityLevelMap {
-		severityLevel := logPacker.toAiSeverityLevel(severityText)
-		assert.Equal(t, severityLevel, expectedSeverityLevel)
+	for sn, expectedSeverityLevel := range severityLevelMap {
+		severityLevel := logPacker.toAiSeverityLevel(sn)
+		assert.Equal(t, expectedSeverityLevel, severityLevel)
 	}
 }
 
@@ -106,39 +116,234 @@ func TestExporterLogDataCallback(t *testing.T) {
 	mockTransportChannel := getMockTransportChannel()
 	exporter := getLogsExporter(defaultConfig, mockTransportChannel)
 
-	logs := getTestLogs(t)
+	logs := getTestLogs()
 
-	assert.NoError(t, exporter.onLogData(context.Background(), logs))
+	assert.NoError(t, exporter.consumeLogs(context.Background(), logs))
 
-	mockTransportChannel.AssertNumberOfCalls(t, "Send", 3)
+	mockTransportChannel.AssertNumberOfCalls(t, "Send", 4)
 }
 
-func getLogsExporter(config *Config, transportChannel transportChannel) *logExporter {
-	return &logExporter{
+func TestLogDataAttributesMapping(t *testing.T) {
+	logPacker := getLogPacker()
+	resource, scope, logRecord := getTestLogRecord(2)
+	logRecord.Attributes().PutInt("attribute_1", 10)
+	logRecord.Attributes().PutStr("attribute_2", "value_2")
+	logRecord.Attributes().PutBool("attribute_3", true)
+	logRecord.Attributes().PutDouble("attribute_4", 1.2)
+
+	envelope := logPacker.LogRecordToEnvelope(logRecord, resource, scope)
+
+	actualProperties := envelope.Data.(*contracts.Data).BaseData.(*contracts.MessageData).Properties
+	assert.Contains(t, actualProperties["attribute_1"], "10")
+	assert.Contains(t, actualProperties["attribute_2"], "value_2")
+	assert.Contains(t, actualProperties["attribute_3"], "true")
+	assert.Contains(t, actualProperties["attribute_4"], "1.2")
+}
+
+func TestLogRecordToEnvelopeResourceAttributes(t *testing.T) {
+	resource, scope, logRecord := getTestLogRecord(1)
+	logPacker := getLogPacker()
+
+	envelope := logPacker.LogRecordToEnvelope(logRecord, resource, scope)
+
+	require.NotEmpty(t, resource.Attributes())
+	envelopeData := envelope.Data.(*contracts.Data).BaseData.(*contracts.MessageData)
+	require.Subset(t, envelopeData.Properties, resource.Attributes().AsRaw())
+}
+
+func TestLogRecordToEnvelopeInstrumentationScope(t *testing.T) {
+	const aiInstrumentationLibraryNameConvention = "instrumentationlibrary.name"
+	const aiInstrumentationLibraryVersionConvention = "instrumentationlibrary.version"
+
+	resource, scope, logRecord := getTestLogRecord(1)
+	logPacker := getLogPacker()
+
+	envelope := logPacker.LogRecordToEnvelope(logRecord, resource, scope)
+
+	envelopeData := envelope.Data.(*contracts.Data).BaseData.(*contracts.MessageData)
+	require.Equal(t, scope.Name(), envelopeData.Properties[aiInstrumentationLibraryNameConvention])
+	require.Equal(t, scope.Version(), envelopeData.Properties[aiInstrumentationLibraryVersionConvention])
+}
+
+func TestLogRecordToEnvelopeCloudTags(t *testing.T) {
+	const aiCloudRoleConvention = "ai.cloud.role"
+	const aiCloudRoleInstanceConvention = "ai.cloud.roleInstance"
+
+	resource, scope, logRecord := getTestLogRecord(1)
+	logPacker := getLogPacker()
+
+	envelope := logPacker.LogRecordToEnvelope(logRecord, resource, scope)
+
+	resourceAttributes := resource.Attributes().AsRaw()
+	expectedCloudRole := resourceAttributes[conventions.AttributeServiceNamespace].(string) + "." + resourceAttributes[conventions.AttributeServiceName].(string)
+	require.Equal(t, expectedCloudRole, envelope.Tags[aiCloudRoleConvention])
+	expectedCloudRoleInstance := resourceAttributes[conventions.AttributeServiceInstanceID]
+	require.Equal(t, expectedCloudRoleInstance, envelope.Tags[aiCloudRoleInstanceConvention])
+}
+
+func getLogsExporter(config *Config, transportChannel appinsights.TelemetryChannel) *azureMonitorExporter {
+	return &azureMonitorExporter{
 		config,
 		transportChannel,
 		zap.NewNop(),
+		newMetricPacker(zap.NewNop()),
 	}
 }
 
 func getLogPacker() *logPacker {
-	return newLogPacker(zap.NewNop())
+	return newLogPacker(zap.NewNop(), defaultConfig)
 }
 
-func getTestLogs(tb testing.TB) plog.Logs {
-	logsMarshaler := plog.NewJSONUnmarshaler()
-	logs, err := logsMarshaler.UnmarshalLogs(testLogs)
-	assert.NoError(tb, err, "Can't unmarshal testing logs data -> %s", err)
+func getTestLogs() plog.Logs {
+	logs := plog.NewLogs()
+
+	// add the resource
+	resourceLogs := logs.ResourceLogs().AppendEmpty()
+	resource := resourceLogs.Resource()
+	resource.Attributes().PutStr(conventions.AttributeServiceName, defaultServiceName)
+	resource.Attributes().PutStr(conventions.AttributeServiceNamespace, defaultServiceNamespace)
+	resource.Attributes().PutStr(conventions.AttributeServiceInstanceID, defaultServiceInstance)
+
+	// add the scope
+	scopeLogs := resourceLogs.ScopeLogs().AppendEmpty()
+	scope := scopeLogs.Scope()
+	scope.SetName(defaultScopeName)
+	scope.SetVersion(defaultScopeVersion)
+
+	// add the log records
+	log := scopeLogs.LogRecords().AppendEmpty()
+	log.SetTimestamp(testLogTimestamp)
+	log.SetSeverityNumber(plog.SeverityNumberInfo)
+	log.SetSeverityText("Information")
+	log.SetFlags(1)
+	log.SetSpanID(defaultSpanID)
+	log.SetTraceID(defaultTraceID)
+	log.Body().SetStr(testStringBody)
+
+	log = scopeLogs.LogRecords().AppendEmpty()
+	log.SetObservedTimestamp(testLogTimestamp)
+	log.SetSeverityNumber(plog.SeverityNumberInfo)
+	log.SetSeverityText("Information")
+	log.SetFlags(1)
+	log.SetSpanID(defaultSpanID)
+	log.SetTraceID(defaultTraceID)
+	log.Body().SetStr(testStringBody)
+
+	log = scopeLogs.LogRecords().AppendEmpty()
+	log.SetSeverityNumber(plog.SeverityNumberInfo)
+	log.SetSeverityText("Information")
+	log.SetFlags(1)
+	log.SetSpanID(defaultSpanID)
+	log.SetTraceID(defaultTraceID)
+	log.Body().SetStr(testStringBody)
+
+	log = scopeLogs.LogRecords().AppendEmpty()
+	log.SetTimestamp(testLogTimestamp)
+	log.SetSeverityNumber(plog.SeverityNumberInfo)
+	log.SetSeverityText("Information")
+	log.SetFlags(1)
+	log.SetSpanID(defaultSpanID)
+	log.SetTraceID(defaultTraceID)
+
+	bodyMap := log.Body().SetEmptyMap()
+	bodyMap.PutStr("key1", "value1")
+	bodyMap.PutBool("key2", true)
+
 	return logs
 }
 
-func getTestLogRecord(tb testing.TB, index int) plog.LogRecord {
-	var logRecord plog.LogRecord
-	logs := getTestLogs(tb)
+func getTestLogRecord(index int) (pcommon.Resource, pcommon.InstrumentationScope, plog.LogRecord) {
+	logs := getTestLogs()
 	resourceLogs := logs.ResourceLogs()
+	resource := resourceLogs.At(0).Resource()
 	scopeLogs := resourceLogs.At(0).ScopeLogs()
+	scope := scopeLogs.At(0).Scope()
 	logRecords := scopeLogs.At(0).LogRecords()
-	logRecord = logRecords.At(index)
+	logRecord := logRecords.At(index)
 
-	return logRecord
+	return resource, scope, logRecord
+}
+
+func TestHandleEventData(t *testing.T) {
+	logger := zap.NewNop()
+	config := &Config{}
+	packer := newLogPacker(logger, config)
+
+	tests := []struct {
+		name              string
+		logRecord         func() plog.LogRecord
+		expectedEventName string
+		expectedProperty  map[string]string
+	}{
+		{
+			name: "Event name from attributeMicrosoftCustomEventName",
+			logRecord: func() plog.LogRecord {
+				lr := plog.NewLogRecord()
+				lr.Attributes().PutStr(attributeMicrosoftCustomEventName, "CustomEvent")
+				lr.Attributes().PutStr("test_attribute", "test_value")
+				return lr
+			},
+			expectedEventName: "CustomEvent",
+			expectedProperty: map[string]string{
+				attributeMicrosoftCustomEventName: "CustomEvent",
+				"test_attribute":                  "test_value",
+			},
+		},
+		{
+			name: "Event name from attributeApplicationInsightsEventMarkerAttribute",
+			logRecord: func() plog.LogRecord {
+				lr := plog.NewLogRecord()
+				lr.Attributes().PutStr(attributeApplicationInsightsEventMarkerAttribute, "MarkerEvent")
+				lr.Attributes().PutStr("test_attribute", "test_value")
+				return lr
+			},
+			expectedEventName: "MarkerEvent",
+			expectedProperty: map[string]string{
+				attributeApplicationInsightsEventMarkerAttribute: "MarkerEvent",
+				"test_attribute": "test_value",
+			},
+		},
+		{
+			name: "No event name attributes",
+			logRecord: func() plog.LogRecord {
+				lr := plog.NewLogRecord()
+				lr.Attributes().PutStr("test_attribute", "test_value")
+				return lr
+			},
+			expectedEventName: "",
+			expectedProperty: map[string]string{
+				"test_attribute": "test_value",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			envelope := contracts.NewEnvelope()
+			data := contracts.NewData()
+			logRecord := tt.logRecord()
+
+			packer.handleEventData(envelope, data, logRecord)
+
+			eventData := data.BaseData.(*contracts.EventData)
+			assert.Equal(t, tt.expectedEventName, eventData.Name)
+			assert.Equal(t, tt.expectedProperty, eventData.Properties)
+		})
+	}
+}
+
+func TestSetAttributesAsProperties(t *testing.T) {
+	properties := make(map[string]string)
+	attributes := pcommon.NewMap()
+	attributes.PutStr("string_key", "string_value")
+	attributes.PutInt("int_key", 123)
+	attributes.PutDouble("double_key", 4.56)
+	attributes.PutBool("bool_key", true)
+
+	setAttributesAsProperties(attributes, properties)
+
+	assert.Equal(t, "string_value", properties["string_key"])
+	assert.Equal(t, "123", properties["int_key"])
+	assert.Equal(t, "4.56", properties["double_key"])
+	assert.Equal(t, "true", properties["bool_key"])
 }

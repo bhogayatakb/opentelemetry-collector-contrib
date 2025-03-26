@@ -1,115 +1,133 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
-// Package elasticsearchexporter contains an opentelemetry-collector exporter
-// for Elasticsearch.
-// nolint:errcheck
 package elasticsearchexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter"
 
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"time"
 
-	"github.com/cenkalti/backoff/v4"
-	elasticsearch7 "github.com/elastic/go-elasticsearch/v7"
-	esutil7 "github.com/elastic/go-elasticsearch/v7/esutil"
+	"github.com/elastic/go-docappender/v2"
+	"go.opentelemetry.io/collector/client"
+	"go.opentelemetry.io/collector/component"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
-	"go.uber.org/multierr"
+	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/pprofile"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/common/sanitize"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter/internal/datapoints"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter/internal/elasticsearch"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter/internal/pool"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/elasticsearchexporter/internal/serializer/otelserializer"
 )
 
-type esClientCurrent = elasticsearch7.Client
-type esConfigCurrent = elasticsearch7.Config
-type esBulkIndexerCurrent = esutil7.BulkIndexer
-type esBulkIndexerItem = esutil7.BulkIndexerItem
-type esBulkIndexerResponseItem = esutil7.BulkIndexerResponseItem
-
 type elasticsearchExporter struct {
-	logger *zap.Logger
-
-	index       string
-	maxAttempts int
-
-	client      *esClientCurrent
-	bulkIndexer esBulkIndexerCurrent
-	model       mappingModel
+	set                 exporter.Settings
+	config              *Config
+	index               string
+	logstashFormat      LogstashFormatSettings
+	defaultMappingMode  MappingMode
+	allowedMappingModes map[string]MappingMode
+	bulkIndexers        bulkIndexers
+	bufferPool          *pool.BufferPool
+	encoders            map[MappingMode]documentEncoder
 }
 
-var retryOnStatus = []int{500, 502, 503, 504, 429}
+func newExporter(cfg *Config, set exporter.Settings, index string) (*elasticsearchExporter, error) {
+	allowedMappingModes := cfg.allowedMappingModes()
+	defaultMappingMode := allowedMappingModes[canonicalMappingModeName(cfg.Mapping.Mode)]
 
-const createAction = "create"
-
-func newExporter(logger *zap.Logger, cfg *Config) (*elasticsearchExporter, error) {
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	encoders := map[MappingMode]documentEncoder{}
+	for i := range NumMappingModes {
+		enc, err := newEncoder(i)
+		if err != nil {
+			return nil, err
+		}
+		encoders[i] = enc
 	}
-
-	client, err := newElasticsearchClient(logger, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	bulkIndexer, err := newBulkIndexer(logger, client, cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	maxAttempts := 1
-	if cfg.Retry.Enabled {
-		maxAttempts = cfg.Retry.MaxRequests
-	}
-
-	// TODO: Apply encoding and field mapping settings.
-	model := &encodeModel{dedup: true, dedot: false}
 
 	return &elasticsearchExporter{
-		logger:      logger,
-		client:      client,
-		bulkIndexer: bulkIndexer,
-
-		index:       cfg.Index,
-		maxAttempts: maxAttempts,
-		model:       model,
+		set:                 set,
+		config:              cfg,
+		index:               index,
+		logstashFormat:      cfg.LogstashFormat,
+		allowedMappingModes: allowedMappingModes,
+		defaultMappingMode:  defaultMappingMode,
+		bufferPool:          pool.NewBufferPool(),
+		encoders:            encoders,
 	}, nil
 }
 
+func (e *elasticsearchExporter) Start(ctx context.Context, host component.Host) error {
+	if err := e.bulkIndexers.start(ctx, e.config, e.set, host, e.allowedMappingModes); err != nil {
+		return fmt.Errorf("error starting bulk indexers: %w", err)
+	}
+	return nil
+}
+
 func (e *elasticsearchExporter) Shutdown(ctx context.Context) error {
-	return e.bulkIndexer.Close(ctx)
+	if err := e.bulkIndexers.shutdown(ctx); err != nil {
+		return fmt.Errorf("error shutting down bulk indexers: %w", err)
+	}
+	return nil
+}
+
+func (e *elasticsearchExporter) getEncoder(m MappingMode) (documentEncoder, error) {
+	if enc, ok := e.encoders[m]; ok {
+		return enc, nil
+	}
+
+	return nil, fmt.Errorf("no encoder setup for mapping mode %s", m)
 }
 
 func (e *elasticsearchExporter) pushLogsData(ctx context.Context, ld plog.Logs) error {
-	var errs []error
+	mappingMode, err := e.getMappingMode(ctx)
+	if err != nil {
+		return err
+	}
+	router := newDocumentRouter(mappingMode, e.index, e.config)
+	encoder, err := e.getEncoder(mappingMode)
+	if err != nil {
+		return err
+	}
 
+	session, err := e.bulkIndexers.modes[mappingMode].StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.End()
+
+	var errs []error
 	rls := ld.ResourceLogs()
 	for i := 0; i < rls.Len(); i++ {
 		rl := rls.At(i)
 		resource := rl.Resource()
 		ills := rl.ScopeLogs()
 		for j := 0; j < ills.Len(); j++ {
-			logs := ills.At(j).LogRecords()
+			ill := ills.At(j)
+			scope := ill.Scope()
+			ec := encodingContext{
+				resource:          resource,
+				resourceSchemaURL: rl.SchemaUrl(),
+				scope:             scope,
+				scopeSchemaURL:    ill.SchemaUrl(),
+			}
+
+			logs := ill.LogRecords()
 			for k := 0; k < logs.Len(); k++ {
-				if err := e.pushLogRecord(ctx, resource, logs.At(k)); err != nil {
+				if err := e.pushLogRecord(ctx, router, encoder, ec, logs.At(k), session); err != nil {
 					if cerr := ctx.Err(); cerr != nil {
 						return cerr
+					}
+
+					if errors.Is(err, ErrInvalidTypeForBodyMapMode) {
+						e.set.Logger.Warn("dropping log record", zap.Error(err))
+						continue
 					}
 
 					errs = append(errs, err)
@@ -118,205 +136,500 @@ func (e *elasticsearchExporter) pushLogsData(ctx context.Context, ld plog.Logs) 
 		}
 	}
 
-	return multierr.Combine(errs...)
-}
-
-func (e *elasticsearchExporter) pushLogRecord(ctx context.Context, resource pcommon.Resource, record plog.LogRecord) error {
-	document, err := e.model.encodeLog(resource, record)
-	if err != nil {
-		return fmt.Errorf("Failed to encode log event: %w", err)
+	if err := session.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
 	}
-	return e.pushEvent(ctx, document)
+	return errors.Join(errs...)
 }
 
-func (e *elasticsearchExporter) pushEvent(ctx context.Context, document []byte) error {
-	attempts := 1
-	body := bytes.NewReader(document)
-	item := esBulkIndexerItem{Action: createAction, Index: e.index, Body: body}
+func (e *elasticsearchExporter) pushLogRecord(
+	ctx context.Context,
+	router documentRouter,
+	encoder documentEncoder,
+	ec encodingContext,
+	record plog.LogRecord,
+	bulkIndexerSession bulkIndexerSession,
+) error {
+	index, err := router.routeLogRecord(ec.resource, ec.scope, record.Attributes())
+	if err != nil {
+		return err
+	}
 
-	// Setup error handler. The handler handles the per item response status based on the
-	// selective ACKing in the bulk response.
-	item.OnFailure = func(ctx context.Context, item esBulkIndexerItem, resp esBulkIndexerResponseItem, err error) {
-		switch {
-		case attempts < e.maxAttempts && shouldRetryEvent(resp.Status):
-			e.logger.Debug("Retrying to index event",
-				zap.Int("attempt", attempts),
-				zap.Int("status", resp.Status),
-				zap.NamedError("reason", err))
+	buf := e.bufferPool.NewPooledBuffer()
+	docID := e.extractDocumentIDAttribute(record.Attributes())
+	pipeline := e.extractDocumentPipelineAttribute(record.Attributes())
+	if err := encoder.encodeLog(ec, record, index, buf.Buffer); err != nil {
+		buf.Recycle()
+		return fmt.Errorf("failed to encode log event: %w", err)
+	}
 
-			attempts++
-			body.Seek(0, io.SeekStart)
-			e.bulkIndexer.Add(ctx, item)
+	// not recycling after Add returns an error as we don't know if it's already recycled
+	return bulkIndexerSession.Add(ctx, index.Index, docID, pipeline, buf, nil, docappender.ActionCreate)
+}
 
-		case resp.Status == 0 && err != nil:
-			// Encoding error. We didn't even attempt to send the event
-			e.logger.Error("Drop event: failed to add event to the bulk request buffer.",
-				zap.NamedError("reason", err))
+type dataPointsGroup struct {
+	resource          pcommon.Resource
+	resourceSchemaURL string
+	scope             pcommon.InstrumentationScope
+	scopeSchemaURL    string
+	dataPoints        []datapoints.DataPoint
+}
 
-		case err != nil:
-			e.logger.Error("Drop event: failed to index event",
-				zap.Int("attempt", attempts),
-				zap.Int("status", resp.Status),
-				zap.NamedError("reason", err))
+func (p *dataPointsGroup) addDataPoint(dp datapoints.DataPoint) {
+	p.dataPoints = append(p.dataPoints, dp)
+}
 
+func (e *elasticsearchExporter) pushMetricsData(
+	ctx context.Context,
+	metrics pmetric.Metrics,
+) error {
+	mappingMode, err := e.getMappingMode(ctx)
+	if err != nil {
+		return err
+	}
+	router := newDocumentRouter(mappingMode, e.index, e.config)
+	hasher := newDataPointHasher(mappingMode)
+	encoder, err := e.getEncoder(mappingMode)
+	if err != nil {
+		return err
+	}
+
+	session, err := e.bulkIndexers.modes[mappingMode].StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.End()
+
+	groupedDataPointsByIndex := make(map[elasticsearch.Index]map[uint32]*dataPointsGroup)
+	var validationErrs []error // log instead of returning these so that upstream does not retry
+	var errs []error
+	resourceMetrics := metrics.ResourceMetrics()
+	for i := 0; i < resourceMetrics.Len(); i++ {
+		resourceMetric := resourceMetrics.At(i)
+		resource := resourceMetric.Resource()
+		scopeMetrics := resourceMetric.ScopeMetrics()
+
+		for j := 0; j < scopeMetrics.Len(); j++ {
+			scopeMetrics := scopeMetrics.At(j)
+			scope := scopeMetrics.Scope()
+			for k := 0; k < scopeMetrics.Metrics().Len(); k++ {
+				metric := scopeMetrics.Metrics().At(k)
+
+				upsertDataPoint := func(dp datapoints.DataPoint) error {
+					index, err := router.routeDataPoint(resource, scope, dp.Attributes())
+					if err != nil {
+						return err
+					}
+					groupedDataPoints, ok := groupedDataPointsByIndex[index]
+					if !ok {
+						groupedDataPoints = make(map[uint32]*dataPointsGroup)
+						groupedDataPointsByIndex[index] = groupedDataPoints
+					}
+					dpHash := hasher.hashDataPoint(resource, scope, dp)
+					dpGroup, ok := groupedDataPoints[dpHash]
+					if !ok {
+						groupedDataPoints[dpHash] = &dataPointsGroup{
+							resource:          resource,
+							resourceSchemaURL: resourceMetric.SchemaUrl(),
+							scope:             scope,
+							scopeSchemaURL:    scopeMetrics.SchemaUrl(),
+							dataPoints:        []datapoints.DataPoint{dp},
+						}
+					} else {
+						dpGroup.addDataPoint(dp)
+					}
+					return nil
+				}
+
+				switch metric.Type() {
+				case pmetric.MetricTypeSum:
+					dps := metric.Sum().DataPoints()
+					for l := 0; l < dps.Len(); l++ {
+						dp := dps.At(l)
+						if err := upsertDataPoint(datapoints.NewNumber(metric, dp)); err != nil {
+							validationErrs = append(validationErrs, err)
+							continue
+						}
+					}
+				case pmetric.MetricTypeGauge:
+					dps := metric.Gauge().DataPoints()
+					for l := 0; l < dps.Len(); l++ {
+						dp := dps.At(l)
+						if err := upsertDataPoint(datapoints.NewNumber(metric, dp)); err != nil {
+							validationErrs = append(validationErrs, err)
+							continue
+						}
+					}
+				case pmetric.MetricTypeExponentialHistogram:
+					if metric.ExponentialHistogram().AggregationTemporality() == pmetric.AggregationTemporalityCumulative {
+						validationErrs = append(validationErrs, fmt.Errorf("dropping cumulative temporality exponential histogram %q", metric.Name()))
+						continue
+					}
+					dps := metric.ExponentialHistogram().DataPoints()
+					for l := 0; l < dps.Len(); l++ {
+						dp := dps.At(l)
+						if err := upsertDataPoint(datapoints.NewExponentialHistogram(metric, dp)); err != nil {
+							validationErrs = append(validationErrs, err)
+							continue
+						}
+					}
+				case pmetric.MetricTypeHistogram:
+					if metric.Histogram().AggregationTemporality() == pmetric.AggregationTemporalityCumulative {
+						validationErrs = append(validationErrs, fmt.Errorf("dropping cumulative temporality histogram %q", metric.Name()))
+						continue
+					}
+					dps := metric.Histogram().DataPoints()
+					for l := 0; l < dps.Len(); l++ {
+						dp := dps.At(l)
+						if err := upsertDataPoint(datapoints.NewHistogram(metric, dp)); err != nil {
+							validationErrs = append(validationErrs, err)
+							continue
+						}
+					}
+				case pmetric.MetricTypeSummary:
+					dps := metric.Summary().DataPoints()
+					for l := 0; l < dps.Len(); l++ {
+						dp := dps.At(l)
+						if err := upsertDataPoint(datapoints.NewSummary(metric, dp)); err != nil {
+							validationErrs = append(validationErrs, err)
+							continue
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for index, groupedDataPoints := range groupedDataPointsByIndex {
+		for _, dpGroup := range groupedDataPoints {
+			buf := e.bufferPool.NewPooledBuffer()
+			dynamicTemplates, err := encoder.encodeMetrics(
+				encodingContext{
+					resource:          dpGroup.resource,
+					resourceSchemaURL: dpGroup.resourceSchemaURL,
+					scope:             dpGroup.scope,
+					scopeSchemaURL:    dpGroup.scopeSchemaURL,
+				},
+				dpGroup.dataPoints,
+				&validationErrs,
+				index,
+				buf.Buffer,
+			)
+			if err != nil {
+				buf.Recycle()
+				errs = append(errs, err)
+				continue
+			}
+			if err := session.Add(ctx, index.Index, "", "", buf, dynamicTemplates, docappender.ActionCreate); err != nil {
+				// not recycling after Add returns an error as we don't know if it's already recycled
+				if cerr := ctx.Err(); cerr != nil {
+					return cerr
+				}
+				errs = append(errs, err)
+			}
+		}
+	}
+	if len(validationErrs) > 0 {
+		e.set.Logger.Warn("validation errors", zap.Error(errors.Join(validationErrs...)))
+	}
+
+	if err := session.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (e *elasticsearchExporter) pushTraceData(
+	ctx context.Context,
+	td ptrace.Traces,
+) error {
+	mappingMode, err := e.getMappingMode(ctx)
+	if err != nil {
+		return err
+	}
+	router := newDocumentRouter(mappingMode, e.index, e.config)
+	spanEventRouter := newDocumentRouter(mappingMode, e.config.LogsIndex, e.config)
+	encoder, err := e.getEncoder(mappingMode)
+	if err != nil {
+		return err
+	}
+
+	session, err := e.bulkIndexers.modes[mappingMode].StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer session.End()
+
+	var errs []error
+	resourceSpans := td.ResourceSpans()
+	for i := 0; i < resourceSpans.Len(); i++ {
+		il := resourceSpans.At(i)
+		resource := il.Resource()
+		scopeSpans := il.ScopeSpans()
+		for j := 0; j < scopeSpans.Len(); j++ {
+			scopeSpan := scopeSpans.At(j)
+			scope := scopeSpan.Scope()
+			ec := encodingContext{
+				resource:          resource,
+				resourceSchemaURL: il.SchemaUrl(),
+				scope:             scope,
+				scopeSchemaURL:    scopeSpan.SchemaUrl(),
+			}
+
+			spans := scopeSpan.Spans()
+			for k := 0; k < spans.Len(); k++ {
+				span := spans.At(k)
+				if err := e.pushTraceRecord(ctx, router, encoder, ec, span, session); err != nil {
+					if cerr := ctx.Err(); cerr != nil {
+						return cerr
+					}
+					errs = append(errs, err)
+				}
+				for ii := 0; ii < span.Events().Len(); ii++ {
+					spanEvent := span.Events().At(ii)
+					if err := e.pushSpanEvent(ctx, spanEventRouter, encoder, ec, span, spanEvent, session); err != nil {
+						errs = append(errs, err)
+					}
+				}
+			}
+		}
+	}
+
+	if err := session.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
+}
+
+func (e *elasticsearchExporter) pushTraceRecord(
+	ctx context.Context,
+	router documentRouter,
+	encoder documentEncoder,
+	ec encodingContext,
+	span ptrace.Span,
+	bulkIndexerSession bulkIndexerSession,
+) error {
+	index, err := router.routeSpan(ec.resource, ec.scope, span.Attributes())
+	if err != nil {
+		return err
+	}
+
+	buf := e.bufferPool.NewPooledBuffer()
+	if err := encoder.encodeSpan(ec, span, index, buf.Buffer); err != nil {
+		buf.Recycle()
+		return fmt.Errorf("failed to encode trace record: %w", err)
+	}
+	// not recycling after Add returns an error as we don't know if it's already recycled
+	return bulkIndexerSession.Add(ctx, index.Index, "", "", buf, nil, docappender.ActionCreate)
+}
+
+func (e *elasticsearchExporter) pushSpanEvent(
+	ctx context.Context,
+	router documentRouter,
+	encoder documentEncoder,
+	ec encodingContext,
+	span ptrace.Span,
+	spanEvent ptrace.SpanEvent,
+	bulkIndexerSession bulkIndexerSession,
+) error {
+	index, err := router.routeSpanEvent(ec.resource, ec.scope, spanEvent.Attributes())
+	if err != nil {
+		return err
+	}
+
+	buf := e.bufferPool.NewPooledBuffer()
+	if err := encoder.encodeSpanEvent(ec, span, spanEvent, index, buf.Buffer); err != nil || buf.Buffer.Len() == 0 {
+		buf.Recycle()
+		return err
+	}
+	// not recycling after Add returns an error as we don't know if it's already recycled
+	return bulkIndexerSession.Add(ctx, index.Index, "", "", buf, nil, docappender.ActionCreate)
+}
+
+func (e *elasticsearchExporter) extractDocumentIDAttribute(m pcommon.Map) string {
+	if !e.config.LogsDynamicID.Enabled {
+		return ""
+	}
+
+	v, ok := m.Get(elasticsearch.DocumentIDAttributeName)
+	if !ok {
+		return ""
+	}
+	return v.AsString()
+}
+
+func (e *elasticsearchExporter) extractDocumentPipelineAttribute(m pcommon.Map) string {
+	if !e.config.LogsDynamicPipeline.Enabled {
+		return ""
+	}
+
+	v, ok := m.Get(elasticsearch.DocumentPipelineAttributeName)
+	if !ok {
+		return ""
+	}
+	return v.AsString()
+}
+
+func (e *elasticsearchExporter) pushProfilesData(ctx context.Context, pd pprofile.Profiles) error {
+	// TODO add support for routing profiles to different data_stream.namespaces?
+	mappingMode, err := e.getMappingMode(ctx)
+	if err != nil {
+		return err
+	}
+	encoder, err := e.getEncoder(mappingMode)
+	if err != nil {
+		return err
+	}
+
+	defaultSession, err := e.bulkIndexers.modes[mappingMode].StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer defaultSession.End()
+	eventsSession, err := e.bulkIndexers.profilingEvents.StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer eventsSession.End()
+	stackTracesSession, err := e.bulkIndexers.profilingStackTraces.StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer stackTracesSession.End()
+	stackFramesSession, err := e.bulkIndexers.profilingStackFrames.StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer stackFramesSession.End()
+	executablesSession, err := e.bulkIndexers.profilingExecutables.StartSession(ctx)
+	if err != nil {
+		return err
+	}
+	defer executablesSession.End()
+
+	var errs []error
+	rps := pd.ResourceProfiles()
+	for i := 0; i < rps.Len(); i++ {
+		rp := rps.At(i)
+		resource := rp.Resource()
+		sps := rp.ScopeProfiles()
+		for j := 0; j < sps.Len(); j++ {
+			sp := sps.At(j)
+			scope := sp.Scope()
+			p := sp.Profiles()
+			for k := 0; k < p.Len(); k++ {
+				ec := encodingContext{
+					resource:          resource,
+					resourceSchemaURL: rp.SchemaUrl(),
+					scope:             scope,
+					scopeSchemaURL:    sp.SchemaUrl(),
+				}
+				if err := e.pushProfileRecord(
+					ctx, encoder, ec, p.At(k), defaultSession, eventsSession,
+					stackTracesSession, stackFramesSession, executablesSession,
+				); err != nil {
+					if cerr := ctx.Err(); cerr != nil {
+						return cerr
+					}
+
+					if errors.Is(err, ErrInvalidTypeForBodyMapMode) {
+						e.set.Logger.Warn("dropping profile record", zap.Error(err))
+						continue
+					}
+
+					errs = append(errs, err)
+				}
+			}
+		}
+	}
+
+	if err := defaultSession.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
+	}
+	if err := eventsSession.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
+	}
+	if err := stackTracesSession.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
+	}
+	if err := stackFramesSession.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
+	}
+	if err := executablesSession.Flush(ctx); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
+}
+
+func (e *elasticsearchExporter) pushProfileRecord(
+	ctx context.Context,
+	encoder documentEncoder,
+	ec encodingContext,
+	profile pprofile.Profile,
+	defaultSession, eventsSession, stackTracesSession, stackFramesSession, executablesSession bulkIndexerSession,
+) error {
+	return encoder.encodeProfile(ec, profile, func(buf *bytes.Buffer, docID, index string) error {
+		switch index {
+		case otelserializer.StackTraceIndex:
+			return stackTracesSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
+		case otelserializer.StackFrameIndex:
+			return stackFramesSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
+		case otelserializer.AllEventsIndex:
+			return eventsSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
+		case otelserializer.ExecutablesIndex:
+			return executablesSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionUpdate)
+		case otelserializer.ExecutablesSymQueueIndex, otelserializer.LeafFramesSymQueueIndex:
+			// These regular indices have a low write-frequency and can share the executablesSession.
+			return executablesSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
 		default:
-			e.logger.Error(fmt.Sprintf("Drop event: failed to index event: %#v", resp.Error),
-				zap.Int("attempt", attempts),
-				zap.Int("status", resp.Status))
+			return defaultSession.Add(ctx, index, docID, "", buf, nil, docappender.ActionCreate)
 		}
-	}
-
-	return e.bulkIndexer.Add(ctx, item)
-}
-
-// clientLogger implements the estransport.Logger interface
-// that is required by the Elasticsearch client for logging.
-type clientLogger zap.Logger
-
-// LogRoundTrip should not modify the request or response, except for consuming and closing the body.
-// Implementations have to check for nil values in request and response.
-func (cl *clientLogger) LogRoundTrip(requ *http.Request, resp *http.Response, err error, _ time.Time, dur time.Duration) error {
-	zl := (*zap.Logger)(cl)
-	switch {
-	case err == nil && resp != nil:
-		zl.Debug("Request roundtrip completed.",
-			zap.String("path", sanitize.String(requ.URL.Path)),
-			zap.String("method", requ.Method),
-			zap.Duration("duration", dur),
-			zap.String("status", resp.Status))
-
-	case err != nil:
-		zl.Error("Request failed.", zap.NamedError("reason", err))
-	}
-
-	return nil
-}
-
-// RequestBodyEnabled makes the client pass a copy of request body to the logger.
-func (*clientLogger) RequestBodyEnabled() bool {
-	// TODO: introduce setting log the bodies for more detailed debug logs
-	return false
-}
-
-// ResponseBodyEnabled makes the client pass a copy of response body to the logger.
-func (*clientLogger) ResponseBodyEnabled() bool {
-	// TODO: introduce setting log the bodies for more detailed debug logs
-	return false
-}
-
-func newElasticsearchClient(logger *zap.Logger, config *Config) (*esClientCurrent, error) {
-	tlsCfg, err := config.TLSClientSetting.LoadTLSConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	transport := newTransport(config, tlsCfg)
-
-	var headers http.Header
-	for k, v := range config.Headers {
-		headers.Add(k, v)
-	}
-
-	// TODO: validate settings:
-	//  - try to parse address and validate scheme (address must be a valid URL)
-	//  - check if cloud ID is valid
-
-	// maxRetries configures the maximum number of event publishing attempts,
-	// including the first send and additional retries.
-	maxRetries := config.Retry.MaxRequests - 1
-	retryDisabled := !config.Retry.Enabled || maxRetries <= 0
-	if retryDisabled {
-		maxRetries = 0
-	}
-
-	return elasticsearch7.NewClient(esConfigCurrent{
-		Transport: transport,
-
-		// configure connection setup
-		Addresses: config.Endpoints,
-		CloudID:   config.CloudID,
-		Username:  config.Authentication.User,
-		Password:  config.Authentication.Password,
-		APIKey:    config.Authentication.APIKey,
-		Header:    headers,
-
-		// configure retry behavior
-		RetryOnStatus:        retryOnStatus,
-		DisableRetry:         retryDisabled,
-		EnableRetryOnTimeout: config.Retry.Enabled,
-		MaxRetries:           maxRetries,
-		RetryBackoff:         createElasticsearchBackoffFunc(&config.Retry),
-
-		// configure sniffing
-		DiscoverNodesOnStart:  config.Discovery.OnStart,
-		DiscoverNodesInterval: config.Discovery.Interval,
-
-		// configure internal metrics reporting and logging
-		EnableMetrics:     false, // TODO
-		EnableDebugLogger: false, // TODO
-		Logger:            (*clientLogger)(logger),
 	})
 }
 
-func newTransport(config *Config, tlsCfg *tls.Config) *http.Transport {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if tlsCfg != nil {
-		transport.TLSClientConfig = tlsCfg
-	}
-	if config.ReadBufferSize > 0 {
-		transport.ReadBufferSize = config.ReadBufferSize
-	}
-	if config.WriteBufferSize > 0 {
-		transport.WriteBufferSize = config.WriteBufferSize
-	}
+func (e *elasticsearchExporter) getMappingMode(ctx context.Context) (MappingMode, error) {
+	const metadataKey = "x-elastic-mapping-mode"
 
-	return transport
-}
-
-func newBulkIndexer(logger *zap.Logger, client *elasticsearch7.Client, config *Config) (esBulkIndexerCurrent, error) {
-	// TODO: add debug logger
-	return esutil7.NewBulkIndexer(esutil7.BulkIndexerConfig{
-		NumWorkers:    config.NumWorkers,
-		FlushBytes:    config.Flush.Bytes,
-		FlushInterval: config.Flush.Interval,
-		Client:        client,
-		Pipeline:      config.Pipeline,
-		Timeout:       config.Timeout,
-
-		OnError: func(_ context.Context, err error) {
-			logger.Error(fmt.Sprintf("Bulk indexer error: %v", err))
-		},
-	})
-}
-
-func createElasticsearchBackoffFunc(config *RetrySettings) func(int) time.Duration {
-	if !config.Enabled {
-		return nil
-	}
-
-	expBackoff := backoff.NewExponentialBackOff()
-	if config.InitialInterval > 0 {
-		expBackoff.InitialInterval = config.InitialInterval
-	}
-	if config.MaxInterval > 0 {
-		expBackoff.MaxInterval = config.MaxInterval
-	}
-	expBackoff.Reset()
-
-	return func(attempts int) time.Duration {
-		if attempts == 1 {
-			expBackoff.Reset()
+	values := client.FromContext(ctx).Metadata.Get(metadataKey)
+	switch n := len(values); n {
+	case 0:
+		return e.defaultMappingMode, nil
+	case 1:
+		name := values[0]
+		mode, ok := e.allowedMappingModes[canonicalMappingModeName(name)]
+		if !ok {
+			return -1, fmt.Errorf(
+				"unsupported mapping mode %q, expected one of %q",
+				name, e.config.Mapping.AllowedModes,
+			)
 		}
-
-		return expBackoff.NextBackOff()
+		return mode, nil
+	default:
+		return -1, fmt.Errorf("expected one value for %s, got %d", metadataKey, n)
 	}
-}
-
-func shouldRetryEvent(status int) bool {
-	for _, retryable := range retryOnStatus {
-		if status == retryable {
-			return true
-		}
-	}
-	return false
 }

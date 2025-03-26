@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package datasenders // import "github.com/open-telemetry/opentelemetry-collector-contrib/testbed/datasenders"
 
@@ -65,7 +54,7 @@ func NewFluentLogsForwarder(t *testing.T, port int) *FluentLogsForwarder {
 	// file FLUENT_DATA_SENDER_DATA_FILE and forward data to FLUENT_DATA_SENDER_RECEIVER_PORT
 	// on 127.0.0.1.
 	if dataFileName := os.Getenv(fluentDatafileVar); dataFileName != "" {
-		f.dataFile, err = os.OpenFile(dataFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+		f.dataFile, err = os.OpenFile(dataFileName, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 		require.NoError(t, err)
 	} else {
 		logger, err := fluent.New(fluent.Config{FluentPort: port, Async: true})
@@ -110,25 +99,24 @@ func (f *FluentLogsForwarder) ConsumeLogs(_ context.Context, logs plog.Logs) err
 func (f *FluentLogsForwarder) convertLogToMap(lr plog.LogRecord) map[string]string {
 	out := map[string]string{}
 
-	if lr.Body().Type() == pcommon.ValueTypeString {
-		out["log"] = lr.Body().StringVal()
+	if lr.Body().Type() == pcommon.ValueTypeStr {
+		out["log"] = lr.Body().Str()
 	}
 
-	lr.Attributes().Range(func(k string, v pcommon.Value) bool {
+	for k, v := range lr.Attributes().All() {
 		switch v.Type() {
-		case pcommon.ValueTypeString:
-			out[k] = v.StringVal()
+		case pcommon.ValueTypeStr:
+			out[k] = v.Str()
 		case pcommon.ValueTypeInt:
-			out[k] = strconv.FormatInt(v.IntVal(), 10)
+			out[k] = strconv.FormatInt(v.Int(), 10)
 		case pcommon.ValueTypeDouble:
-			out[k] = strconv.FormatFloat(v.DoubleVal(), 'f', -1, 64)
+			out[k] = strconv.FormatFloat(v.Double(), 'f', -1, 64)
 		case pcommon.ValueTypeBool:
-			out[k] = strconv.FormatBool(v.BoolVal())
+			out[k] = strconv.FormatBool(v.Bool())
 		default:
 			panic("missing case")
 		}
-		return true
-	})
+	}
 
 	return out
 }
@@ -137,23 +125,22 @@ func (f *FluentLogsForwarder) convertLogToJSON(lr plog.LogRecord) []byte {
 	rec := map[string]string{
 		"time": time.Unix(0, int64(lr.Timestamp())).Format("02/01/2006:15:04:05Z"),
 	}
-	rec["log"] = lr.Body().StringVal()
+	rec["log"] = lr.Body().Str()
 
-	lr.Attributes().Range(func(k string, v pcommon.Value) bool {
+	for k, v := range lr.Attributes().All() {
 		switch v.Type() {
-		case pcommon.ValueTypeString:
-			rec[k] = v.StringVal()
+		case pcommon.ValueTypeStr:
+			rec[k] = v.Str()
 		case pcommon.ValueTypeInt:
-			rec[k] = strconv.FormatInt(v.IntVal(), 10)
+			rec[k] = strconv.FormatInt(v.Int(), 10)
 		case pcommon.ValueTypeDouble:
-			rec[k] = strconv.FormatFloat(v.DoubleVal(), 'f', -1, 64)
+			rec[k] = strconv.FormatFloat(v.Double(), 'f', -1, 64)
 		case pcommon.ValueTypeBool:
-			rec[k] = strconv.FormatBool(v.BoolVal())
+			rec[k] = strconv.FormatBool(v.Bool())
 		default:
 			panic("missing case")
 		}
-		return true
-	})
+	}
 	b, err := json.Marshal(rec)
 	if err != nil {
 		panic("failed to write log: " + err.Error())
@@ -168,7 +155,7 @@ func (f *FluentLogsForwarder) Flush() {
 func (f *FluentLogsForwarder) GenConfigYAMLStr() string {
 	return fmt.Sprintf(`
   fluentforward:
-    endpoint: localhost:%d`, f.Port)
+    endpoint: 127.0.0.1:%d`, f.Port)
 }
 
 func (f *FluentLogsForwarder) ProtocolName() string {

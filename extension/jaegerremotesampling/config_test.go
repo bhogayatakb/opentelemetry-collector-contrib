@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package jaegerremotesampling
 
@@ -21,44 +10,45 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/collector/config"
+	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config/configgrpc"
 	"go.opentelemetry.io/collector/config/confighttp"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/confmap/confmaptest"
+	"go.opentelemetry.io/collector/confmap/xconfmap"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/extension/jaegerremotesampling/internal/metadata"
 )
 
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		id       config.ComponentID
-		expected config.Extension
+		id       component.ID
+		expected component.Config
 	}{
 		{
-			id: config.NewComponentID(typeStr),
+			id: component.NewID(metadata.Type),
 			expected: &Config{
-				ExtensionSettings:  config.NewExtensionSettings(config.NewComponentID(typeStr)),
-				HTTPServerSettings: &confighttp.HTTPServerSettings{Endpoint: ":5778"},
-				GRPCServerSettings: &configgrpc.GRPCServerSettings{NetAddr: confignet.NetAddr{
-					Endpoint:  ":14250",
-					Transport: "tcp",
+				HTTPServerConfig: &confighttp.ServerConfig{Endpoint: "localhost:5778"},
+				GRPCServerConfig: &configgrpc.ServerConfig{NetAddr: confignet.AddrConfig{
+					Endpoint:  "localhost:14250",
+					Transport: confignet.TransportTypeTCP,
 				}},
 				Source: Source{
-					Remote: &configgrpc.GRPCClientSettings{
+					Remote: &configgrpc.ClientConfig{
 						Endpoint: "jaeger-collector:14250",
 					},
 				},
 			},
 		},
 		{
-			id: config.NewComponentIDWithName(typeStr, "1"),
+			id: component.NewIDWithName(metadata.Type, "1"),
 			expected: &Config{
-				ExtensionSettings:  config.NewExtensionSettings(config.NewComponentID(typeStr)),
-				HTTPServerSettings: &confighttp.HTTPServerSettings{Endpoint: ":5778"},
-				GRPCServerSettings: &configgrpc.GRPCServerSettings{NetAddr: confignet.NetAddr{
-					Endpoint:  ":14250",
-					Transport: "tcp",
+				HTTPServerConfig: &confighttp.ServerConfig{Endpoint: "localhost:5778"},
+				GRPCServerConfig: &configgrpc.ServerConfig{NetAddr: confignet.AddrConfig{
+					Endpoint:  "localhost:14250",
+					Transport: confignet.TransportTypeTCP,
 				}},
 				Source: Source{
 					ReloadInterval: time.Second,
@@ -75,15 +65,14 @@ func TestLoadConfig(t *testing.T) {
 			cfg := factory.CreateDefaultConfig()
 			sub, err := cm.Sub(tt.id.String())
 			require.NoError(t, err)
-			require.NoError(t, config.UnmarshalExtension(sub, cfg))
-			assert.NoError(t, cfg.Validate())
+			require.NoError(t, sub.Unmarshal(cfg))
+			assert.NoError(t, xconfmap.Validate(cfg))
 			assert.Equal(t, tt.expected, cfg)
 		})
 	}
 }
 
 func TestValidate(t *testing.T) {
-
 	testCases := []struct {
 		desc     string
 		cfg      Config
@@ -97,16 +86,16 @@ func TestValidate(t *testing.T) {
 		{
 			desc: "no sources",
 			cfg: Config{
-				GRPCServerSettings: &configgrpc.GRPCServerSettings{},
+				GRPCServerConfig: &configgrpc.ServerConfig{},
 			},
 			expected: errNoSources,
 		},
 		{
 			desc: "too many sources",
 			cfg: Config{
-				GRPCServerSettings: &configgrpc.GRPCServerSettings{},
+				GRPCServerConfig: &configgrpc.ServerConfig{},
 				Source: Source{
-					Remote: &configgrpc.GRPCClientSettings{},
+					Remote: &configgrpc.ClientConfig{},
 					File:   "/tmp/some-file",
 				},
 			},

@@ -1,25 +1,16 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package splunkhecexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/splunkhecexporter"
 
 import (
+	"encoding/hex"
+	"fmt"
 	"time"
 
+	"github.com/goccy/go-json"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
-	"go.uber.org/zap"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/splunk"
 )
@@ -32,121 +23,159 @@ const (
 	traceIDFieldKey = "trace_id"
 )
 
-func mapLogRecordToSplunkEvent(res pcommon.Resource, lr plog.LogRecord, config *Config, logger *zap.Logger) *splunk.Event {
+// copyOtelAttrs copies values from HecToOtelAttrs to OtelAttrsToHec struct.
+func copyOtelAttrs(config *Config) {
+	defaultCfg := createDefaultConfig().(*Config)
+	if config.OtelAttrsToHec.Equal(defaultCfg.OtelAttrsToHec) {
+		if !config.HecToOtelAttrs.Equal(defaultCfg.HecToOtelAttrs) {
+			// Copy settings to ease deprecation of HecToOtelAttrs.
+			config.OtelAttrsToHec = config.HecToOtelAttrs
+		}
+	} else {
+		if !config.HecToOtelAttrs.Equal(defaultCfg.HecToOtelAttrs) {
+			// Replace all default fields in OtelAttrsToHec.
+			if config.OtelAttrsToHec.Source == defaultCfg.OtelAttrsToHec.Source {
+				config.OtelAttrsToHec.Source = config.HecToOtelAttrs.Source
+			}
+			if config.OtelAttrsToHec.SourceType == defaultCfg.OtelAttrsToHec.SourceType {
+				config.OtelAttrsToHec.SourceType = config.HecToOtelAttrs.SourceType
+			}
+			if config.OtelAttrsToHec.Index == defaultCfg.OtelAttrsToHec.Index {
+				config.OtelAttrsToHec.Index = config.HecToOtelAttrs.Index
+			}
+			if config.OtelAttrsToHec.Host == defaultCfg.OtelAttrsToHec.Host {
+				config.OtelAttrsToHec.Host = config.HecToOtelAttrs.Host
+			}
+		}
+	}
+}
+
+func mapLogRecordToSplunkEvent(res pcommon.Resource, lr plog.LogRecord, config *Config) *splunk.Event {
+	body := lr.Body().AsRaw()
+	if body == nil || body == "" {
+		// events with no body are rejected by Splunk.
+		return nil
+	}
+
+	// Manage the deprecation of HecToOtelAttrs config parameters.
+	// TODO: remove this once HecToOtelAttrs is removed from Config.
+	copyOtelAttrs(config)
+
 	host := unknownHostName
 	source := config.Source
 	sourcetype := config.SourceType
 	index := config.Index
-	fields := map[string]interface{}{}
-	sourceKey := config.HecToOtelAttrs.Source
-	sourceTypeKey := config.HecToOtelAttrs.SourceType
-	indexKey := config.HecToOtelAttrs.Index
-	hostKey := config.HecToOtelAttrs.Host
+	fields := map[string]any{}
+	sourceKey := config.OtelAttrsToHec.Source
+	sourceTypeKey := config.OtelAttrsToHec.SourceType
+	indexKey := config.OtelAttrsToHec.Index
+	hostKey := config.OtelAttrsToHec.Host
 	severityTextKey := config.HecFields.SeverityText
 	severityNumberKey := config.HecFields.SeverityNumber
-	if spanID := lr.SpanID().HexString(); spanID != "" {
-		fields[spanIDFieldKey] = spanID
+	if spanID := lr.SpanID(); !spanID.IsEmpty() {
+		fields[spanIDFieldKey] = hex.EncodeToString(spanID[:])
 	}
-	if traceID := lr.TraceID().HexString(); traceID != "" {
-		fields[traceIDFieldKey] = traceID
+	if traceID := lr.TraceID(); !traceID.IsEmpty() {
+		fields[traceIDFieldKey] = hex.EncodeToString(traceID[:])
 	}
 	if lr.SeverityText() != "" {
 		fields[severityTextKey] = lr.SeverityText()
 	}
-	if lr.SeverityNumber() != plog.SeverityNumberUndefined {
+	if lr.SeverityNumber() != plog.SeverityNumberUnspecified {
 		fields[severityNumberKey] = lr.SeverityNumber()
 	}
 
-	res.Attributes().Range(func(k string, v pcommon.Value) bool {
+	for k, v := range res.Attributes().All() {
 		switch k {
 		case hostKey:
-			host = v.StringVal()
+			host = v.Str()
 		case sourceKey:
-			source = v.StringVal()
+			source = v.Str()
 		case sourceTypeKey:
-			sourcetype = v.StringVal()
+			sourcetype = v.Str()
 		case indexKey:
-			index = v.StringVal()
+			index = v.Str()
 		case splunk.HecTokenLabel:
 			// ignore
 		default:
-			fields[k] = convertAttributeValue(v, logger)
+			mergeValue(fields, k, v.AsRaw())
 		}
-		return true
-	})
-	lr.Attributes().Range(func(k string, v pcommon.Value) bool {
+	}
+	for k, v := range lr.Attributes().All() {
 		switch k {
 		case hostKey:
-			host = v.StringVal()
+			host = v.Str()
 		case sourceKey:
-			source = v.StringVal()
+			source = v.Str()
 		case sourceTypeKey:
-			sourcetype = v.StringVal()
+			sourcetype = v.Str()
 		case indexKey:
-			index = v.StringVal()
+			index = v.Str()
 		case splunk.HecTokenLabel:
 			// ignore
 		default:
-			fields[k] = convertAttributeValue(v, logger)
+			mergeValue(fields, k, v.AsRaw())
 		}
-		return true
-	})
+	}
 
-	eventValue := convertAttributeValue(lr.Body(), logger)
 	return &splunk.Event{
 		Time:       nanoTimestampToEpochMilliseconds(lr.Timestamp()),
 		Host:       host,
 		Source:     source,
 		SourceType: sourcetype,
 		Index:      index,
-		Event:      eventValue,
+		Event:      body,
 		Fields:     fields,
 	}
 }
 
-func convertAttributeValue(value pcommon.Value, logger *zap.Logger) interface{} {
-	switch value.Type() {
-	case pcommon.ValueTypeInt:
-		return value.IntVal()
-	case pcommon.ValueTypeBool:
-		return value.BoolVal()
-	case pcommon.ValueTypeDouble:
-		return value.DoubleVal()
-	case pcommon.ValueTypeString:
-		return value.StringVal()
-	case pcommon.ValueTypeMap:
-		values := map[string]interface{}{}
-		value.MapVal().Range(func(k string, v pcommon.Value) bool {
-			values[k] = convertAttributeValue(v, logger)
-			return true
-		})
-		return values
-	case pcommon.ValueTypeSlice:
-		arrayVal := value.SliceVal()
-		values := make([]interface{}, arrayVal.Len())
-		for i := 0; i < arrayVal.Len(); i++ {
-			values[i] = convertAttributeValue(arrayVal.At(i), logger)
+// nanoTimestampToEpochMilliseconds transforms nanoseconds into <sec>.<ms>. For example, 1433188255.500 indicates 1433188255 seconds and 500 milliseconds after epoch.
+func nanoTimestampToEpochMilliseconds(ts pcommon.Timestamp) float64 {
+	return time.Duration(ts).Round(time.Millisecond).Seconds()
+}
+
+func mergeValue(dst map[string]any, k string, v any) {
+	switch element := v.(type) {
+	case []any:
+		if isArrayFlat(element) {
+			dst[k] = v
+		} else {
+			b, _ := json.Marshal(element)
+			dst[k] = string(b)
 		}
-		return values
-	case pcommon.ValueTypeEmpty:
-		return nil
+	case map[string]any:
+		flattenAndMergeMap(element, dst, k)
 	default:
-		logger.Debug("Unhandled value type", zap.String("type", value.Type().String()))
-		return value
+		dst[k] = v
 	}
 }
 
-// nanoTimestampToEpochMilliseconds transforms nanoseconds into <sec>.<ms>. For example, 1433188255.500 indicates 1433188255 seconds and 500 milliseconds after epoch.
-func nanoTimestampToEpochMilliseconds(ts pcommon.Timestamp) *float64 {
-	duration := time.Duration(ts)
-	if duration == 0 {
-		// some telemetry sources send data with timestamps set to 0 by design, as their original target destinations
-		// (i.e. before Open Telemetry) are setup with the know-how on how to consume them. In this case,
-		// we want to omit the time field when sending data to the Splunk HEC so that the HEC adds a timestamp
-		// at indexing time, which will be much more useful than a 0-epoch-time value.
-		return nil
+func isArrayFlat(array []any) bool {
+	for _, v := range array {
+		switch v.(type) {
+		case []any, map[string]any:
+			return false
+		}
 	}
+	return true
+}
 
-	val := duration.Round(time.Millisecond).Seconds()
-	return &val
+func flattenAndMergeMap(src, dst map[string]any, key string) {
+	for k, v := range src {
+		current := fmt.Sprintf("%s.%s", key, k)
+		switch element := v.(type) {
+		case map[string]any:
+			flattenAndMergeMap(element, dst, current)
+		case []any:
+			if isArrayFlat(element) {
+				dst[current] = element
+			} else {
+				b, _ := json.Marshal(element)
+				dst[current] = string(b)
+			}
+
+		default:
+			dst[current] = element
+		}
+	}
 }

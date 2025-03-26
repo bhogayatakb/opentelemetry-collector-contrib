@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package networkscraper // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/networkscraper"
 
@@ -18,45 +7,37 @@ import (
 	"context"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/receiver/scraperhelper"
+	"go.opentelemetry.io/collector/scraper"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/networkscraper/internal/metadata"
 )
 
-// This file implements Factory for Network scraper.
-
-const (
-	// TypeStr the value of "type" key in configuration.
-	TypeStr = "network"
-)
-
-// Factory is the Factory for scraper.
-type Factory struct {
+// NewFactory for Network scraper.
+func NewFactory() scraper.Factory {
+	return scraper.NewFactory(metadata.Type, createDefaultConfig, scraper.WithMetrics(createMetricsScraper, metadata.MetricsStability))
 }
 
-// CreateDefaultConfig creates the default configuration for the Scraper.
-func (f *Factory) CreateDefaultConfig() internal.Config {
+// createDefaultConfig creates the default configuration for the Scraper.
+func createDefaultConfig() component.Config {
 	return &Config{
-		Metrics: metadata.DefaultMetricsSettings(),
+		MetricsBuilderConfig: metadata.DefaultMetricsBuilderConfig(),
 	}
 }
 
-// CreateMetricsScraper creates a scraper based on provided config.
-func (f *Factory) CreateMetricsScraper(
+// createMetricsScraper creates a scraper based on provided config.
+func createMetricsScraper(
 	ctx context.Context,
-	settings component.ReceiverCreateSettings,
-	config internal.Config,
-) (scraperhelper.Scraper, error) {
+	settings scraper.Settings,
+	config component.Config,
+) (scraper.Metrics, error) {
 	cfg := config.(*Config)
 	s, err := newNetworkScraper(ctx, settings, cfg)
 	if err != nil {
 		return nil, err
 	}
 
-	return scraperhelper.NewScraper(
-		TypeStr,
+	return scraper.NewMetrics(
 		s.scrape,
-		scraperhelper.WithStart(s.start),
+		scraper.WithStart(s.start),
 	)
 }

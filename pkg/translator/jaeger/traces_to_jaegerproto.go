@@ -1,36 +1,25 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package jaeger // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/jaeger"
 
 import (
-	"github.com/jaegertracing/jaeger/model"
+	"github.com/jaegertracing/jaeger-idl/model/v1"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.16.0"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/idutils"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/tracetranslator"
+	idutils "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/core/xidutils"
 )
 
 // ProtoFromTraces translates internal trace data into the Jaeger Proto for GRPC.
 // Returns slice of translated Jaeger batches and error if translation failed.
-func ProtoFromTraces(td ptrace.Traces) ([]*model.Batch, error) {
+func ProtoFromTraces(td ptrace.Traces) []*model.Batch {
 	resourceSpans := td.ResourceSpans()
 
 	if resourceSpans.Len() == 0 {
-		return nil, nil
+		return nil
 	}
 
 	batches := make([]*model.Batch, 0, resourceSpans.Len())
@@ -42,7 +31,7 @@ func ProtoFromTraces(td ptrace.Traces) ([]*model.Batch, error) {
 		}
 	}
 
-	return batches, nil
+	return batches
 }
 
 func resourceSpansToJaegerProto(rs ptrace.ResourceSpans) *model.Batch {
@@ -91,7 +80,7 @@ func resourceToJaegerProtoProcess(resource pcommon.Resource) *model.Process {
 	}
 	attrsCount := attrs.Len()
 	if serviceName, ok := attrs.Get(conventions.AttributeServiceName); ok {
-		process.ServiceName = serviceName.StringVal()
+		process.ServiceName = serviceName.Str()
 		attrsCount--
 	}
 	if attrsCount == 0 {
@@ -101,7 +90,6 @@ func resourceToJaegerProtoProcess(resource pcommon.Resource) *model.Process {
 	tags := make([]model.KeyValue, 0, attrsCount)
 	process.Tags = appendTagsFromResourceAttributes(tags, attrs)
 	return process
-
 }
 
 func appendTagsFromResourceAttributes(dest []model.KeyValue, attrs pcommon.Map) []model.KeyValue {
@@ -109,13 +97,12 @@ func appendTagsFromResourceAttributes(dest []model.KeyValue, attrs pcommon.Map) 
 		return dest
 	}
 
-	attrs.Range(func(key string, attr pcommon.Value) bool {
+	for key, attr := range attrs.All() {
 		if key == conventions.AttributeServiceName {
-			return true
+			continue
 		}
 		dest = append(dest, attributeToJaegerProtoTag(key, attr))
-		return true
-	})
+	}
 	return dest
 }
 
@@ -123,30 +110,30 @@ func appendTagsFromAttributes(dest []model.KeyValue, attrs pcommon.Map) []model.
 	if attrs.Len() == 0 {
 		return dest
 	}
-	attrs.Range(func(key string, attr pcommon.Value) bool {
+	for key, attr := range attrs.All() {
 		dest = append(dest, attributeToJaegerProtoTag(key, attr))
-		return true
-	})
+	}
 	return dest
 }
 
 func attributeToJaegerProtoTag(key string, attr pcommon.Value) model.KeyValue {
 	tag := model.KeyValue{Key: key}
 	switch attr.Type() {
-	case pcommon.ValueTypeString:
-		// Jaeger-to-Internal maps binary tags to string attributes and encodes them as
-		// base64 strings. Blindingly attempting to decode base64 seems too much.
+	case pcommon.ValueTypeStr:
 		tag.VType = model.ValueType_STRING
-		tag.VStr = attr.StringVal()
+		tag.VStr = attr.Str()
 	case pcommon.ValueTypeInt:
 		tag.VType = model.ValueType_INT64
-		tag.VInt64 = attr.IntVal()
+		tag.VInt64 = attr.Int()
 	case pcommon.ValueTypeBool:
 		tag.VType = model.ValueType_BOOL
-		tag.VBool = attr.BoolVal()
+		tag.VBool = attr.Bool()
 	case pcommon.ValueTypeDouble:
 		tag.VType = model.ValueType_FLOAT64
-		tag.VFloat64 = attr.DoubleVal()
+		tag.VFloat64 = attr.Double()
+	case pcommon.ValueTypeBytes:
+		tag.VType = model.ValueType_BINARY
+		tag.VBinary = attr.Bytes().AsRaw()
 	case pcommon.ValueTypeMap, pcommon.ValueTypeSlice:
 		tag.VType = model.ValueType_STRING
 		tag.VStr = attr.AsString()
@@ -156,7 +143,7 @@ func attributeToJaegerProtoTag(key string, attr pcommon.Value) model.KeyValue {
 
 func spanToJaegerProto(span ptrace.Span, libraryTags pcommon.InstrumentationScope) *model.Span {
 	traceID := traceIDToJaegerProto(span.TraceID())
-	jReferences := makeJaegerProtoReferences(span.Links(), span.ParentSpanID(), traceID)
+	jReferences := makeJaegerProtoReferences(span.Links(), spanIDToJaegerProto(span.ParentSpanID()), traceID)
 
 	startTime := span.StartTimestamp().AsTime()
 	return &model.Span{
@@ -199,7 +186,7 @@ func getJaegerProtoSpanTags(span ptrace.Span, scope pcommon.InstrumentationScope
 		tagsCount++
 	}
 
-	traceStateTags, traceStateTagsFound := getTagsFromTraceState(span.TraceState())
+	traceStateTags, traceStateTagsFound := getTagsFromTraceState(span.TraceState().AsRaw())
 	if traceStateTagsFound {
 		tagsCount += len(traceStateTags)
 	}
@@ -243,40 +230,44 @@ func spanIDToJaegerProto(spanID pcommon.SpanID) model.SpanID {
 	return model.SpanID(idutils.SpanIDToUInt64(spanID))
 }
 
-// makeJaegerProtoReferences constructs jaeger span references based on parent span ID and span links
-func makeJaegerProtoReferences(links ptrace.SpanLinkSlice, parentSpanID pcommon.SpanID, traceID model.TraceID) []model.SpanRef {
-	parentSpanIDSet := !parentSpanID.IsEmpty()
-	if !parentSpanIDSet && links.Len() == 0 {
-		return nil
+// makeJaegerProtoReferences constructs jaeger span references based on parent span ID and span links.
+// The parent span ID is used to add a CHILD_OF reference, _unless_ it is referenced from one of the links.
+func makeJaegerProtoReferences(links ptrace.SpanLinkSlice, parentSpanID model.SpanID, traceID model.TraceID) []model.SpanRef {
+	refsCount := links.Len()
+	if parentSpanID != 0 {
+		refsCount++
 	}
 
-	refsCount := links.Len()
-	if parentSpanIDSet {
-		refsCount++
+	if refsCount == 0 {
+		return nil
 	}
 
 	refs := make([]model.SpanRef, 0, refsCount)
 
 	// Put parent span ID at the first place because usually backends look for it
 	// as the first CHILD_OF item in the model.SpanRef slice.
-	if parentSpanIDSet {
+	if parentSpanID != 0 {
 		refs = append(refs, model.SpanRef{
 			TraceID: traceID,
-			SpanID:  spanIDToJaegerProto(parentSpanID),
+			SpanID:  parentSpanID,
 			RefType: model.SpanRefType_CHILD_OF,
 		})
 	}
 
 	for i := 0; i < links.Len(); i++ {
 		link := links.At(i)
+		linkTraceID := traceIDToJaegerProto(link.TraceID())
+		linkSpanID := spanIDToJaegerProto(link.SpanID())
+		linkRefType := refTypeFromLink(link)
+		if parentSpanID != 0 && linkTraceID == traceID && linkSpanID == parentSpanID {
+			// We already added a reference to this span, but maybe with the wrong type, so override.
+			refs[0].RefType = linkRefType
+			continue
+		}
 		refs = append(refs, model.SpanRef{
 			TraceID: traceIDToJaegerProto(link.TraceID()),
 			SpanID:  spanIDToJaegerProto(link.SpanID()),
-
-			// Since Jaeger RefType is not captured in internal data,
-			// use SpanRefType_FOLLOWS_FROM by default.
-			// SpanRefType_CHILD_OF supposed to be set only from parentSpanID.
-			RefType: model.SpanRefType_FOLLOWS_FROM,
+			RefType: refTypeFromLink(link),
 		})
 	}
 
@@ -361,7 +352,6 @@ func getErrorTagFromStatusCode(statusCode ptrace.StatusCode) (model.KeyValue, bo
 		}, true
 	}
 	return model.KeyValue{}, false
-
 }
 
 func getTagFromStatusMsg(statusMsg string) (model.KeyValue, bool) {
@@ -375,14 +365,14 @@ func getTagFromStatusMsg(statusMsg string) (model.KeyValue, bool) {
 	}, true
 }
 
-func getTagsFromTraceState(traceState ptrace.TraceState) ([]model.KeyValue, bool) {
+func getTagsFromTraceState(traceState string) ([]model.KeyValue, bool) {
 	var keyValues []model.KeyValue
-	exists := traceState != ptrace.TraceStateEmpty
+	exists := traceState != ""
 	if exists {
 		// TODO Bring this inline with solution for jaegertracing/jaeger-client-java #702 once available
 		kv := model.KeyValue{
 			Key:   tracetranslator.TagW3CTraceState,
-			VStr:  string(traceState),
+			VStr:  traceState,
 			VType: model.ValueType_STRING,
 		}
 		keyValues = append(keyValues, kv)
@@ -394,7 +384,7 @@ func getTagsFromInstrumentationLibrary(il pcommon.InstrumentationScope) ([]model
 	var keyValues []model.KeyValue
 	if ilName := il.Name(); ilName != "" {
 		kv := model.KeyValue{
-			Key:   conventions.OtelLibraryName,
+			Key:   conventions.AttributeOtelScopeName,
 			VStr:  ilName,
 			VType: model.ValueType_STRING,
 		}
@@ -402,7 +392,7 @@ func getTagsFromInstrumentationLibrary(il pcommon.InstrumentationScope) ([]model
 	}
 	if ilVersion := il.Version(); ilVersion != "" {
 		kv := model.KeyValue{
-			Key:   conventions.OtelLibraryVersion,
+			Key:   conventions.AttributeOtelScopeVersion,
 			VStr:  ilVersion,
 			VType: model.ValueType_STRING,
 		}
@@ -410,4 +400,21 @@ func getTagsFromInstrumentationLibrary(il pcommon.InstrumentationScope) ([]model
 	}
 
 	return keyValues, true
+}
+
+func refTypeFromLink(link ptrace.SpanLink) model.SpanRefType {
+	refTypeAttr, ok := link.Attributes().Get(conventions.AttributeOpentracingRefType)
+	if !ok {
+		return model.SpanRefType_FOLLOWS_FROM
+	}
+	return strToJRefType(refTypeAttr.Str())
+}
+
+func strToJRefType(attr string) model.SpanRefType {
+	if attr == conventions.AttributeOpentracingRefTypeChildOf {
+		return model.ChildOf
+	}
+	// There are only 2 types of SpanRefType we assume that everything
+	// that's not a model.ChildOf is a model.FollowsFrom
+	return model.FollowsFrom
 }

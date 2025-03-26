@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package zipkinv2 // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/zipkin/zipkinv2"
 
@@ -27,8 +16,9 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/idutils"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/tracetranslator"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/traceutil"
+	idutils "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/core/xidutils"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/zipkin/internal/zipkin"
 )
 
@@ -37,9 +27,7 @@ const (
 	spanLinkDataFormat  = "%s|%s|%s|%s|%d"
 )
 
-var (
-	sampled = true
-)
+var sampled = true
 
 // FromTranslator converts from pdata to Zipkin data model.
 type FromTranslator struct{}
@@ -108,7 +96,6 @@ func spanToZipkinSpan(
 	localServiceName string,
 	zTags map[string]string,
 ) (*zipkinmodel.SpanModel, error) {
-
 	tags := aggregateSpanTags(span, zTags)
 
 	zs := &zipkinmodel.SpanModel{}
@@ -122,8 +109,9 @@ func spanToZipkinSpan(
 	}
 	zs.ID = convertSpanID(span.SpanID())
 
-	if len(span.TraceState()) > 0 {
-		tags[tracetranslator.TagW3CTraceState] = string(span.TraceState())
+	traceState := span.TraceState().AsRaw()
+	if traceState != "" {
+		tags[tracetranslator.TagW3CTraceState] = traceState
 	}
 
 	if !span.ParentSpanID().IsEmpty() {
@@ -171,7 +159,7 @@ func spanToZipkinSpan(
 	return zs, nil
 }
 
-func populateStatus(status ptrace.SpanStatus, zs *zipkinmodel.SpanModel, tags map[string]string) {
+func populateStatus(status ptrace.Status, zs *zipkinmodel.SpanModel, tags map[string]string) {
 	if status.Code() == ptrace.StatusCodeError {
 		tags[tracetranslator.TagError] = "true"
 	} else {
@@ -188,7 +176,7 @@ func populateStatus(status ptrace.SpanStatus, zs *zipkinmodel.SpanModel, tags ma
 		return
 	}
 
-	tags[conventions.OtelStatusCode] = status.Code().String()
+	tags[conventions.OtelStatusCode] = traceutil.StatusCodeStr(status.Code())
 	if status.Message() != "" {
 		tags[conventions.OtelStatusDescription] = status.Message()
 		zs.Err = fmt.Errorf("%s", status.Message())
@@ -242,18 +230,17 @@ func spanLinksToZipkinTags(links ptrace.SpanLinkSlice, zTags map[string]string) 
 		if err != nil {
 			return err
 		}
-		zTags[key] = fmt.Sprintf(spanLinkDataFormat, link.TraceID().HexString(),
-			link.SpanID().HexString(), link.TraceState(), jsonStr, link.DroppedAttributesCount())
+		zTags[key] = fmt.Sprintf(spanLinkDataFormat, traceutil.TraceIDToHexOrEmptyString(link.TraceID()),
+			traceutil.SpanIDToHexOrEmptyString(link.SpanID()), link.TraceState().AsRaw(), jsonStr, link.DroppedAttributesCount())
 	}
 	return nil
 }
 
 func attributeMapToStringMap(attrMap pcommon.Map) map[string]string {
 	rawMap := make(map[string]string)
-	attrMap.Range(func(k string, v pcommon.Value) bool {
+	for k, v := range attrMap.All() {
 		rawMap[k] = v.AsString()
-		return true
-	})
+	}
 	return rawMap
 }
 
@@ -274,10 +261,9 @@ func resourceToZipkinEndpointServiceNameAndAttributeMap(
 		return tracetranslator.ResourceNoServiceName, zTags
 	}
 
-	attrs.Range(func(k string, v pcommon.Value) bool {
+	for k, v := range attrs.All() {
 		zTags[k] = v.AsString()
-		return true
-	})
+	}
 
 	serviceName = extractZipkinServiceName(zTags)
 	return serviceName, zTags
@@ -327,7 +313,6 @@ func zipkinEndpointFromTags(
 	remoteEndpoint bool,
 	redundantKeys map[string]bool,
 ) (endpoint *zipkinmodel.Endpoint) {
-
 	serviceName := localServiceName
 	if peerSvc, ok := zTags[conventions.AttributePeerService]; ok && remoteEndpoint {
 		serviceName = peerSvc

@@ -1,28 +1,19 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package internal // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/prometheusreceiver/internal"
 
 import (
-	"fmt"
-	"strings"
+	"errors"
 	"sync"
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	semconv "go.opentelemetry.io/collector/semconv/v1.27.0"
 	"go.uber.org/zap"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/pdatautil"
 )
 
 // Notes on garbage collection (gc):
@@ -40,13 +31,13 @@ import (
 // been accessed for a long period of time.
 //
 // The gc strategy uses a standard mark-and-sweep approach - each time a timeseriesMap is accessed,
-// it is marked. Similarly, each time a timeseriesinfo is accessed, it is also marked.
+// it is marked. Similarly, each time a timeseriesInfo is accessed, it is also marked.
 //
 // At the end of each JobsMap.get(), if the last time the JobsMap was gc'd exceeds the 'gcInterval',
 // the JobsMap is locked and any timeseriesMaps that are unmarked are removed from the JobsMap
 // otherwise the timeseriesMap is gc'd
 //
-// The gc for the timeseriesMap is straightforward - the map is locked and, for each timeseriesinfo
+// The gc for the timeseriesMap is straightforward - the map is locked and, for each timeseriesInfo
 // in the map, if it has not been marked, it is removed otherwise it is unmarked.
 //
 // Alternative Strategies
@@ -59,8 +50,8 @@ import (
 //    approach requires adding 'lastGC' Time and (potentially) a gcInterval duration to
 //    timeseriesMap so the current approach is used instead.
 
-// timeseriesinfo contains the information necessary to adjust from the initial point and to detect resets.
-type timeseriesinfo struct {
+// timeseriesInfo contains the information necessary to adjust from the initial point and to detect resets.
+type timeseriesInfo struct {
 	mark bool
 
 	number    numberInfo
@@ -69,18 +60,26 @@ type timeseriesinfo struct {
 }
 
 type numberInfo struct {
-	initial  *pmetric.NumberDataPoint
-	previous *pmetric.NumberDataPoint
+	startTime     pcommon.Timestamp
+	previousValue float64
 }
 
 type histogramInfo struct {
-	initial  *pmetric.HistogramDataPoint
-	previous *pmetric.HistogramDataPoint
+	startTime     pcommon.Timestamp
+	previousCount uint64
+	previousSum   float64
 }
 
 type summaryInfo struct {
-	initial  *pmetric.SummaryDataPoint
-	previous *pmetric.SummaryDataPoint
+	startTime     pcommon.Timestamp
+	previousCount uint64
+	previousSum   float64
+}
+
+type timeseriesKey struct {
+	name           string
+	attributes     [16]byte
+	aggTemporality pmetric.AggregationTemporality
 }
 
 // timeseriesMap maps from a timeseries instance (metric * label values) to the timeseries info for
@@ -91,43 +90,51 @@ type timeseriesMap struct {
 	// AdjustMetricSlice() and also acquired by gc().
 
 	mark   bool
-	tsiMap map[string]*timeseriesinfo
+	tsiMap map[timeseriesKey]*timeseriesInfo
 }
 
-// Get the timeseriesinfo for the timeseries associated with the metric and label values.
-func (tsm *timeseriesMap) get(metric pmetric.Metric, kv pcommon.Map) *timeseriesinfo {
+// Get the timeseriesInfo for the timeseries associated with the metric and label values.
+func (tsm *timeseriesMap) get(metric pmetric.Metric, kv pcommon.Map) (*timeseriesInfo, bool) {
 	// This should only be invoked be functions called (directly or indirectly) by AdjustMetricSlice().
 	// The lock protecting tsm.tsiMap is acquired there.
 	name := metric.Name()
-	sig := getTimeseriesSignature(name, kv)
-	if metric.DataType() == pmetric.MetricDataTypeHistogram {
+	key := timeseriesKey{
+		name:       name,
+		attributes: getAttributesSignature(kv),
+	}
+	switch metric.Type() {
+	case pmetric.MetricTypeHistogram:
 		// There are 2 types of Histograms whose aggregation temporality needs distinguishing:
 		// * CumulativeHistogram
 		// * GaugeHistogram
-		aggTemporality := metric.Histogram().AggregationTemporality()
-		sig += "," + aggTemporality.String()
+		key.aggTemporality = metric.Histogram().AggregationTemporality()
+	case pmetric.MetricTypeExponentialHistogram:
+		// There are 2 types of ExponentialHistograms whose aggregation temporality needs distinguishing:
+		// * CumulativeHistogram
+		// * GaugeHistogram
+		key.aggTemporality = metric.ExponentialHistogram().AggregationTemporality()
 	}
-	tsi, ok := tsm.tsiMap[sig]
-	if !ok {
-		tsi = &timeseriesinfo{}
-		tsm.tsiMap[sig] = tsi
-	}
+
 	tsm.mark = true
+	tsi, ok := tsm.tsiMap[key]
+	if !ok {
+		tsi = &timeseriesInfo{}
+		tsm.tsiMap[key] = tsi
+	}
 	tsi.mark = true
-	return tsi
+	return tsi, ok
 }
 
-// Create a unique timeseries signature consisting of the metric name and label values.
-func getTimeseriesSignature(name string, kv pcommon.Map) string {
-	labelValues := make([]string, 0, kv.Len())
-	kv.Sort().Range(func(_ string, attrValue pcommon.Value) bool {
-		value := attrValue.StringVal()
+// Create a unique string signature for attributes values sorted by attribute keys.
+func getAttributesSignature(m pcommon.Map) [16]byte {
+	clearedMap := pcommon.NewMap()
+	for k, attrValue := range m.All() {
+		value := attrValue.Str()
 		if value != "" {
-			labelValues = append(labelValues, value)
+			clearedMap.PutStr(k, value)
 		}
-		return true
-	})
-	return fmt.Sprintf("%s,%s", name, strings.Join(labelValues, ","))
+	}
+	return pdatautil.MapHash(clearedMap)
 }
 
 // Remove timeseries that have aged out.
@@ -149,7 +156,7 @@ func (tsm *timeseriesMap) gc() {
 }
 
 func newTimeseriesMap() *timeseriesMap {
-	return &timeseriesMap{mark: true, tsiMap: map[string]*timeseriesinfo{}}
+	return &timeseriesMap{mark: true, tsiMap: map[timeseriesKey]*timeseriesInfo{}}
 }
 
 // JobsMap maps from a job instance to a map of timeseries instances for the job.
@@ -201,7 +208,7 @@ func (jm *JobsMap) maybeGC() {
 
 func (jm *JobsMap) get(job, instance string) *timeseriesMap {
 	sig := job + ":" + instance
-	// a read locke is taken here as we will not need to modify jobsMap if the target timeseriesMap is available.
+	// a read lock is taken here as we will not need to modify jobsMap if the target timeseriesMap is available.
 	jm.RLock()
 	tsm, ok := jm.jobsMap[sig]
 	jm.RUnlock()
@@ -222,76 +229,98 @@ func (jm *JobsMap) get(job, instance string) *timeseriesMap {
 	return tsm2
 }
 
-// MetricsAdjuster takes a map from a metric instance to the initial point in the metrics instance
+type MetricsAdjuster interface {
+	AdjustMetrics(metrics pmetric.Metrics) error
+}
+
+// initialPointAdjuster takes a map from a metric instance to the initial point in the metrics instance
 // and provides AdjustMetricSlice, which takes a sequence of metrics and adjust their start times based on
 // the initial points.
-type MetricsAdjuster struct {
-	tsm    *timeseriesMap
-	logger *zap.Logger
+type initialPointAdjuster struct {
+	jobsMap          *JobsMap
+	logger           *zap.Logger
+	useCreatedMetric bool
+	// usePointTimeForReset forces the adjuster to use the timestamp of the
+	// point instead of the start timestamp when it detects resets.  This is
+	// useful when this adjuster is used after another adjuster that
+	// pre-populated start times.
+	usePointTimeForReset bool
 }
 
-// NewMetricsAdjuster is a constructor for MetricsAdjuster.
-func NewMetricsAdjuster(tsm *timeseriesMap, logger *zap.Logger) *MetricsAdjuster {
-	return &MetricsAdjuster{
-		tsm:    tsm,
-		logger: logger,
-	}
-}
-
-// AdjustMetricSlice takes a sequence of metrics and adjust their start times based on the initial and
-// previous points in the timeseriesMap.
-// Returns the total number of timeseries that had reset start times.
-func (ma *MetricsAdjuster) AdjustMetricSlice(metricL pmetric.MetricSlice) {
-	// The lock on the relevant timeseriesMap is held throughout the adjustment process to ensure that
-	// nothing else can modify the data used for adjustment.
-	ma.tsm.Lock()
-	defer ma.tsm.Unlock()
-	for i := 0; i < metricL.Len(); i++ {
-		ma.adjustMetric(metricL.At(i))
+// NewInitialPointAdjuster returns a new MetricsAdjuster that adjust metrics' start times based on the initial received points.
+func NewInitialPointAdjuster(logger *zap.Logger, gcInterval time.Duration, useCreatedMetric bool) MetricsAdjuster {
+	return &initialPointAdjuster{
+		jobsMap:          NewJobsMap(gcInterval),
+		logger:           logger,
+		useCreatedMetric: useCreatedMetric,
 	}
 }
 
 // AdjustMetrics takes a sequence of metrics and adjust their start times based on the initial and
 // previous points in the timeseriesMap.
-func (ma *MetricsAdjuster) AdjustMetrics(metrics pmetric.Metrics) {
-	// The lock on the relevant timeseriesMap is held throughout the adjustment process to ensure that
-	// nothing else can modify the data used for adjustment.
-	ma.tsm.Lock()
-	defer ma.tsm.Unlock()
+func (a *initialPointAdjuster) AdjustMetrics(metrics pmetric.Metrics) error {
+	if removeStartTimeAdjustment.IsEnabled() {
+		return nil
+	}
 	for i := 0; i < metrics.ResourceMetrics().Len(); i++ {
 		rm := metrics.ResourceMetrics().At(i)
+		_, found := rm.Resource().Attributes().Get(semconv.AttributeServiceName)
+		if !found {
+			return errors.New("adjusting metrics without job")
+		}
+
+		_, found = rm.Resource().Attributes().Get(semconv.AttributeServiceInstanceID)
+		if !found {
+			return errors.New("adjusting metrics without instance")
+		}
+	}
+
+	for i := 0; i < metrics.ResourceMetrics().Len(); i++ {
+		rm := metrics.ResourceMetrics().At(i)
+		job, _ := rm.Resource().Attributes().Get(semconv.AttributeServiceName)
+		instance, _ := rm.Resource().Attributes().Get(semconv.AttributeServiceInstanceID)
+		tsm := a.jobsMap.get(job.Str(), instance.Str())
+
+		// The lock on the relevant timeseriesMap is held throughout the adjustment process to ensure that
+		// nothing else can modify the data used for adjustment.
+		tsm.Lock()
 		for j := 0; j < rm.ScopeMetrics().Len(); j++ {
 			ilm := rm.ScopeMetrics().At(j)
 			for k := 0; k < ilm.Metrics().Len(); k++ {
-				ma.adjustMetric(ilm.Metrics().At(k))
+				metric := ilm.Metrics().At(k)
+				switch dataType := metric.Type(); dataType {
+				case pmetric.MetricTypeGauge:
+					// gauges don't need to be adjusted so no additional processing is necessary
+
+				case pmetric.MetricTypeHistogram:
+					a.adjustMetricHistogram(tsm, metric)
+
+				case pmetric.MetricTypeSummary:
+					a.adjustMetricSummary(tsm, metric)
+
+				case pmetric.MetricTypeSum:
+					a.adjustMetricSum(tsm, metric)
+
+				case pmetric.MetricTypeExponentialHistogram:
+					a.adjustMetricExponentialHistogram(tsm, metric)
+
+				case pmetric.MetricTypeEmpty:
+					fallthrough
+
+				default:
+					// this shouldn't happen
+					a.logger.Info("Adjust - skipping unexpected point", zap.String("type", dataType.String()))
+				}
 			}
 		}
+		tsm.Unlock()
 	}
+	return nil
 }
 
-func (ma *MetricsAdjuster) adjustMetric(metric pmetric.Metric) {
-	switch dataType := metric.DataType(); dataType {
-	case pmetric.MetricDataTypeGauge:
-		// gauges don't need to be adjusted so no additional processing is necessary
-
-	case pmetric.MetricDataTypeHistogram:
-		ma.adjustMetricHistogram(metric)
-
-	case pmetric.MetricDataTypeSummary:
-		ma.adjustMetricSummary(metric)
-
-	case pmetric.MetricDataTypeSum:
-		ma.adjustMetricSum(metric)
-
-	default:
-		// this shouldn't happen
-		ma.logger.Info("Adjust - skipping unexpected point", zap.String("type", dataType.String()))
-	}
-}
-
-func (ma *MetricsAdjuster) adjustMetricHistogram(current pmetric.Metric) {
+func (a *initialPointAdjuster) adjustMetricHistogram(tsm *timeseriesMap, current pmetric.Metric) {
 	histogram := current.Histogram()
-	if histogram.AggregationTemporality() != pmetric.MetricAggregationTemporalityCumulative {
+	if histogram.AggregationTemporality() != pmetric.AggregationTemporalityCumulative {
 		// Only dealing with CumulativeDistributions.
 		return
 	}
@@ -299,117 +328,191 @@ func (ma *MetricsAdjuster) adjustMetricHistogram(current pmetric.Metric) {
 	currentPoints := histogram.DataPoints()
 	for i := 0; i < currentPoints.Len(); i++ {
 		currentDist := currentPoints.At(i)
-		tsi := ma.tsm.get(current, currentDist.Attributes())
 
-		previousDist := tsi.histogram.previous
-		if previousDist == nil {
-			// no previous data point with values
-			// use the initial data point
-			previousDist = tsi.histogram.initial
-		}
-
-		if !currentDist.FlagsImmutable().NoRecordedValue() {
-			tsi.histogram.previous = &currentDist
-		}
-
-		if tsi.histogram.initial == nil {
-			// initial || reset timeseries.
-			tsi.histogram.initial = &currentDist
+		// start timestamp was set from _created
+		if a.useCreatedMetric &&
+			!currentDist.Flags().NoRecordedValue() &&
+			currentDist.StartTimestamp() < currentDist.Timestamp() {
 			continue
 		}
 
-		if currentDist.FlagsImmutable().NoRecordedValue() {
-			currentDist.SetStartTimestamp(tsi.histogram.initial.StartTimestamp())
+		tsi, found := tsm.get(current, currentDist.Attributes())
+		if !found {
+			// initialize everything.
+			tsi.histogram.startTime = currentDist.StartTimestamp()
+			tsi.histogram.previousCount = currentDist.Count()
+			tsi.histogram.previousSum = currentDist.Sum()
 			continue
 		}
 
-		if currentDist.Count() < previousDist.Count() || currentDist.Sum() < previousDist.Sum() {
-			// reset detected
-			tsi.histogram.initial = &currentDist
+		if currentDist.Flags().NoRecordedValue() {
+			// TODO: Investigate why this does not reset.
+			currentDist.SetStartTimestamp(tsi.histogram.startTime)
 			continue
 		}
 
-		currentDist.SetStartTimestamp(tsi.histogram.initial.StartTimestamp())
+		if currentDist.Count() < tsi.histogram.previousCount || currentDist.Sum() < tsi.histogram.previousSum {
+			// reset re-initialize everything.
+			tsi.histogram.startTime = currentDist.StartTimestamp()
+			if a.usePointTimeForReset {
+				tsi.histogram.startTime = currentDist.Timestamp()
+				currentDist.SetStartTimestamp(tsi.histogram.startTime)
+			}
+			tsi.histogram.previousCount = currentDist.Count()
+			tsi.histogram.previousSum = currentDist.Sum()
+			continue
+		}
+
+		// Update only previous values.
+		tsi.histogram.previousCount = currentDist.Count()
+		tsi.histogram.previousSum = currentDist.Sum()
+		currentDist.SetStartTimestamp(tsi.histogram.startTime)
 	}
 }
 
-func (ma *MetricsAdjuster) adjustMetricSum(current pmetric.Metric) {
+func (a *initialPointAdjuster) adjustMetricExponentialHistogram(tsm *timeseriesMap, current pmetric.Metric) {
+	histogram := current.ExponentialHistogram()
+	if histogram.AggregationTemporality() != pmetric.AggregationTemporalityCumulative {
+		// Only dealing with CumulativeDistributions.
+		return
+	}
+
+	currentPoints := histogram.DataPoints()
+	for i := 0; i < currentPoints.Len(); i++ {
+		currentDist := currentPoints.At(i)
+
+		// start timestamp was set from _created
+		if a.useCreatedMetric &&
+			!currentDist.Flags().NoRecordedValue() &&
+			currentDist.StartTimestamp() < currentDist.Timestamp() {
+			continue
+		}
+
+		tsi, found := tsm.get(current, currentDist.Attributes())
+		if !found {
+			// initialize everything.
+			tsi.histogram.startTime = currentDist.StartTimestamp()
+			tsi.histogram.previousCount = currentDist.Count()
+			tsi.histogram.previousSum = currentDist.Sum()
+			continue
+		}
+
+		if currentDist.Flags().NoRecordedValue() {
+			// TODO: Investigate why this does not reset.
+			currentDist.SetStartTimestamp(tsi.histogram.startTime)
+			continue
+		}
+
+		if currentDist.Count() < tsi.histogram.previousCount || currentDist.Sum() < tsi.histogram.previousSum {
+			// reset re-initialize everything.
+			tsi.histogram.startTime = currentDist.StartTimestamp()
+			if a.usePointTimeForReset {
+				tsi.histogram.startTime = currentDist.Timestamp()
+				currentDist.SetStartTimestamp(tsi.histogram.startTime)
+			}
+			tsi.histogram.previousCount = currentDist.Count()
+			tsi.histogram.previousSum = currentDist.Sum()
+			continue
+		}
+
+		// Update only previous values.
+		tsi.histogram.previousCount = currentDist.Count()
+		tsi.histogram.previousSum = currentDist.Sum()
+		currentDist.SetStartTimestamp(tsi.histogram.startTime)
+	}
+}
+
+func (a *initialPointAdjuster) adjustMetricSum(tsm *timeseriesMap, current pmetric.Metric) {
 	currentPoints := current.Sum().DataPoints()
 	for i := 0; i < currentPoints.Len(); i++ {
 		currentSum := currentPoints.At(i)
-		tsi := ma.tsm.get(current, currentSum.Attributes())
 
-		previousSum := tsi.number.previous
-		if previousSum == nil {
-			// no previous data point with values
-			// use the initial data point
-			previousSum = tsi.number.initial
-		}
-
-		if !currentSum.FlagsImmutable().NoRecordedValue() {
-			tsi.number.previous = &currentSum
-		}
-
-		if tsi.number.initial == nil {
-			// initial || reset timeseries.
-			tsi.number.initial = &currentSum
+		// start timestamp was set from _created
+		if a.useCreatedMetric &&
+			!currentSum.Flags().NoRecordedValue() &&
+			currentSum.StartTimestamp() < currentSum.Timestamp() {
 			continue
 		}
 
-		if currentSum.FlagsImmutable().NoRecordedValue() {
-			currentSum.SetStartTimestamp(tsi.number.initial.StartTimestamp())
+		tsi, found := tsm.get(current, currentSum.Attributes())
+		if !found {
+			// initialize everything.
+			tsi.number.startTime = currentSum.StartTimestamp()
+			tsi.number.previousValue = currentSum.DoubleValue()
 			continue
 		}
 
-		if currentSum.DoubleVal() < previousSum.DoubleVal() {
-			// reset detected
-			tsi.number.initial = &currentSum
+		if currentSum.Flags().NoRecordedValue() {
+			// TODO: Investigate why this does not reset.
+			currentSum.SetStartTimestamp(tsi.number.startTime)
 			continue
 		}
-		currentSum.SetStartTimestamp(tsi.number.initial.StartTimestamp())
+
+		if currentSum.DoubleValue() < tsi.number.previousValue {
+			// reset re-initialize everything.
+			tsi.number.startTime = currentSum.StartTimestamp()
+			if a.usePointTimeForReset {
+				tsi.number.startTime = currentSum.Timestamp()
+				currentSum.SetStartTimestamp(tsi.number.startTime)
+			}
+			tsi.number.previousValue = currentSum.DoubleValue()
+			continue
+		}
+
+		// Update only previous values.
+		tsi.number.previousValue = currentSum.DoubleValue()
+		currentSum.SetStartTimestamp(tsi.number.startTime)
 	}
 }
 
-func (ma *MetricsAdjuster) adjustMetricSummary(current pmetric.Metric) {
+func (a *initialPointAdjuster) adjustMetricSummary(tsm *timeseriesMap, current pmetric.Metric) {
 	currentPoints := current.Summary().DataPoints()
 
 	for i := 0; i < currentPoints.Len(); i++ {
 		currentSummary := currentPoints.At(i)
-		tsi := ma.tsm.get(current, currentSummary.Attributes())
 
-		previousSummary := tsi.summary.previous
-		if previousSummary == nil {
-			// no previous data point with values
-			// use the initial data point
-			previousSummary = tsi.summary.initial
-		}
-
-		if !currentSummary.FlagsImmutable().NoRecordedValue() {
-			tsi.summary.previous = &currentSummary
-		}
-
-		if tsi.summary.initial == nil {
-			// initial || reset timeseries.
-			tsi.summary.initial = &currentSummary
+		// start timestamp was set from _created
+		if a.useCreatedMetric &&
+			!currentSummary.Flags().NoRecordedValue() &&
+			currentSummary.StartTimestamp() < currentSummary.Timestamp() {
 			continue
 		}
 
-		if currentSummary.FlagsImmutable().NoRecordedValue() {
-			currentSummary.SetStartTimestamp(tsi.summary.initial.StartTimestamp())
+		tsi, found := tsm.get(current, currentSummary.Attributes())
+		if !found {
+			// initialize everything.
+			tsi.summary.startTime = currentSummary.StartTimestamp()
+			tsi.summary.previousCount = currentSummary.Count()
+			tsi.summary.previousSum = currentSummary.Sum()
+			continue
+		}
+
+		if currentSummary.Flags().NoRecordedValue() {
+			// TODO: Investigate why this does not reset.
+			currentSummary.SetStartTimestamp(tsi.summary.startTime)
 			continue
 		}
 
 		if (currentSummary.Count() != 0 &&
-			previousSummary.Count() != 0 &&
-			currentSummary.Count() < previousSummary.Count()) ||
+			tsi.summary.previousCount != 0 &&
+			currentSummary.Count() < tsi.summary.previousCount) ||
 			(currentSummary.Sum() != 0 &&
-				previousSummary.Sum() != 0 &&
-				currentSummary.Sum() < previousSummary.Sum()) {
-			// reset detected
-			tsi.summary.initial = &currentSummary
+				tsi.summary.previousSum != 0 &&
+				currentSummary.Sum() < tsi.summary.previousSum) {
+			// reset re-initialize everything.
+			tsi.summary.startTime = currentSummary.StartTimestamp()
+			if a.usePointTimeForReset {
+				tsi.summary.startTime = currentSummary.Timestamp()
+				currentSummary.SetStartTimestamp(tsi.summary.startTime)
+			}
+			tsi.summary.previousCount = currentSummary.Count()
+			tsi.summary.previousSum = currentSummary.Sum()
 			continue
 		}
 
-		currentSummary.SetStartTimestamp(tsi.summary.initial.StartTimestamp())
+		// Update only previous values.
+		tsi.summary.previousCount = currentSummary.Count()
+		tsi.summary.previousSum = currentSummary.Sum()
+		currentSummary.SetStartTimestamp(tsi.summary.startTime)
 	}
 }

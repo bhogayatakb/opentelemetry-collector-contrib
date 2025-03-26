@@ -1,16 +1,7 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
+
+//go:generate mdatagen metadata.yaml
 
 package logzioexporter // import "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/logzioexporter"
 
@@ -22,44 +13,37 @@ import (
 	"time"
 
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/configcompression"
 	"go.opentelemetry.io/collector/config/confighttp"
+	"go.opentelemetry.io/collector/config/configretry"
+	"go.opentelemetry.io/collector/exporter"
 	"go.opentelemetry.io/collector/exporter/exporterhelper"
-)
 
-const (
-	typeStr = "logzio"
-	// The stability level of the exporter.
-	stability = component.StabilityLevelBeta
+	"github.com/open-telemetry/opentelemetry-collector-contrib/exporter/logzioexporter/internal/metadata"
 )
 
 // NewFactory creates a factory for Logz.io exporter.
-func NewFactory() component.ExporterFactory {
-	return component.NewExporterFactory(
-		typeStr,
+func NewFactory() exporter.Factory {
+	return exporter.NewFactory(
+		metadata.Type,
 		createDefaultConfig,
-		component.WithTracesExporter(createTracesExporter, stability),
-		component.WithLogsExporter(createLogsExporter, component.StabilityLevelBeta))
-
+		exporter.WithTraces(createTracesExporter, metadata.TracesStability),
+		exporter.WithLogs(createLogsExporter, metadata.LogsStability))
 }
 
-func createDefaultConfig() config.Exporter {
+func createDefaultConfig() component.Config {
+	clientConfig := confighttp.NewDefaultClientConfig()
+	clientConfig.Timeout = 30 * time.Second
+	// Default to gzip compression
+	clientConfig.Compression = configcompression.TypeGzip
+	// We almost read 0 bytes, so no need to tune ReadBufferSize.
+	clientConfig.WriteBufferSize = 512 * 1024
 	return &Config{
-		Region:           "",
-		Token:            "",
-		ExporterSettings: config.NewExporterSettings(config.NewComponentID(typeStr)),
-		RetrySettings:    exporterhelper.NewDefaultRetrySettings(),
-		QueueSettings:    exporterhelper.NewDefaultQueueSettings(),
-		HTTPClientSettings: confighttp.HTTPClientSettings{
-			Endpoint: "",
-			Timeout:  30 * time.Second,
-			Headers:  map[string]string{},
-			// Default to gzip compression
-			Compression: configcompression.Gzip,
-			// We almost read 0 bytes, so no need to tune ReadBufferSize.
-			WriteBufferSize: 512 * 1024,
-		},
+		Region:        "",
+		Token:         "",
+		BackOffConfig: configretry.NewDefaultBackOffConfig(),
+		QueueSettings: exporterhelper.NewDefaultQueueConfig(),
+		ClientConfig:  clientConfig,
 	}
 }
 
@@ -88,25 +72,25 @@ func getListenerURL(region string) string {
 }
 
 func generateEndpoint(cfg *Config) (string, error) {
-	defaultURL := fmt.Sprintf("%s/?token=%s", getListenerURL(""), cfg.Token)
+	defaultURL := fmt.Sprintf("%s/?token=%s", getListenerURL(""), string(cfg.Token))
 	switch {
-	case cfg.HTTPClientSettings.Endpoint != "":
-		return cfg.HTTPClientSettings.Endpoint, nil
+	case cfg.ClientConfig.Endpoint != "":
+		return cfg.ClientConfig.Endpoint, nil
 	case cfg.Region != "":
-		return fmt.Sprintf("%s/?token=%s", getListenerURL(cfg.Region), cfg.Token), nil
-	case cfg.HTTPClientSettings.Endpoint == "" && cfg.Region == "":
+		return fmt.Sprintf("%s/?token=%s", getListenerURL(cfg.Region), string(cfg.Token)), nil
+	case cfg.ClientConfig.Endpoint == "" && cfg.Region == "":
 		return defaultURL, errors.New("failed to generate endpoint, Endpoint or Region must be set")
 	default:
 		return defaultURL, nil
 	}
 }
 
-func createTracesExporter(_ context.Context, params component.ExporterCreateSettings, cfg config.Exporter) (component.TracesExporter, error) {
+func createTracesExporter(_ context.Context, params exporter.Settings, cfg component.Config) (exporter.Traces, error) {
 	exporterConfig := cfg.(*Config)
 	return newLogzioTracesExporter(exporterConfig, params)
 }
 
-func createLogsExporter(_ context.Context, params component.ExporterCreateSettings, cfg config.Exporter) (component.LogsExporter, error) {
+func createLogsExporter(_ context.Context, params exporter.Settings, cfg component.Config) (exporter.Logs, error) {
 	exporterConfig := cfg.(*Config)
 	return newLogzioLogsExporter(exporterConfig, params)
 }

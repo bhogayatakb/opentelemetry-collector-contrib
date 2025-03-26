@@ -1,20 +1,49 @@
-name: rabbitmqreceiver
+type: rabbitmq
+
+tests:              # generated_component_test.go looking for test.config from metadata.yaml
+  config:
+    endpoint: "http://localhost:15672"
+    username: "testuser"
+    password: "testpassword"
+    collection_interval: 10s
+    metrics:
+      rabbitmq.node.disk_free:
+        enabled: true
+      rabbitmq.node.fd_used:
+        enabled: true
+      rabbitmq.node.mem_limit:
+        enabled: true
+      rabbitmq.node.mem_used:
+        enabled: true
+
+status:
+  class: receiver
+  stability:
+    beta: [metrics]
+  distributions: [contrib]
+  codeowners:
+    active: [VenuEmmadi]
+    emeritus: [cpheps]
 
 resource_attributes:
   rabbitmq.queue.name:
     description: The name of the RabbitMQ queue.
+    enabled: true
     type: string
   rabbitmq.node.name:
     description: The name of the RabbitMQ node.
+    enabled: true
     type: string
   rabbitmq.vhost.name:
     description: The name of the RabbitMQ vHost.
+    enabled: true
     type: string
 
 attributes:
   message.state:
-    value: state
+    name_override: state
     description: The state of messages in a queue.
+    type: string
     enum:
       - ready
       - unacknowledged
@@ -24,7 +53,7 @@ metrics:
     unit: "{consumers}"
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
     enabled: true
   rabbitmq.message.delivered:
@@ -32,7 +61,7 @@ metrics:
     unit: "{messages}"
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
     enabled: true
   rabbitmq.message.published:
@@ -40,7 +69,7 @@ metrics:
     unit: "{messages}"
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
     enabled: true
   rabbitmq.message.acknowledged:
@@ -48,7 +77,7 @@ metrics:
     unit: "{messages}"
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
     enabled: true
   rabbitmq.message.dropped:
@@ -56,7 +85,7 @@ metrics:
     unit: "{messages}"
     sum:
       monotonic: true
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
     enabled: true
   rabbitmq.message.current:
@@ -64,7 +93,39 @@ metrics:
     unit: "{messages}"
     sum:
       monotonic: false
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       value_type: int
     attributes: [message.state]
     enabled: true
+  rabbitmq.node.disk_free:
+    description: Free disk space on the node.
+    unit: "{bytes}"
+    sum:
+      monotonic: false
+      aggregation_temporality: cumulative
+      value_type: int
+    enabled: false
+  rabbitmq.node.fd_used:
+    description: The number of file descriptors used on the node.
+    unit: "{fd}"
+    sum:
+      monotonic: false
+      aggregation_temporality: cumulative
+      value_type: int
+    enabled: false
+  rabbitmq.node.mem_limit:
+    description: The memory limit on the node.
+    unit: "{bytes}"
+    sum:
+      monotonic: false
+      aggregation_temporality: cumulative
+      value_type: int
+    enabled: false
+  rabbitmq.node.mem_used:
+    description: The memory used on the node.
+    unit: "{bytes}"
+    sum:
+      monotonic: false
+      aggregation_temporality: cumulative
+      value_type: int
+    enabled: false

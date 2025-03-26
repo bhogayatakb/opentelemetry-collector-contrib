@@ -1,10 +1,19 @@
-name: hostmetricsreceiver/processes
+type: processes
+
+status:
+  class: scraper
+  stability:
+    beta: [metrics]
+  distributions: [core, contrib, k8s]
+  codeowners:
+    active: [dmitryax, braydonk]
 
 sem_conv_version: 1.9.0
 
 attributes:
   status:
     description: Breakdown status of the processes.
+    type: string
     enum: [blocked, daemon, detached, idle, locked, orphan, paging, running, sleeping, stopped, system, unknown, zombies]
 
 metrics:
@@ -14,7 +23,7 @@ metrics:
     unit: "{processes}"
     sum:
       value_type: int
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       monotonic: true
 
   system.processes.count:
@@ -23,6 +32,6 @@ metrics:
     unit: "{processes}"
     sum:
       value_type: int
-      aggregation: cumulative
+      aggregation_temporality: cumulative
       monotonic: false
     attributes: [status]

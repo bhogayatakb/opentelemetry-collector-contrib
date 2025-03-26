@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package googlecloudpubsubexporter
 
@@ -37,20 +26,15 @@ var (
 var metricsData = func() pmetric.Metrics {
 	d := pmetric.NewMetrics()
 	metric := d.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
-	metric.SetDataType(pmetric.MetricDataTypeHistogram)
-	metric.Histogram().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsAfter30s))
+	metric.SetEmptyHistogram().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsAfter30s))
 	metric = d.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
-	metric.SetDataType(pmetric.MetricDataTypeSummary)
-	metric.Summary().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsAfter5m))
+	metric.SetEmptySummary().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsAfter5m))
 	metric = d.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
-	metric.SetDataType(pmetric.MetricDataTypeGauge)
-	metric.Gauge().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsRef))
+	metric.SetEmptyGauge().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsRef))
 	metric = d.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
-	metric.SetDataType(pmetric.MetricDataTypeSum)
-	metric.Sum().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsBefore30s))
+	metric.SetEmptySum().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsBefore30s))
 	metric = d.ResourceMetrics().AppendEmpty().ScopeMetrics().AppendEmpty().Metrics().AppendEmpty()
-	metric.SetDataType(pmetric.MetricDataTypeExponentialHistogram)
-	metric.ExponentialHistogram().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsBefore5m))
+	metric.SetEmptyExponentialHistogram().DataPoints().AppendEmpty().SetTimestamp(pcommon.NewTimestampFromTime(tsBefore5m))
 	return d
 }()
 
@@ -111,7 +95,7 @@ func TestEarliestLogsWatermarkOutDrift(t *testing.T) {
 	assert.Equal(t, tsBefore1m, out)
 }
 
-func TestEarliestTracessWatermarkInDrift(t *testing.T) {
+func TestEarliestTracesWatermarkInDrift(t *testing.T) {
 	out := earliestTracesWatermark(tracesData, tsRef, time.Hour)
 	assert.Equal(t, tsBefore5m, out)
 }

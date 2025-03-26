@@ -1,30 +1,23 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package filesystemscraper // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/filesystemscraper"
 
 import (
 	"fmt"
 
-	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/coreinternal/processor/filterset"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/filter/filterset"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/hostmetricsreceiver/internal/scraper/filesystemscraper/internal/metadata"
 )
 
 // Config relating to FileSystem Metric Scraper.
 type Config struct {
-	// Metrics allows to customize scraped metrics representation.
-	Metrics metadata.MetricsSettings `mapstructure:"metrics"`
+	// MetricsBuilderConfig allows to customize scraped metrics/attributes representation.
+	metadata.MetricsBuilderConfig `mapstructure:",squash"`
+
+	// IncludeVirtualFS will also capture filesystems such as tmpfs, ramfs
+	// and other filesystem types that do no have an associated physical device.
+	IncludeVirtualFS bool `mapstructure:"include_virtual_filesystems"`
 
 	// IncludeDevices specifies a filter on the devices that should be included in the generated metrics.
 	IncludeDevices DeviceMatchConfig `mapstructure:"include_devices"`
@@ -37,9 +30,13 @@ type Config struct {
 	ExcludeFSTypes FSTypeMatchConfig `mapstructure:"exclude_fs_types"`
 
 	// IncludeMountPoints specifies a filter on the mount points that should be included in the generated metrics.
+	// When `root_path` is set, the mount points must be from the host's perspective.
 	IncludeMountPoints MountPointMatchConfig `mapstructure:"include_mount_points"`
 	// ExcludeMountPoints specifies a filter on the mount points that should be excluded from the generated metrics.
+	// When `root_path` is set, the mount points must be from the host's perspective.
 	ExcludeMountPoints MountPointMatchConfig `mapstructure:"exclude_mount_points"`
+
+	rootPath string `mapstructure:"-"`
 }
 
 type DeviceMatchConfig struct {
@@ -68,6 +65,10 @@ type fsFilter struct {
 	includeMountPointFilter filterset.FilterSet
 	excludeMountPointFilter filterset.FilterSet
 	filtersExist            bool
+}
+
+func (cfg *Config) SetRootPath(rootPath string) {
+	cfg.rootPath = rootPath
 }
 
 func (cfg *Config) createFilter() (*fsFilter, error) {

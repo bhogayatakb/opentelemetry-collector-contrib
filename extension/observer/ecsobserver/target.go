@@ -1,16 +1,5 @@
-// Copyright  OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package ecsobserver // import "github.com/open-telemetry/opentelemetry-collector-contrib/extension/observer/ecsobserver"
 
@@ -132,9 +121,7 @@ func trimEmptyValueByKeyPrefix(m map[string]string, prefix string) {
 	}
 }
 
-var (
-	invalidLabelCharRE = regexp.MustCompile(`[^a-zA-Z0-9_]`)
-)
+var invalidLabelCharRE = regexp.MustCompile(`[^a-zA-Z0-9_]`)
 
 // Copied from https://github.com/prometheus/prometheus/blob/8d2a8f493905e46fe6181e8c1b79ccdfcbdb57fc/util/strutil/strconv.go#L40-L44
 func sanitizeLabelName(s string) string {
@@ -147,9 +134,9 @@ type fileSDTarget struct {
 }
 
 func targetsToFileSDTargets(targets []prometheusECSTarget, jobLabelName string) ([]fileSDTarget, error) {
-	var converted []fileSDTarget
+	converted := make([]fileSDTarget, len(targets))
 	omitEmpty := []string{labelJob, labelServiceName}
-	for _, t := range targets {
+	for i, t := range targets {
 		labels := t.ToLabels()
 		address, ok := labels[labelAddress]
 		if !ok {
@@ -179,7 +166,7 @@ func targetsToFileSDTargets(targets []prometheusECSTarget, jobLabelName string) 
 			Targets: []string{address},
 			Labels:  labels,
 		}
-		converted = append(converted, pt)
+		converted[i] = pt
 	}
 	return converted, nil
 }

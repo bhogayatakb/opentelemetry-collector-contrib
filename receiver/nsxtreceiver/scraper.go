@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package nsxtreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/nsxtreceiver"
 
@@ -24,13 +13,14 @@ import (
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
-	"go.opentelemetry.io/collector/receiver/scrapererror"
+	"go.opentelemetry.io/collector/receiver"
+	"go.opentelemetry.io/collector/scraper/scrapererror"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/nsxtreceiver/internal/metadata"
 	dm "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/nsxtreceiver/internal/model"
 )
 
-type scraper struct {
+type nsxtScraper struct {
 	config   *Config
 	settings component.TelemetrySettings
 	host     component.Host
@@ -38,17 +28,17 @@ type scraper struct {
 	mb       *metadata.MetricsBuilder
 }
 
-func newScraper(cfg *Config, settings component.ReceiverCreateSettings) *scraper {
-	return &scraper{
+func newScraper(cfg *Config, settings receiver.Settings) *nsxtScraper {
+	return &nsxtScraper{
 		config:   cfg,
 		settings: settings.TelemetrySettings,
-		mb:       metadata.NewMetricsBuilder(cfg.Metrics, settings.BuildInfo),
+		mb:       metadata.NewMetricsBuilder(cfg.MetricsBuilderConfig, settings),
 	}
 }
 
-func (s *scraper) start(ctx context.Context, host component.Host) error {
+func (s *nsxtScraper) start(ctx context.Context, host component.Host) error {
 	s.host = host
-	client, err := newClient(s.config, s.settings, s.host, s.settings.Logger)
+	client, err := newClient(ctx, s.config, s.settings, s.host, s.settings.Logger)
 	if err != nil {
 		return fmt.Errorf("unable to construct http client: %w", err)
 	}
@@ -63,7 +53,7 @@ const (
 	managerClass
 )
 
-func (s *scraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
+func (s *nsxtScraper) scrape(ctx context.Context) (pmetric.Metrics, error) {
 	r, err := s.retrieve(ctx)
 	if err != nil {
 		return pmetric.NewMetrics(), err
@@ -86,7 +76,7 @@ type interfaceInformation struct {
 	stats *dm.NetworkInterfaceStats
 }
 
-func (s *scraper) retrieve(ctx context.Context) ([]*nodeInfo, error) {
+func (s *nsxtScraper) retrieve(ctx context.Context) ([]*nodeInfo, error) {
 	var r []*nodeInfo
 	errs := &scrapererror.ScrapeErrors{}
 
@@ -136,7 +126,7 @@ func (s *scraper) retrieve(ctx context.Context) ([]*nodeInfo, error) {
 	return r, errs.Combine()
 }
 
-func (s *scraper) retrieveInterfaces(
+func (s *nsxtScraper) retrieveInterfaces(
 	ctx context.Context,
 	nodeProps dm.NodeProperties,
 	nodeInfo *nodeInfo,
@@ -164,7 +154,7 @@ func (s *scraper) retrieveInterfaces(
 	}
 }
 
-func (s *scraper) retrieveNodeStats(
+func (s *nsxtScraper) retrieveNodeStats(
 	ctx context.Context,
 	nodeProps dm.NodeProperties,
 	nodeInfo *nodeInfo,
@@ -181,7 +171,7 @@ func (s *scraper) retrieveNodeStats(
 	nodeInfo.stats = ns
 }
 
-func (s *scraper) process(
+func (s *nsxtScraper) process(
 	nodes []*nodeInfo,
 	colTime pcommon.Timestamp,
 ) {
@@ -193,7 +183,7 @@ func (s *scraper) process(
 	}
 }
 
-func (s *scraper) recordNodeInterface(colTime pcommon.Timestamp, nodeProps dm.NodeProperties, i interfaceInformation) {
+func (s *nsxtScraper) recordNodeInterface(colTime pcommon.Timestamp, nodeProps dm.NodeProperties, i interfaceInformation) {
 	s.mb.RecordNsxtNodeNetworkPacketCountDataPoint(colTime, i.stats.RxDropped, metadata.AttributeDirectionReceived, metadata.AttributePacketTypeDropped)
 	s.mb.RecordNsxtNodeNetworkPacketCountDataPoint(colTime, i.stats.RxErrors, metadata.AttributeDirectionReceived, metadata.AttributePacketTypeErrored)
 	successRxPackets := i.stats.RxPackets - i.stats.RxDropped - i.stats.RxErrors
@@ -207,15 +197,15 @@ func (s *scraper) recordNodeInterface(colTime pcommon.Timestamp, nodeProps dm.No
 	s.mb.RecordNsxtNodeNetworkIoDataPoint(colTime, i.stats.RxBytes, metadata.AttributeDirectionReceived)
 	s.mb.RecordNsxtNodeNetworkIoDataPoint(colTime, i.stats.TxBytes, metadata.AttributeDirectionTransmitted)
 
-	s.mb.EmitForResource(
-		metadata.WithDeviceID(i.iFace.InterfaceId),
-		metadata.WithNsxtNodeName(nodeProps.Name),
-		metadata.WithNsxtNodeType(nodeProps.ResourceType),
-		metadata.WithNsxtNodeID(nodeProps.ID),
-	)
+	rb := s.mb.NewResourceBuilder()
+	rb.SetDeviceID(i.iFace.InterfaceId)
+	rb.SetNsxtNodeName(nodeProps.Name)
+	rb.SetNsxtNodeType(nodeProps.ResourceType)
+	rb.SetNsxtNodeID(nodeProps.ID)
+	s.mb.EmitForResource(metadata.WithResource(rb.Emit()))
 }
 
-func (s *scraper) recordNode(
+func (s *nsxtScraper) recordNode(
 	colTime pcommon.Timestamp,
 	info *nodeInfo,
 ) {
@@ -235,11 +225,11 @@ func (s *scraper) recordNode(
 	// ensure division by zero is safeguarded
 	s.mb.RecordNsxtNodeFilesystemUtilizationDataPoint(colTime, float64(ss.DiskSpaceUsed)/math.Max(float64(ss.DiskSpaceTotal), 1))
 
-	s.mb.EmitForResource(
-		metadata.WithNsxtNodeName(info.nodeProps.Name),
-		metadata.WithNsxtNodeID(info.nodeProps.ID),
-		metadata.WithNsxtNodeType(info.nodeType),
-	)
+	rb := s.mb.NewResourceBuilder()
+	rb.SetNsxtNodeName(info.nodeProps.Name)
+	rb.SetNsxtNodeID(info.nodeProps.ID)
+	rb.SetNsxtNodeType(info.nodeType)
+	s.mb.EmitForResource(metadata.WithResource(rb.Emit()))
 }
 
 func clusterNodeType(node dm.ClusterNode) string {

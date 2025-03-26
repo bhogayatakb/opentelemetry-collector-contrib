@@ -1,16 +1,5 @@
-// Copyright 2019, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package signalfx // import "github.com/open-telemetry/opentelemetry-collector-contrib/pkg/translator/signalfx"
 
@@ -62,11 +51,19 @@ func setDataTypeAndPoints(sfxDataPoint *model.DataPoint, ms pmetric.MetricSlice,
 	if ok && sfxMetricType < numMetricTypes && idxs[sfxMetricType] != 0 {
 		m := ms.At(idxs[sfxMetricType] - 1)
 		// Only emit gauge and sum.
-		switch m.DataType() {
-		case pmetric.MetricDataTypeGauge:
+		switch m.Type() {
+		case pmetric.MetricTypeGauge:
 			fillNumberDataPoint(sfxDataPoint, m.Gauge().DataPoints())
-		case pmetric.MetricDataTypeSum:
+		case pmetric.MetricTypeSum:
 			fillNumberDataPoint(sfxDataPoint, m.Sum().DataPoints())
+		case pmetric.MetricTypeHistogram:
+			fallthrough
+		case pmetric.MetricTypeExponentialHistogram:
+			fallthrough
+		case pmetric.MetricTypeSummary:
+			fallthrough
+		case pmetric.MetricTypeEmpty:
+			return fmt.Errorf("unsupported metric type: %v", m.Type())
 		}
 		return nil
 	}
@@ -76,22 +73,22 @@ func setDataTypeAndPoints(sfxDataPoint *model.DataPoint, ms pmetric.MetricSlice,
 	case model.MetricType_GAUGE:
 		m = ms.AppendEmpty()
 		// Numerical: Periodic, instantaneous measurement of some state.
-		m.SetDataType(pmetric.MetricDataTypeGauge)
-		fillNumberDataPoint(sfxDataPoint, m.Gauge().DataPoints())
+		fillNumberDataPoint(sfxDataPoint, m.SetEmptyGauge().DataPoints())
 
 	case model.MetricType_COUNTER:
 		m = ms.AppendEmpty()
-		m.SetDataType(pmetric.MetricDataTypeSum)
-		m.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityDelta)
+		m.SetEmptySum().SetAggregationTemporality(pmetric.AggregationTemporalityDelta)
 		m.Sum().SetIsMonotonic(true)
 		fillNumberDataPoint(sfxDataPoint, m.Sum().DataPoints())
 
 	case model.MetricType_CUMULATIVE_COUNTER:
 		m = ms.AppendEmpty()
-		m.SetDataType(pmetric.MetricDataTypeSum)
-		m.Sum().SetAggregationTemporality(pmetric.MetricAggregationTemporalityCumulative)
+		m.SetEmptySum().SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
 		m.Sum().SetIsMonotonic(true)
 		fillNumberDataPoint(sfxDataPoint, m.Sum().DataPoints())
+
+	case model.MetricType_ENUM:
+		return fmt.Errorf("unsupported enum data-point (%d) in metric %q", sfxMetricType, sfxDataPoint.Metric)
 
 	default:
 		return fmt.Errorf("unknown data-point type (%d) in metric %q", sfxMetricType, sfxDataPoint.Metric)
@@ -108,15 +105,14 @@ func fillNumberDataPoint(sfxDataPoint *model.DataPoint, dps pmetric.NumberDataPo
 	dp.SetTimestamp(toTimestamp(sfxDataPoint.GetTimestamp()))
 	switch {
 	case sfxDataPoint.Value.IntValue != nil:
-		dp.SetIntVal(*sfxDataPoint.Value.IntValue)
+		dp.SetIntValue(*sfxDataPoint.Value.IntValue)
 	case sfxDataPoint.Value.DoubleValue != nil:
-		dp.SetDoubleVal(*sfxDataPoint.Value.DoubleValue)
+		dp.SetDoubleValue(*sfxDataPoint.Value.DoubleValue)
 	}
 	fillInAttributes(sfxDataPoint.Dimensions, dp.Attributes())
 }
 
 func fillInAttributes(dimensions []*model.Dimension, attributes pcommon.Map) {
-	attributes.Clear()
 	attributes.EnsureCapacity(len(dimensions))
 
 	for _, dim := range dimensions {
@@ -124,6 +120,6 @@ func fillInAttributes(dimensions []*model.Dimension, attributes pcommon.Map) {
 			// TODO: Log or metric for this odd ball?
 			continue
 		}
-		attributes.UpsertString(dim.Key, dim.Value)
+		attributes.PutStr(dim.Key, dim.Value)
 	}
 }

@@ -1,16 +1,5 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package translator // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/awsxrayreceiver/internal/translator"
 
@@ -21,9 +10,10 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
-	conventions "go.opentelemetry.io/collector/semconv/v1.6.1"
+	conventions "go.opentelemetry.io/collector/semconv/v1.18.0"
 
 	awsxray "github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/xray"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/internal/aws/xray/telemetry"
 )
 
 const (
@@ -35,19 +25,21 @@ const (
 // `toPdata` in this receiver to a common package later
 
 // ToTraces converts X-Ray segment (and its subsegments) to an OT ResourceSpans.
-func ToTraces(rawSeg []byte) (*ptrace.Traces, int, error) {
+func ToTraces(rawSeg []byte, recorder telemetry.Recorder) (ptrace.Traces, int, error) {
 	var seg awsxray.Segment
 	err := json.Unmarshal(rawSeg, &seg)
 	if err != nil {
 		// return 1 as total segment (&subsegments) count
 		// because we can't parse the body the UDP packet.
-		return nil, 1, err
+		return ptrace.Traces{}, 1, err
 	}
 	count := totalSegmentsCount(seg)
+	recorder.RecordSegmentsReceived(count)
 
 	err = seg.Validate()
 	if err != nil {
-		return nil, count, err
+		recorder.RecordSegmentsRejected(count)
+		return ptrace.Traces{}, count, err
 	}
 
 	traceData := ptrace.NewTraces()
@@ -66,39 +58,37 @@ func ToTraces(rawSeg []byte) (*ptrace.Traces, int, error) {
 	spans := ils.Spans()
 
 	// populating global attributes shared among segment and embedded subsegment(s)
-	populateResource(&seg, &resource)
+	populateResource(&seg, resource)
 
 	// recursively traverse segment and embedded subsegments
 	// to populate the spans. We also need to pass in the
 	// TraceID of the root segment in because embedded subsegments
 	// do not have that information, but it's needed after we flatten
 	// the embedded subsegment to generate independent child spans.
-	_, err = segToSpans(seg, seg.TraceID, nil, &spans)
+	_, err = segToSpans(seg, seg.TraceID, nil, spans)
 	if err != nil {
-		return nil, count, err
+		recorder.RecordSegmentsRejected(count)
+		return ptrace.Traces{}, count, err
 	}
 
-	return &traceData, count, nil
+	return traceData, count, nil
 }
 
-func segToSpans(seg awsxray.Segment,
-	traceID, parentID *string,
-	spans *ptrace.SpanSlice) (*ptrace.Span, error) {
-
+func segToSpans(seg awsxray.Segment, traceID, parentID *string, spans ptrace.SpanSlice) (ptrace.Span, error) {
 	span := spans.AppendEmpty()
 
-	err := populateSpan(&seg, traceID, parentID, &span)
+	err := populateSpan(&seg, traceID, parentID, span)
 	if err != nil {
-		return nil, err
+		return ptrace.Span{}, err
 	}
 
-	var populatedChildSpan *ptrace.Span
+	var populatedChildSpan ptrace.Span
 	for _, s := range seg.Subsegments {
 		populatedChildSpan, err = segToSpans(s,
 			traceID, seg.ID,
 			spans)
 		if err != nil {
-			return nil, err
+			return ptrace.Span{}, err
 		}
 
 		if seg.Cause != nil &&
@@ -116,14 +106,10 @@ func segToSpans(seg awsxray.Segment,
 		}
 	}
 
-	return &span, nil
+	return span, nil
 }
 
-func populateSpan(
-	seg *awsxray.Segment,
-	traceID, parentID *string,
-	span *ptrace.Span) error {
-
+func populateSpan(seg *awsxray.Segment, traceID, parentID *string, span ptrace.Span) error {
 	attrs := span.Attributes()
 	attrs.Clear()
 	attrs.EnsureCapacity(initAttrCapacity)
@@ -141,13 +127,11 @@ func populateSpan(
 		if err != nil {
 			return err
 		}
-
 	} else {
 		traceIDBytes, err = decodeXRayTraceID(seg.TraceID)
 		if err != nil {
 			return err
 		}
-
 	}
 
 	// decode parent id
@@ -170,50 +154,49 @@ func populateSpan(
 		return err
 	}
 
-	span.SetTraceID(pcommon.NewTraceID(traceIDBytes))
-	span.SetSpanID(pcommon.NewSpanID(spanIDBytes))
+	span.SetTraceID(traceIDBytes)
+	span.SetSpanID(spanIDBytes)
 
 	if parentIDBytes != [8]byte{} {
-		span.SetParentSpanID(pcommon.NewSpanID(parentIDBytes))
+		span.SetParentSpanID(parentIDBytes)
 	} else {
 		span.SetKind(ptrace.SpanKindServer)
 	}
 
 	addStartTime(seg.StartTime, span)
 	addEndTime(seg.EndTime, span)
-	addBool(seg.InProgress, awsxray.AWSXRayInProgressAttribute, &attrs)
-	addString(seg.User, conventions.AttributeEnduserID, &attrs)
+	addBool(seg.InProgress, awsxray.AWSXRayInProgressAttribute, attrs)
+	addString(seg.User, conventions.AttributeEnduserID, attrs)
 
 	addHTTP(seg, span)
 	addCause(seg, span)
-	addAWSToSpan(seg.AWS, &attrs)
-	err = addSQLToSpan(seg.SQL, &attrs)
+	addAWSToSpan(seg.AWS, attrs)
+	err = addSQLToSpan(seg.SQL, attrs)
 	if err != nil {
 		return err
 	}
 
-	addBool(seg.Traced, awsxray.AWSXRayTracedAttribute, &attrs)
+	addBool(seg.Traced, awsxray.AWSXRayTracedAttribute, attrs)
 
-	addAnnotations(seg.Annotations, &attrs)
-	return addMetadata(seg.Metadata, &attrs)
+	addAnnotations(seg.Annotations, attrs)
+	return addMetadata(seg.Metadata, attrs)
 }
 
-func populateResource(seg *awsxray.Segment, rs *pcommon.Resource) {
+func populateResource(seg *awsxray.Segment, rs pcommon.Resource) {
 	// allocate a new attribute map within the Resource in the ptrace.ResourceSpans allocated above
 	attrs := rs.Attributes()
 	attrs.Clear()
 	attrs.EnsureCapacity(initAttrCapacity)
 
-	addAWSToResource(seg.AWS, &attrs)
-	addSdkToResource(seg, &attrs)
+	addString(seg.Name, conventions.AttributeServiceName, attrs)
+
+	addAWSToResource(seg.AWS, attrs)
+	addSdkToResource(seg, attrs)
 	if seg.Service != nil {
-		addString(
-			seg.Service.Version,
-			conventions.AttributeServiceVersion,
-			&attrs)
+		addString(seg.Service.Version, conventions.AttributeServiceVersion, attrs)
 	}
 
-	addString(seg.ResourceARN, awsxray.AWSXRayResourceARNAttribute, &attrs)
+	addString(seg.ResourceARN, awsxray.AWSXRayResourceARNAttribute, attrs)
 }
 
 func totalSegmentsCount(seg awsxray.Segment) int {

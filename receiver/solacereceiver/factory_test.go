@@ -1,136 +1,109 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//       http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package solacereceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/solacereceiver"
 
 import (
 	"context"
-	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component"
-	"go.opentelemetry.io/collector/component/componenttest"
-	"go.opentelemetry.io/collector/config"
-	"go.opentelemetry.io/collector/config/configtls"
+	"go.opentelemetry.io/collector/confmap/confmaptest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
-	"go.opentelemetry.io/collector/service/servicetest"
+	"go.opentelemetry.io/collector/pipeline"
+	"go.opentelemetry.io/collector/receiver/receivertest"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+
+	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/solacereceiver/internal/metadata"
 )
 
-func TestLoadConfig(t *testing.T) {
-	factories := getTestNopFactories(t)
+func TestCreateTraces(t *testing.T) {
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+	require.NoError(t, err)
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
 
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "primary").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
 
-	assert.NoError(t, err)
-	assert.NotNil(t, cfg)
-	assert.Equal(t, len(cfg.Receivers), 2)
-
-	// validate primary config
-	primary := cfg.Receivers[config.NewComponentIDWithName(componentType, "primary")].(*Config)
-	assert.NotNil(t, primary)
-	assert.Equal(t, "myHost:5671", primary.Broker[0])
-	assert.Equal(t, Authentication{
-		PlainText: &SaslPlainTextConfig{
-			Username: "otel",
-			Password: "otel01$",
-		},
-	}, primary.Auth)
-	assert.Equal(t, "queue://#trace-profile123", primary.Queue)
-	assert.Equal(t, uint32(1234), primary.MaxUnacked)
-	assert.Equal(t, configtls.TLSClientSetting{Insecure: false, InsecureSkipVerify: false}, primary.TLS)
-
-	// validate backup config
-	backup := cfg.Receivers[config.NewComponentIDWithName(componentType, "backup")].(*Config)
-	assert.NotNil(t, backup)
-	assert.Equal(t, defaultHost, backup.Broker[0])
-	assert.Equal(t, Authentication{
-		XAuth2: &SaslXAuth2Config{
-			Username: "otel",
-			Bearer:   "otel01$",
-		},
-	}, backup.Auth)
-	assert.Equal(t, "queue://#trace-profileABC", backup.Queue)
-	assert.Equal(t, defaultMaxUnaked, backup.MaxUnacked)
-	assert.Equal(t, configtls.TLSClientSetting{Insecure: true, InsecureSkipVerify: false}, backup.TLS)
-}
-
-func TestLoadInvalidConfigMissingAuth(t *testing.T) {
-	factories := getTestNopFactories(t)
-	_, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config_invalid_noauth.yaml"), factories)
-	assert.Equal(t, errMissingAuthDetails, errors.Unwrap(err))
-}
-
-func TestLoadInvalidConfigMissingQueue(t *testing.T) {
-	factories := getTestNopFactories(t)
-	_, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config_invalid_noqueue.yaml"), factories)
-	assert.Equal(t, errMissingQueueName, errors.Unwrap(err))
-}
-
-func TestCreateTracesReceiver(t *testing.T) {
-	factories := getTestNopFactories(t)
-	cfg, err := servicetest.LoadConfigAndValidate(filepath.Join("testdata", "config.yaml"), factories)
-	assert.NoError(t, err)
-	factory := factories.Receivers[componentType]
-	rcvCfg, ok := cfg.Receivers[config.NewComponentIDWithName(componentType, "primary")]
-	assert.True(t, ok)
-	receiver, err := factory.CreateTracesReceiver(context.Background(), componenttest.NewNopReceiverCreateSettings(),
-		rcvCfg, consumertest.NewNop())
+	set := receivertest.NewNopSettings(metadata.Type)
+	set.ID = component.MustNewIDWithName("solace", "factory")
+	receiver, err := factory.CreateTraces(
+		context.Background(),
+		set,
+		cfg,
+		consumertest.NewNop(),
+	)
 	assert.NoError(t, err)
 	castedReceiver, ok := receiver.(*solaceTracesReceiver)
 	assert.True(t, ok)
-	assert.Equal(t, castedReceiver.config, rcvCfg)
+	assert.Equal(t, castedReceiver.config, cfg)
 }
 
-func TestCreateTracesReceiverWrongConfig(t *testing.T) {
-	factories := getTestNopFactories(t)
-	factory := factories.Receivers[componentType]
-	_, err := factory.CreateTracesReceiver(context.Background(), componenttest.NewNopReceiverCreateSettings(), nil, nil)
-	assert.Equal(t, component.ErrDataTypeIsNotSupported, err)
+func TestCreateTracesWrongConfig(t *testing.T) {
+	factory := NewFactory()
+	_, err := factory.CreateTraces(context.Background(), receivertest.NewNopSettings(metadata.Type), nil, nil)
+	assert.Equal(t, pipeline.ErrSignalNotSupported, err)
 }
 
-func TestCreateTracesReceiverNilConsumer(t *testing.T) {
-	factories := getTestNopFactories(t)
-	cfg := createDefaultConfig()
-	factory := factories.Receivers[componentType]
-	_, err := factory.CreateTracesReceiver(context.Background(), componenttest.NewNopReceiverCreateSettings(), cfg, nil)
-	assert.Equal(t, component.ErrNilNextConsumer, err)
-}
-
-func TestCreateTracesReceiverBadConfigNoAuth(t *testing.T) {
-	factories := getTestNopFactories(t)
+func TestCreateTracesBadConfigNoAuth(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Queue = "some-queue"
-	factory := factories.Receivers[componentType]
-	_, err := factory.CreateTracesReceiver(context.Background(), componenttest.NewNopReceiverCreateSettings(), cfg, consumertest.NewNop())
+	factory := NewFactory()
+	_, err := factory.CreateTraces(context.Background(), receivertest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
 	assert.Equal(t, errMissingAuthDetails, err)
 }
 
-func TestCreateTracesReceiverBadConfigIncompleteAuth(t *testing.T) {
-	factories := getTestNopFactories(t)
+func TestCreateTracesBadConfigIncompleteAuth(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	cfg.Queue = "some-queue"
 	cfg.Auth = Authentication{PlainText: &SaslPlainTextConfig{Username: "someUsername"}} // missing password
-	factory := factories.Receivers[componentType]
-	_, err := factory.CreateTracesReceiver(context.Background(), componenttest.NewNopReceiverCreateSettings(), cfg, consumertest.NewNop())
+	factory := NewFactory()
+	_, err := factory.CreateTraces(context.Background(), receivertest.NewNopSettings(metadata.Type), cfg, consumertest.NewNop())
 	assert.Equal(t, errMissingPlainTextParams, err)
 }
 
-func getTestNopFactories(t *testing.T) component.Factories {
-	factories, err := componenttest.NopFactories()
-	assert.Nil(t, err)
-	factories.Receivers[componentType] = NewFactory()
-	return factories
+func TestCreateTracesBadMetrics(t *testing.T) {
+	set := receivertest.NewNopSettings(metadata.Type)
+	set.ID = component.MustNewIDWithName("solace", "factory")
+	// the code here sets up a custom meter provider
+	// to trigger the error condition required for this test
+	metricExp, err := stdoutmetric.New()
+	require.NoError(t, err)
+	provider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp)),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{
+				Name: "otelcol_solacereceiver_failed_reconnections",
+			},
+			sdkmetric.Stream{
+				Aggregation: sdkmetric.AggregationLastValue{},
+			},
+		)),
+	)
+	defer func() {
+		require.NoError(t, provider.Shutdown(context.Background()))
+	}()
+	set.MeterProvider = provider
+	cm, err := confmaptest.LoadConf(filepath.Join("testdata", "config.yaml"))
+	require.NoError(t, err)
+	factory := NewFactory()
+	cfg := factory.CreateDefaultConfig()
+
+	sub, err := cm.Sub(component.NewIDWithName(metadata.Type, "primary").String())
+	require.NoError(t, err)
+	require.NoError(t, sub.Unmarshal(cfg))
+	receiver, err := factory.CreateTraces(
+		context.Background(),
+		set,
+		cfg,
+		consumertest.NewNop(),
+	)
+	assert.Error(t, err)
+	assert.Nil(t, receiver)
 }

@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package fixture // import "github.com/open-telemetry/opentelemetry-collector-contrib/processor/schemaprocessor/internal/fixture"
 
@@ -25,7 +14,7 @@ import (
 )
 
 // ParallelRaceCompute starts `count` number of go routines that calls the provided function `fn`
-// at the same to allow the race detector greater oppotunity to capture known race conditions.
+// at the same to allow the race detector greater opportunity to capture known race conditions.
 // This method blocks until each count number of fn has completed, any returned errors is considered
 // a failing test method.
 // If the race detector is not enabled, the function then skips with an notice.

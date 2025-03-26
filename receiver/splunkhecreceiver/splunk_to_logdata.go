@@ -1,21 +1,13 @@
-// Copyright 2020, OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package splunkhecreceiver // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/splunkhecreceiver"
 
 import (
+	"bufio"
 	"errors"
+	"io"
+	"net/url"
 	"sort"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -26,45 +18,43 @@ import (
 )
 
 const (
-	cannotConvertValue = "cannot convert field value to attribute"
+	// splunk metadata
+	index      = "index"
+	source     = "source"
+	sourcetype = "sourcetype"
+	host       = "host"
+	queryTime  = "time"
 )
+
+var errCannotConvertValue = errors.New("cannot convert field value to attribute")
 
 // splunkHecToLogData transforms splunk events into logs
 func splunkHecToLogData(logger *zap.Logger, events []*splunk.Event, resourceCustomizer func(pcommon.Resource), config *Config) (plog.Logs, error) {
 	ld := plog.NewLogs()
-	rl := ld.ResourceLogs().AppendEmpty()
-	sl := rl.ScopeLogs().AppendEmpty()
+	scopeLogsMap := make(map[[4]string]plog.ScopeLogs)
 	for _, event := range events {
-		attrValue, err := convertInterfaceToAttributeValue(logger, event.Event)
-		if err != nil {
-			logger.Debug("Unsupported value conversion", zap.Any("value", event.Event))
-			return ld, errors.New(cannotConvertValue)
+		key := [4]string{event.Host, event.Source, event.SourceType, event.Index}
+		var sl plog.ScopeLogs
+		var found bool
+		if sl, found = scopeLogsMap[key]; !found {
+			rl := ld.ResourceLogs().AppendEmpty()
+			sl = rl.ScopeLogs().AppendEmpty()
+			scopeLogsMap[key] = sl
+			appendSplunkMetadata(rl, config.HecToOtelAttrs, event.Host, event.Source, event.SourceType, event.Index)
+			if resourceCustomizer != nil {
+				resourceCustomizer(rl.Resource())
+			}
 		}
-		logRecord := sl.LogRecords().AppendEmpty()
+
 		// The SourceType field is the most logical "name" of the event.
-		attrValue.CopyTo(logRecord.Body())
-
-		// Splunk timestamps are in seconds so convert to nanos by multiplying
-		// by 1 billion.
-		if event.Time != nil {
-			logRecord.SetTimestamp(pcommon.Timestamp(*event.Time * 1e9))
+		logRecord := sl.LogRecords().AppendEmpty()
+		if err := convertToValue(logger, event.Event, logRecord.Body()); err != nil {
+			return ld, err
 		}
 
-		if event.Host != "" {
-			logRecord.Attributes().UpsertString(config.HecToOtelAttrs.Host, event.Host)
-		}
-		if event.Source != "" {
-			logRecord.Attributes().UpsertString(config.HecToOtelAttrs.Source, event.Source)
-		}
-		if event.SourceType != "" {
-			logRecord.Attributes().UpsertString(config.HecToOtelAttrs.SourceType, event.SourceType)
-		}
-		if event.Index != "" {
-			logRecord.Attributes().UpsertString(config.HecToOtelAttrs.Index, event.Index)
-		}
-		if resourceCustomizer != nil {
-			resourceCustomizer(rl.Resource())
-		}
+		logRecord.SetTimestamp(convertTimestamp(event.Time))
+
+		// Set event fields first, so the specialized attributes overwrite them if needed.
 		keys := make([]string, 0, len(event.Fields))
 		for k := range event.Fields {
 			keys = append(keys, k)
@@ -72,63 +62,97 @@ func splunkHecToLogData(logger *zap.Logger, events []*splunk.Event, resourceCust
 		sort.Strings(keys)
 		for _, key := range keys {
 			val := event.Fields[key]
-			attrValue, err := convertInterfaceToAttributeValue(logger, val)
+			err := convertToValue(logger, val, logRecord.Attributes().PutEmpty(key))
 			if err != nil {
 				return ld, err
 			}
-			logRecord.Attributes().Insert(key, attrValue)
 		}
 	}
 
 	return ld, nil
 }
 
-func convertInterfaceToAttributeValue(logger *zap.Logger, originalValue interface{}) (pcommon.Value, error) {
-	if originalValue == nil {
-		return pcommon.NewValueEmpty(), nil
-	} else if value, ok := originalValue.(string); ok {
-		return pcommon.NewValueString(value), nil
-	} else if value, ok := originalValue.(int64); ok {
-		return pcommon.NewValueInt(value), nil
-	} else if value, ok := originalValue.(float64); ok {
-		return pcommon.NewValueDouble(value), nil
-	} else if value, ok := originalValue.(bool); ok {
-		return pcommon.NewValueBool(value), nil
-	} else if value, ok := originalValue.(map[string]interface{}); ok {
-		mapValue, err := convertToAttributeMap(logger, value)
+// splunkHecRawToLogData transforms raw splunk event into log
+func splunkHecRawToLogData(bodyReader io.Reader, query url.Values, resourceCustomizer func(pcommon.Resource), config *Config, timestamp pcommon.Timestamp) (plog.Logs, int, error) {
+	ld := plog.NewLogs()
+	rl := ld.ResourceLogs().AppendEmpty()
+
+	appendSplunkMetadata(rl, config.HecToOtelAttrs, query.Get(host), query.Get(source), query.Get(sourcetype), query.Get(index))
+	if resourceCustomizer != nil {
+		resourceCustomizer(rl.Resource())
+	}
+	sl := rl.ScopeLogs().AppendEmpty()
+	if config.Splitting == SplittingStrategyNone {
+		b, err := io.ReadAll(bodyReader)
 		if err != nil {
-			return pcommon.NewValueEmpty(), err
+			return ld, 0, err
 		}
-		return mapValue, nil
-	} else if value, ok := originalValue.([]interface{}); ok {
-		arrValue, err := convertToSliceVal(logger, value)
-		if err != nil {
-			return pcommon.NewValueEmpty(), err
-		}
-		return arrValue, nil
+		logRecord := sl.LogRecords().AppendEmpty()
+		logRecord.Body().SetStr(string(b))
+		logRecord.SetTimestamp(timestamp)
 	} else {
-		logger.Debug("Unsupported value conversion", zap.Any("value", originalValue))
-		return pcommon.NewValueEmpty(), errors.New(cannotConvertValue)
-	}
-}
-
-func convertToSliceVal(logger *zap.Logger, value []interface{}) (pcommon.Value, error) {
-	attrVal := pcommon.NewValueSlice()
-	arr := attrVal.SliceVal()
-	for _, elt := range value {
-		translatedElt, err := convertInterfaceToAttributeValue(logger, elt)
-		if err != nil {
-			return attrVal, err
+		sc := bufio.NewScanner(bodyReader)
+		for sc.Scan() {
+			logRecord := sl.LogRecords().AppendEmpty()
+			logLine := sc.Text()
+			logRecord.Body().SetStr(logLine)
+			logRecord.SetTimestamp(timestamp)
 		}
-		tgt := arr.AppendEmpty()
-		translatedElt.CopyTo(tgt)
 	}
-	return attrVal, nil
+
+	return ld, sl.LogRecords().Len(), nil
 }
 
-func convertToAttributeMap(logger *zap.Logger, value map[string]interface{}) (pcommon.Value, error) {
-	attrVal := pcommon.NewValueMap()
-	attrMap := attrVal.MapVal()
+func appendSplunkMetadata(rl plog.ResourceLogs, attrs splunk.HecToOtelAttrs, host, source, sourceType, index string) {
+	if host != "" {
+		rl.Resource().Attributes().PutStr(attrs.Host, host)
+	}
+	if source != "" {
+		rl.Resource().Attributes().PutStr(attrs.Source, source)
+	}
+	if sourceType != "" {
+		rl.Resource().Attributes().PutStr(attrs.SourceType, sourceType)
+	}
+	if index != "" {
+		rl.Resource().Attributes().PutStr(attrs.Index, index)
+	}
+}
+
+func convertToValue(logger *zap.Logger, src any, dest pcommon.Value) error {
+	switch value := src.(type) {
+	case nil:
+	case string:
+		dest.SetStr(value)
+	case int64:
+		dest.SetInt(value)
+	case float64:
+		dest.SetDouble(value)
+	case bool:
+		dest.SetBool(value)
+	case map[string]any:
+		return convertToAttributeMap(logger, value, dest)
+	case []any:
+		return convertToSliceVal(logger, value, dest)
+	default:
+		logger.Debug("Unsupported value conversion", zap.Any("value", src))
+		return errCannotConvertValue
+	}
+	return nil
+}
+
+func convertToSliceVal(logger *zap.Logger, value []any, dest pcommon.Value) error {
+	arr := dest.SetEmptySlice()
+	for _, elt := range value {
+		err := convertToValue(logger, elt, arr.AppendEmpty())
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func convertToAttributeMap(logger *zap.Logger, value map[string]any, dest pcommon.Value) error {
+	attrMap := dest.SetEmptyMap()
 	keys := make([]string, 0, len(value))
 	for k := range value {
 		keys = append(keys, k)
@@ -136,11 +160,9 @@ func convertToAttributeMap(logger *zap.Logger, value map[string]interface{}) (pc
 	sort.Strings(keys)
 	for _, k := range keys {
 		v := value[k]
-		translatedElt, err := convertInterfaceToAttributeValue(logger, v)
-		if err != nil {
-			return attrVal, err
+		if err := convertToValue(logger, v, attrMap.PutEmpty(k)); err != nil {
+			return err
 		}
-		attrMap.Insert(k, translatedElt)
 	}
-	return attrVal, nil
+	return nil
 }

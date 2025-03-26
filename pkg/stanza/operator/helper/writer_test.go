@@ -1,30 +1,21 @@
 // Copyright The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// SPDX-License-Identifier: Apache-2.0
 
 package helper
 
 import (
 	"context"
-	"encoding/json"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	yaml "gopkg.in/yaml.v2"
+	"go.opentelemetry.io/collector/component/componenttest"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/entry"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/errors"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator"
+	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/operator/operatortest"
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/stanza/testutil"
 )
 
@@ -34,18 +25,20 @@ func TestWriterConfigMissingOutput(t *testing.T) {
 			OperatorType: "testtype",
 		},
 	}
-	_, err := config.Build(testutil.Logger(t))
+	set := componenttest.NewNopTelemetrySettings()
+	_, err := config.Build(set)
 	require.NoError(t, err)
 }
 
 func TestWriterConfigValidBuild(t *testing.T) {
 	config := WriterConfig{
-		OutputIDs: OutputIDs{"output"},
+		OutputIDs: []string{"output"},
 		BasicConfig: BasicConfig{
 			OperatorType: "testtype",
 		},
 	}
-	_, err := config.Build(testutil.Logger(t))
+	set := componenttest.NewNopTelemetrySettings()
+	_, err := config.Build(set)
 	require.NoError(t, err)
 }
 
@@ -61,7 +54,36 @@ func TestWriterOperatorWrite(t *testing.T) {
 	ctx := context.Background()
 	testEntry := entry.New()
 
-	writer.Write(ctx, testEntry)
+	err := writer.Write(ctx, testEntry)
+	require.NoError(t, err)
+	output1.AssertCalled(t, "Process", ctx, mock.Anything)
+	output2.AssertCalled(t, "Process", ctx, mock.Anything)
+}
+
+func TestWriterOperatorWriteAfterError(t *testing.T) {
+	output1 := testutil.NewMockOperator("output1")
+	output1.On("Process", mock.Anything, mock.Anything).Return(errors.NewError("Operator can not process logs.", ""))
+	output2 := testutil.NewMockOperator("output2")
+	output2.On("Process", mock.Anything, mock.Anything).Return(nil)
+
+	config := WriterConfig{
+		OutputIDs: []string{"output1", "output2"},
+		BasicConfig: BasicConfig{
+			OperatorType: "testtype",
+		},
+	}
+	set := componenttest.NewNopTelemetrySettings()
+	writer, err := config.Build(set)
+	require.NoError(t, err)
+
+	err = writer.SetOutputs([]operator.Operator{output1, output2})
+	require.NoError(t, err)
+
+	ctx := context.Background()
+	testEntry := entry.New()
+
+	err = writer.Write(ctx, testEntry)
+	require.NoError(t, err)
 	output1.AssertCalled(t, "Process", ctx, mock.Anything)
 	output2.AssertCalled(t, "Process", ctx, mock.Anything)
 }
@@ -83,7 +105,8 @@ func TestWriterOperatorOutputs(t *testing.T) {
 	ctx := context.Background()
 	testEntry := entry.New()
 
-	writer.Write(ctx, testEntry)
+	err := writer.Write(ctx, testEntry)
+	require.NoError(t, err)
 	output1.AssertCalled(t, "Process", ctx, mock.Anything)
 	output2.AssertCalled(t, "Process", ctx, mock.Anything)
 }
@@ -92,12 +115,11 @@ func TestWriterSetOutputsMissing(t *testing.T) {
 	output1 := &testutil.Operator{}
 	output1.On("ID").Return("output1")
 	writer := WriterOperator{
-		OutputIDs: OutputIDs{"output2"},
+		OutputIDs: []string{"output2"},
 	}
 
 	err := writer.SetOutputs([]operator.Operator{output1})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "does not exist")
+	require.ErrorContains(t, err, "does not exist")
 }
 
 func TestWriterSetOutputsInvalid(t *testing.T) {
@@ -105,12 +127,11 @@ func TestWriterSetOutputsInvalid(t *testing.T) {
 	output1.On("ID").Return("output1")
 	output1.On("CanProcess").Return(false)
 	writer := WriterOperator{
-		OutputIDs: OutputIDs{"output1"},
+		OutputIDs: []string{"output1"},
 	}
 
 	err := writer.SetOutputs([]operator.Operator{output1})
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "can not process entries")
+	require.ErrorContains(t, err, "can not process entries")
 }
 
 func TestWriterSetOutputsValid(t *testing.T) {
@@ -121,7 +142,7 @@ func TestWriterSetOutputsValid(t *testing.T) {
 	output2.On("ID").Return("output2")
 	output2.On("CanProcess").Return(true)
 	writer := WriterOperator{
-		OutputIDs: OutputIDs{"output1", "output2"},
+		OutputIDs: []string{"output1", "output2"},
 	}
 
 	err := writer.SetOutputs([]operator.Operator{output1, output2})
@@ -129,82 +150,33 @@ func TestWriterSetOutputsValid(t *testing.T) {
 	require.Equal(t, []operator.Operator{output1, output2}, writer.Outputs())
 }
 
-func TestUnmarshalJSONString(t *testing.T) {
-	bytes := []byte("{\"output\":\"test\"}")
-	var config WriterConfig
-	err := json.Unmarshal(bytes, &config)
-	require.NoError(t, err)
-	require.Equal(t, OutputIDs{"test"}, config.OutputIDs)
-}
-
-func TestUnmarshalJSONArray(t *testing.T) {
-	bytes := []byte("{\"output\":[\"test1\",\"test2\"]}")
-	var config WriterConfig
-	err := json.Unmarshal(bytes, &config)
-	require.NoError(t, err)
-	require.Equal(t, OutputIDs{"test1", "test2"}, config.OutputIDs)
-}
-
-func TestUnmarshalJSONInvalidValue(t *testing.T) {
-	bytes := []byte("..")
-	var config WriterConfig
-	err := json.Unmarshal(bytes, &config)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid character")
-}
-
-func TestUnmarshalJSONInvalidString(t *testing.T) {
-	bytes := []byte("{\"output\": true}")
-	var config WriterConfig
-	err := json.Unmarshal(bytes, &config)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "value is not of type string or string array")
-}
-
-func TestUnmarshalJSONInvalidArray(t *testing.T) {
-	bytes := []byte("{\"output\":[\"test1\", true]}")
-	var config WriterConfig
-	err := json.Unmarshal(bytes, &config)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "value in array is not of type string")
-}
-
-func TestUnmarshalYAMLString(t *testing.T) {
-	bytes := []byte("output: test")
-	var config WriterConfig
-	err := yaml.Unmarshal(bytes, &config)
-	require.NoError(t, err)
-	require.Equal(t, OutputIDs{"test"}, config.OutputIDs)
-}
-
-func TestUnmarshalYAMLArray(t *testing.T) {
-	bytes := []byte("output: [test1, test2]")
-	var config WriterConfig
-	err := yaml.Unmarshal(bytes, &config)
-	require.NoError(t, err)
-	require.Equal(t, OutputIDs{"test1", "test2"}, config.OutputIDs)
-}
-
-func TestUnmarshalYAMLInvalidValue(t *testing.T) {
-	bytes := []byte("..")
-	var config WriterConfig
-	err := yaml.Unmarshal(bytes, &config)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "cannot unmarshal")
-}
-
-func TestUnmarshalYAMLInvalidString(t *testing.T) {
-	bytes := []byte("output: true")
-	var config WriterConfig
-	err := yaml.Unmarshal(bytes, &config)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "value is not of type string or string array")
-}
-
-func TestUnmarshalYAMLInvalidArray(t *testing.T) {
-	bytes := []byte("output: [test1, true]")
-	var config WriterConfig
-	err := yaml.Unmarshal(bytes, &config)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "value in array is not of type string")
+func TestUnmarshalWriterConfig(t *testing.T) {
+	operatortest.ConfigUnmarshalTests{
+		DefaultConfig: newHelpersConfig(),
+		TestsFile:     filepath.Join(".", "testdata", "writer.yaml"),
+		Tests: []operatortest.ConfigUnmarshalTest{
+			{
+				Name: "string",
+				Expect: func() *helpersConfig {
+					c := newHelpersConfig()
+					c.Writer = NewWriterConfig(helpersTestType, helpersTestType)
+					c.Writer.OutputIDs = []string{"test"}
+					return c
+				}(),
+			},
+			{
+				Name: "slice",
+				Expect: func() *helpersConfig {
+					c := newHelpersConfig()
+					c.Writer = NewWriterConfig(helpersTestType, helpersTestType)
+					c.Writer.OutputIDs = []string{"test1", "test2"}
+					return c
+				}(),
+			},
+			{
+				Name:      "invalid",
+				ExpectErr: true,
+			},
+		},
+	}.Run(t)
 }

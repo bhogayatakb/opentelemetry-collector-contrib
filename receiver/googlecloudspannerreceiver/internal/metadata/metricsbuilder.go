@@ -1,16 +1,5 @@
-// Copyright  The OpenTelemetry Authors
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+// Copyright The OpenTelemetry Authors
+// SPDX-License-Identifier: Apache-2.0
 
 package metadata // import "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver/internal/metadata"
 
@@ -19,8 +8,6 @@ import (
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/receiver/googlecloudspannerreceiver/internal/filter"
 )
-
-const instrumentationLibraryName = "otelcol/googlecloudspannermetrics"
 
 type MetricsBuilder interface {
 	Build(dataPoints []*MetricsDataPoint) (pmetric.Metrics, error)
@@ -55,23 +42,22 @@ func (b *metricsFromDataPointBuilder) Build(dataPoints []*MetricsDataPoint) (pme
 
 	ilms := rm.ScopeMetrics()
 	ilm := ilms.AppendEmpty()
-	ilm.Scope().SetName(instrumentationLibraryName)
+	ilm.Scope().SetName(ScopeName)
 
 	for key, points := range groupedDataPoints {
 		metric := ilm.Metrics().AppendEmpty()
 		metric.SetName(key.MetricName)
 		metric.SetUnit(key.MetricUnit)
-		metric.SetDataType(key.MetricDataType.MetricDataType())
 
 		var dataPointSlice pmetric.NumberDataPointSlice
-
-		switch key.MetricDataType.MetricDataType() {
-		case pmetric.MetricDataTypeGauge:
-			dataPointSlice = metric.Gauge().DataPoints()
-		case pmetric.MetricDataTypeSum:
-			metric.Sum().SetAggregationTemporality(key.MetricDataType.AggregationTemporality())
-			metric.Sum().SetIsMonotonic(key.MetricDataType.IsMonotonic())
+		switch key.MetricType.MetricType() {
+		case pmetric.MetricTypeGauge:
+			dataPointSlice = metric.SetEmptyGauge().DataPoints()
+		case pmetric.MetricTypeSum:
+			metric.SetEmptySum().SetAggregationTemporality(key.MetricType.AggregationTemporality())
+			metric.Sum().SetIsMonotonic(key.MetricType.IsMonotonic())
 			dataPointSlice = metric.Sum().DataPoints()
+		case pmetric.MetricTypeEmpty, pmetric.MetricTypeHistogram, pmetric.MetricTypeExponentialHistogram, pmetric.MetricTypeSummary:
 		}
 
 		for _, point := range points {
@@ -122,10 +108,7 @@ func (b *metricsFromDataPointBuilder) filter(metricName string, dataPoints []*Me
 		}
 	}
 
-	filteredItems, err := itemFilter.Filter(itemsForFiltering)
-	if err != nil {
-		return nil, err
-	}
+	filteredItems := itemFilter.Filter(itemsForFiltering)
 
 	// Creating new slice instead of removing elements from source slice because removing by value is not efficient operation.
 	// Need to use such approach for preserving data points order.
